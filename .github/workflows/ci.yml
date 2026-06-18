@@ -19,6 +19,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-viewarr:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +54,7 @@ jobs:
   fitsview:
     needs: build-viewarr
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: jupyterlab-fitsview
@@ -115,6 +117,7 @@ jobs:
   fitsview-isolated:
     needs: fitsview
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Install Python
         uses: actions/setup-python@v5
@@ -136,6 +139,7 @@ jobs:
     name: fitsview integration tests
     needs: fitsview
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/pw-browsers
     defaults:
@@ -174,10 +178,22 @@ jobs:
 
       - name: Install browser
         working-directory: jupyterlab-fitsview/ui-tests
+        timeout-minutes: 12
         run: |
           set -eux
           jlpm playwright install-deps
-          jlpm playwright install chromium
+          # Playwright downloads can stall indefinitely (no built-in network
+          # timeout). Bound each attempt and retry so a hung fetch fails fast
+          # instead of blocking the whole workflow.
+          for attempt in 1 2 3; do
+            if timeout --kill-after=30 300 jlpm playwright install chromium; then
+              exit 0
+            fi
+            echo "::warning::playwright browser install attempt $attempt failed/stalled; retrying"
+            sleep 10
+          done
+          echo "::error::playwright browser install failed after 3 attempts"
+          exit 1
 
       - name: Execute integration tests
         working-directory: jupyterlab-fitsview/ui-tests
@@ -198,6 +214,7 @@ jobs:
   pyviewarr:
     needs: build-viewarr
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: pyviewarr
@@ -239,7 +256,19 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
+        timeout-minutes: 12
+        run: |
+          set -eux
+          # Bound + retry: Playwright downloads can stall with no timeout.
+          for attempt in 1 2 3; do
+            if timeout --kill-after=30 300 npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "::warning::playwright install attempt $attempt failed/stalled; retrying"
+            sleep 10
+          done
+          echo "::error::playwright install failed after 3 attempts"
+          exit 1
 
       - name: Run Playwright E2E tests
         run: npx playwright test
@@ -268,6 +297,7 @@ jobs:
   publish-fitsview:
     needs: [fitsview-isolated, fitsview-integration]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: pypi
     permissions:
       id-token: write
@@ -283,6 +313,7 @@ jobs:
   publish-pyviewarr:
     needs: [pyviewarr]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: pypi
     permissions:
       id-token: write

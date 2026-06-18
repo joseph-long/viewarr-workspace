@@ -63,6 +63,15 @@ jobs:
         with:
           fetch-depth: 0  # need tags for hatch-vcs (version from git tag)
 
+      # Pin the version from the release tag BEFORE any build step. The build
+      # (e.g. jlpm install rewriting yarn.lock) dirties the tree, which
+      # setuptools_scm would otherwise read as "one commit past the tag" and
+      # bump to <next>.dev0 -- diverging from pyviewarr. This keeps both packages
+      # locked to the exact tag version.
+      - name: Pin version from release tag
+        if: github.event_name == 'release'
+        run: echo "SETUPTOOLS_SCM_PRETEND_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Download viewarr pkg
         uses: actions/download-artifact@v4
         with:
@@ -239,6 +248,12 @@ jobs:
       - name: Mark workspace safe for git
         run: git config --global --add safe.directory '*'
 
+      # See the matching step in the fitsview job: pin the version from the
+      # release tag so a build-dirtied tree can't bump it to <next>.dev0.
+      - name: Pin version from release tag
+        if: github.event_name == 'release'
+        run: echo "SETUPTOOLS_SCM_PRETEND_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Download viewarr pkg
         uses: actions/download-artifact@v4
         with:
@@ -325,6 +340,8 @@ jobs:
           path: dist
       - run: ls -R dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   publish-pyviewarr:
     needs: [pyviewarr]
@@ -341,3 +358,5 @@ jobs:
           path: dist
       - run: ls -R dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

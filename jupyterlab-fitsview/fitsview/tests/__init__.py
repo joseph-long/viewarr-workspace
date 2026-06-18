@@ -1,0 +1,1 @@
+# fitsview tests package

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyviewarr"
+version = "0.3.3"
+dependencies = ["anywidget>=0.9,<0.10", "numpy>=2.0,<3"]
+readme = "README.md"
+requires-python = ">=3.10"
+
+# For projects not using `uv`, you can install these development dependencies with:
+# `pip install -e ".[dev]"`
+# If you're using `uv` for development, feel free to remove this section.
+[project.optional-dependencies]
+dev = ["watchfiles", "jupyterlab", "pytest>=7.0", "matplotlib>=3.5"]
+
+# Dependency groups (recognized by `uv`). For more details, visit:
+# https://peps.python.org/pep-0735/
+[dependency-groups]
+dev = ["watchfiles", "jupyterlab", "pytest>=7.0", "matplotlib>=3.5"]
+
+
+[tool.hatch.build]
+only-packages = true
+artifacts = ["src/pyviewarr/static/*"]
+
+[tool.hatch.build.hooks.jupyter-builder]
+build-function = "hatch_jupyter_builder.npm_builder"
+ensured-targets = ["src/pyviewarr/static/widget.js"]
+skip-if-exists = ["src/pyviewarr/static/widget.js"]
+dependencies = ["hatch-jupyter-builder>=0.5.0"]
+
+[tool.hatch.build.hooks.jupyter-builder.build-kwargs]
+npm = "npm"
+build_cmd = "build:all"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]

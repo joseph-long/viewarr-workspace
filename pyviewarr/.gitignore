@@ -1,0 +1,17 @@
+node_modules
+.venv
+dist
+.DS_Store
+.agent-context
+
+# Python
+__pycache__
+.ipynb_checkpoints
+
+# Built files
+src/pyviewarr/static
+viewarr/target
+viewarr/pkg
+
+# playwright test artifacts
+test-results/

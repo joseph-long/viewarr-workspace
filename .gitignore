@@ -1,0 +1,48 @@
+# Top-level ignores for the viewarr workspace.
+# Each subpackage also has its own .gitignore, which remains authoritative
+# for paths inside it (e.g. viewarr/.gitignore covers target/ and pkg/).
+
+# OS
+.DS_Store
+
+# Python
+**/__pycache__/
+*.py[cod]
+**/.venv/
+**/.pytest_cache/
+**/.mypy_cache/
+.coverage
+.coverage.*
+**/coverage/
+htmlcov/
+*.egg-info/
+
+# Node / Yarn
+**/node_modules/
+**/.yarn/cache/
+**/.yarn/install-state.gz
+*.log
+
+# Build outputs
+**/dist/
+**/build/
+**/*.tsbuildinfo
+.eslintcache
+.stylelintcache
+
+# viewarr (Rust/WASM) build artifacts
+viewarr/target/
+viewarr/pkg/
+*.wasm
+
+# Package-specific build artifacts
+jupyterlab-fitsview/lib/
+jupyterlab-fitsview/fitsview/labextension/
+jupyterlab-fitsview/fitsview/_version.py
+pyviewarr/src/pyviewarr/static/
+
+# Test artifacts
+**/test-results/
+**/playwright-report/
+**/.ipynb_checkpoints/
+junit.xml

@@ -1,0 +1,49 @@
+[package]
+name = "viewarr"
+version = "0.1.0"
+edition = "2021"
+authors = ["Joseph D. Long <me@joseph-long.com>"]
+license = "MIT"
+description = "A browser-based array/image viewer using Rust, WASM, and egui"
+repository = "https://github.com/joseph-long/viewarr"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+
+# [patch.crates-io]
+# egui = { path = "../../egui/crates/egui" }
+# eframe = { path = "../../egui/crates/eframe" }
+# egui_glow = { path = "../../egui/crates/egui_glow" }
+
+[dependencies]
+egui = "0.33.3"
+eframe = "0.33.3"
+egui-phosphor = "0.11"
+log = "0.4"
+wasm-bindgen = "=0.2.108"
+wasm-bindgen-futures = "=0.4.58"
+js-sys = "=0.3.85"
+serde = { version = "1.0", features = ["derive"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "27.0", default-features = false, features = ["web"] }
+
+[dependencies.web-sys]
+version = "=0.3.85"
+features = [
+    "console",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+]
+
+[profile.release]
+opt-level = 2
+lto = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O2"]

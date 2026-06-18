@@ -1,0 +1,21 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v4.5.1
+_src_path: https://github.com/jupyterlab/extension-template
+author_email: me@joseph-long.com
+author_name: Joseph D. Long
+create_claude_symlink: false
+create_gemini_symlink: false
+data_format: string
+file_extension: fits
+has_ai_rules: true
+has_binder: true
+kind: mimerenderer
+labextension_name: fitsview
+mimetype: image/fits
+mimetype_name: fits
+project_short_description: View FITS files in JupyterLab.
+python_name: fitsview
+repository: ''
+test: true
+viewer_name: FITS Viewer
+

@@ -1,0 +1,35 @@
+{
+  "name": "viewarr",
+  "version": "0.1.0",
+  "description": "A browser-based array/image viewer using Rust, WASM, and egui",
+  "main": "pkg/wrapper.js",
+  "module": "pkg/wrapper.js",
+  "types": "pkg/wrapper.d.ts",
+  "files": [
+    "pkg/"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build --target web --out-dir pkg",
+    "build:wasm:dev": "wasm-pack build --target web --out-dir pkg --dev",
+    "postbuild:wasm": "cp js/index.js pkg/wrapper.js && cp js/index.d.ts pkg/wrapper.d.ts && node -e \"const p=require('./pkg/package.json'); p.main='wrapper.js'; p.types='wrapper.d.ts'; p.files.push('wrapper.js','wrapper.d.ts'); require('fs').writeFileSync('./pkg/package.json', JSON.stringify(p, null, 2));\"",
+    "postbuild:wasm:dev": "cp js/index.js pkg/wrapper.js && cp js/index.d.ts pkg/wrapper.d.ts && node -e \"const p=require('./pkg/package.json'); p.main='wrapper.js'; p.types='wrapper.d.ts'; p.files.push('wrapper.js','wrapper.d.ts'); require('fs').writeFileSync('./pkg/package.json', JSON.stringify(p, null, 2));\"",
+    "build": "npm run build:wasm && npm run postbuild:wasm",
+    "build:dev": "npm run build:wasm:dev && npm run postbuild:wasm:dev",
+    "clean": "rm -rf pkg target"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joseph-long/viewarr.git"
+  },
+  "keywords": [
+    "wasm",
+    "webassembly",
+    "rust",
+    "egui",
+    "image-viewer",
+    "array-viewer",
+    "fits"
+  ],
+  "author": "",
+  "license": "MIT"
+}

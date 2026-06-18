@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# perform a development install of fitsview
+set -ex  # echo commands, fail on nonzero exit
+
+# Initialize git submodules (required for viewarr)
+git submodule update --init --recursive
+
+if ! command -v rustup; then
+    # Install Rust via rustup with default paths/options
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+fi
+
+# Source the Rust environment to make cargo available
+source ~/.cargo/env
+
+# Install wasm-pack via cargo (required for building viewarr WASM)
+cargo install wasm-pack
+
+# Build the viewarr WASM component
+cd viewarr && npm run build
+cd ..
+
+# Install/update dependencies and build the JupyterLab extension
+# (jlpm install copies WASM to node_modules; jlpm build bundles everything)
+jlpm install
+jlpm build
+
+# verify the environment is self-consistent before even starting
+python -m pip check
+
+# install the labextension
+python -m pip install -e .
+python -m jupyter labextension develop --overwrite .
+
+# verify the environment the extension didn't break anything
+python -m pip check
+
+# list the extensions
+jupyter server extension list
+
+# initially list installed extensions to determine if there are any surprises
+jupyter labextension list

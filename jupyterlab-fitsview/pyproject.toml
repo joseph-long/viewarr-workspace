@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.5.0", "jupyterlab>=4.0.0,<5", "hatch-nodejs-version>=0.3.2"]
+requires = ["hatchling>=1.5.0", "jupyterlab>=4.0.0,<5", "hatch-nodejs-version>=0.3.2", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
@@ -29,8 +29,7 @@ dependencies = [
     "astropy>=5.0",
     "numpy",
 ]
-version = "0.3.4dev"
-dynamic = ["description", "urls", "authors", "keywords"]
+dynamic = ["version", "description", "urls", "authors", "keywords"]
 
 [project.optional-dependencies]
 test = [
@@ -42,9 +41,14 @@ test = [
     "pygments",
 ]
 
+# Single source of truth for the version: the monorepo git tag (e.g. v0.3.4),
+# shared with pyviewarr so both packages always release the same version.
+# root = ".." points setuptools_scm at the monorepo root where .git lives.
 [tool.hatch.version]
-source = "nodejs"
+source = "vcs"
+raw-options = { root = "..", local_scheme = "no-local-version" }
 
+# Project metadata (description/authors/urls/keywords) still comes from package.json.
 [tool.hatch.metadata.hooks.nodejs]
 fields = ["description", "authors", "urls", "keywords"]
 

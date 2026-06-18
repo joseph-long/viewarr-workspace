@@ -1,13 +1,20 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "pyviewarr"
-version = "0.3.3"
 dependencies = ["anywidget>=0.9,<0.10", "numpy>=2.0,<3"]
 readme = "README.md"
 requires-python = ">=3.10"
+dynamic = ["version"]
+
+# Single source of truth for the version: the monorepo git tag (e.g. v0.3.4),
+# shared with jupyterlab-fitsview so both packages always release the same
+# version. root = ".." points setuptools_scm at the monorepo root (.git).
+[tool.hatch.version]
+source = "vcs"
+raw-options = { root = "..", local_scheme = "no-local-version" }
 
 # For projects not using `uv`, you can install these development dependencies with:
 # `pip install -e ".[dev]"`

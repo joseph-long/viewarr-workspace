@@ -60,6 +60,8 @@ jobs:
         working-directory: jupyterlab-fitsview
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need tags for hatch-vcs (version from git tag)
 
       - name: Download viewarr pkg
         uses: actions/download-artifact@v4
@@ -228,6 +230,14 @@ jobs:
         working-directory: pyviewarr
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need tags for hatch-vcs (version from git tag)
+
+      # The container runs as root while the checkout is owned by another uid;
+      # without this, setuptools_scm's `git describe` fails with "dubious
+      # ownership" and the version can't be resolved.
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory '*'
 
       - name: Download viewarr pkg
         uses: actions/download-artifact@v4

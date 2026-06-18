@@ -10,6 +10,12 @@
   },
   "devDependencies": {
     "@jupyterlab/galata": "^5.0.5",
-    "@playwright/test": "^1.37.0"
+    "@playwright/test": "1.61.0"
+  },
+  "comment:playwright": "Pinned exactly to the Playwright Docker image tag in ../../.github/workflows/ci.yml (mcr.microsoft.com/playwright:v1.61.0-noble). Bump BOTH together; CI fails if they drift.",
+  "resolutions": {
+    "@playwright/test": "1.61.0",
+    "playwright": "1.61.0",
+    "playwright-core": "1.61.0"
   }
 }

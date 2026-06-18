@@ -140,16 +140,25 @@ jobs:
     needs: fitsview
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Run inside the official Playwright image: Chromium + the matching system
+    # libraries are preinstalled, so there is no browser download to stall on.
+    # The image tag MUST stay in sync with PLAYWRIGHT_VERSION below and with the
+    # pinned @playwright/test in ui-tests/package.json. The "Verify Playwright"
+    # step fails the job if they drift (which would otherwise trigger a download).
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.0-noble
     env:
-      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/pw-browsers
+      PLAYWRIGHT_VERSION: "1.61.0"
     defaults:
       run:
         working-directory: jupyterlab-fitsview
     steps:
       - uses: actions/checkout@v4
 
-      - name: Base Setup
-        uses: jupyterlab/maintainer-tools/.github/actions/base-setup@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Download extension package
         uses: actions/download-artifact@v4
@@ -157,43 +166,35 @@ jobs:
           name: fitsview-dist
           path: jupyterlab-fitsview/dist
 
-      - name: Install the extension
+      - name: Install the extension (provides jlpm + jupyterlab)
         run: |
           set -eux
           python -m pip install "jupyterlab>=4.0.0,<5" dist/fitsview*.whl
 
-      - name: Install dependencies
+      - name: Install ui-tests dependencies
         working-directory: jupyterlab-fitsview/ui-tests
         env:
           YARN_ENABLE_IMMUTABLE_INSTALLS: 0
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
         run: jlpm install
 
-      - name: Set up browser cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/pw-browsers
-          key: ${{ runner.os }}-${{ hashFiles('jupyterlab-fitsview/ui-tests/yarn.lock') }}
-
-      - name: Install browser
+      - name: Verify Playwright browsers are preinstalled (fail instead of downloading)
         working-directory: jupyterlab-fitsview/ui-tests
-        timeout-minutes: 12
         run: |
-          set -eux
-          jlpm playwright install-deps
-          # Playwright downloads can stall indefinitely (no built-in network
-          # timeout). Bound each attempt and retry so a hung fetch fails fast
-          # instead of blocking the whole workflow.
-          for attempt in 1 2 3; do
-            if timeout --kill-after=30 300 jlpm playwright install chromium; then
-              exit 0
-            fi
-            echo "::warning::playwright browser install attempt $attempt failed/stalled; retrying"
-            sleep 10
-          done
-          echo "::error::playwright browser install failed after 3 attempts"
-          exit 1
+          set -eu
+          echo "Image Playwright (PLAYWRIGHT_VERSION): ${PLAYWRIGHT_VERSION}"
+          INSTALLED="$(jlpm playwright --version | awk '{print $NF}')"
+          echo "Resolved @playwright/test:             ${INSTALLED}"
+          if [ "${INSTALLED}" != "${PLAYWRIGHT_VERSION}" ]; then
+            echo "::error::Playwright version drift: project resolves ${INSTALLED} but this job runs in the v${PLAYWRIGHT_VERSION} image, so browsers would be re-downloaded. Bump the container image tag, the PLAYWRIGHT_VERSION env, and the pinned @playwright/test (+ yarn.lock) together."
+            exit 1
+          fi
+          LOC="$(jlpm playwright install chromium --dry-run 2>&1 | grep -iEo '/[^[:space:]]*ms-playwright[^[:space:]]*' | head -n1 || true)"
+          if [ -n "${LOC}" ] && [ ! -e "${LOC}" ]; then
+            echo "::error::Chromium for Playwright ${INSTALLED} is not present at ${LOC}; a download would be triggered (image/version drift)."
+            exit 1
+          fi
+          echo "OK: Playwright ${INSTALLED} matches the image; no browser download needed."
 
       - name: Execute integration tests
         working-directory: jupyterlab-fitsview/ui-tests
@@ -215,6 +216,13 @@ jobs:
     needs: build-viewarr
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Run inside the official Playwright image (browsers + system libs
+    # preinstalled). Keep the tag in sync with PLAYWRIGHT_VERSION and the pinned
+    # @playwright/test in package.json; the "Verify Playwright" step enforces it.
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.0-noble
+    env:
+      PLAYWRIGHT_VERSION: "1.61.0"
     defaults:
       run:
         working-directory: pyviewarr
@@ -230,22 +238,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: 3.12
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
+          python-version: '3.12'
 
       - name: Install JavaScript dependencies
         run: npm install
 
-      # Build the widget (using the shared viewarr pkg) BEFORE installing the
-      # Python package: the hatch-jupyter-builder hook's build_cmd is `build:all`,
-      # which would otherwise try to rebuild the WASM with wasm-pack (not installed
-      # in this job). With src/pyviewarr/static/widget.js already present,
-      # skip-if-exists short-circuits the hook for both the editable install and
-      # `python -m build`.
+      # Build the widget from the shared viewarr pkg before the Python install.
+      # The editable install runs the hatch-jupyter-builder hook regardless of
+      # skip-if-exists, which is why build_cmd is `build` (bundle), not `build:all`
+      # (recompile WASM with wasm-pack, absent here) -- see pyproject.toml.
       - name: Build widget (uses shared viewarr pkg)
         run: npm run build
 
@@ -255,20 +256,22 @@ jobs:
           pip install build
           pip install -e ".[dev]"
 
-      - name: Install Playwright browser
-        timeout-minutes: 12
+      - name: Verify Playwright browsers are preinstalled (fail instead of downloading)
         run: |
-          set -eux
-          # Bound + retry: Playwright downloads can stall with no timeout.
-          for attempt in 1 2 3; do
-            if timeout --kill-after=30 300 npx playwright install --with-deps chromium; then
-              exit 0
-            fi
-            echo "::warning::playwright install attempt $attempt failed/stalled; retrying"
-            sleep 10
-          done
-          echo "::error::playwright install failed after 3 attempts"
-          exit 1
+          set -eu
+          echo "Image Playwright (PLAYWRIGHT_VERSION): ${PLAYWRIGHT_VERSION}"
+          INSTALLED="$(npx playwright --version | awk '{print $NF}')"
+          echo "Resolved @playwright/test:             ${INSTALLED}"
+          if [ "${INSTALLED}" != "${PLAYWRIGHT_VERSION}" ]; then
+            echo "::error::Playwright version drift: project resolves ${INSTALLED} but this job runs in the v${PLAYWRIGHT_VERSION} image, so browsers would be re-downloaded. Bump the container image tag, the PLAYWRIGHT_VERSION env, and the pinned @playwright/test (+ package-lock.json) together."
+            exit 1
+          fi
+          LOC="$(npx playwright install chromium --dry-run 2>&1 | grep -iEo '/[^[:space:]]*ms-playwright[^[:space:]]*' | head -n1 || true)"
+          if [ -n "${LOC}" ] && [ ! -e "${LOC}" ]; then
+            echo "::error::Chromium for Playwright ${INSTALLED} is not present at ${LOC}; a download would be triggered (image/version drift)."
+            exit 1
+          fi
+          echo "OK: Playwright ${INSTALLED} matches the image; no browser download needed."
 
       - name: Run Playwright E2E tests
         run: npx playwright test
@@ -278,11 +281,12 @@ jobs:
 
       - name: Verify package contents
         run: |
+          set -eu
           # viewarr WASM is present (via the shared pkg)
-          if [[ ! -e viewarr/pkg/viewarr_bg.wasm ]]; then exit 1; fi
-          # built package contains the expected files
-          tar -tf dist/*.tar.gz | grep -E "(widget\.js|widget\.css)" || exit 1
-          unzip -l dist/*.whl | grep widget.js || exit 1
+          test -e viewarr/pkg/viewarr_bg.wasm
+          # built sdist + wheel contain the bundled widget assets
+          tar -tf dist/*.tar.gz | grep -E "(widget\.js|widget\.css)"
+          python -c "import glob,zipfile; w=glob.glob('dist/*.whl')[0]; names=zipfile.ZipFile(w).namelist(); assert any(n.endswith('widget.js') for n in names), names"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -9,7 +9,7 @@
     "test:update": "jlpm playwright test --update-snapshots"
   },
   "devDependencies": {
-    "@jupyterlab/galata": "^5.0.5",
+    "@jupyterlab/galata": "^5.6.0",
     "@playwright/test": "1.61.0"
   },
   "comment:playwright": "Pinned exactly to the Playwright Docker image tag in ../../.github/workflows/ci.yml (mcr.microsoft.com/playwright:v1.61.0-noble). Bump BOTH together; CI fails if they drift.",

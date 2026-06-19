@@ -1,7 +1,8 @@
 import type { RenderProps } from "@anywidget/types";
 import {
 	createViewer,
-	setImageData,
+	setCube,
+	setSliceData,
 	destroyViewer,
 	getContrast,
 	setContrast,
@@ -28,6 +29,7 @@ import {
 	setMarkers,
 	onStateChange,
 	onClick,
+	onSliceRequest,
 	clearCallbacks,
 	type ViewerState,
 	type ClickEvent,
@@ -123,12 +125,7 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 	container.style.width = `${model.get("widget_width")}px`;
 	container.style.height = `${model.get("widget_height")}px`;
 
-	// Create controls container
-	const controlsContainer = document.createElement("div");
-	controlsContainer.classList.add("pyviewarr-controls");
-
 	el.classList.add("pyviewarr");
-	el.appendChild(controlsContainer);
 	el.appendChild(container);
 
 	let viewerReady = false;
@@ -351,7 +348,10 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 				dataView.byteOffset,
 				dataView.byteOffset + dataView.byteLength
 			) as ArrayBuffer;
-			setImageData(viewerId, buffer, imageWidth, imageHeight, dtype);
+			// Tag the image with its slice indices so the widget can track the
+			// slider position and correlate play-mode prefetch responses.
+			const indices = model.get("current_slice_indices");
+			setSliceData(viewerId, buffer, imageWidth, imageHeight, dtype, indices);
 			lastAppliedImageToken = imageUpdateToken;
 		}
 	}
@@ -366,81 +366,33 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 	}
 
 	/**
-	 * Render slice controls for leading axes.
+	 * Declare the cube's sliceable leading axes to the viewer widget, which
+	 * renders the slice + play controls itself. Slices are still served on
+	 * demand from Python in response to onSliceRequest.
 	 */
-	function renderControls(): void {
-		if (isDisposed) return;
-
+	function updateCube(): void {
+		if (!viewerReady || isDisposed) return;
 		const shape = model.get("shape");
-		const indices = model.get("current_slice_indices");
-		const numLeadingAxes = shape.length - 2;
-
-		if (numLeadingAxes === 0) {
-			controlsContainer.innerHTML = '';
-			return;
-		}
-
-		let html = '';
-		for (let axis = 0; axis < numLeadingAxes; axis++) {
-			const axisSize = shape[axis];
-			const currentIndex = indices[axis];
-			const axisLabel = numLeadingAxes === 1 ? 'Slice' : `Axis ${axis}`;
-
-			html += `
-				<div class="pyviewarr-sliceControl" data-axis="${axis}">
-					<button class="pyviewarr-sliceButton pyviewarr-prevButton"
-							data-axis="${axis}"
-							data-direction="prev">
-						◀
-					</button>
-					<span class="pyviewarr-sliceLabel">
-						${axisLabel}: <strong>${currentIndex + 1}</strong> / ${axisSize}
-					</span>
-					<button class="pyviewarr-sliceButton pyviewarr-nextButton"
-							data-axis="${axis}"
-							data-direction="next">
-						▶
-					</button>
-				</div>
-			`;
-		}
-
-		controlsContainer.innerHTML = html;
-
-		// Attach event listeners
-		const buttons = controlsContainer.querySelectorAll('.pyviewarr-sliceButton');
-		buttons.forEach(btn => {
-			btn.addEventListener('click', e => {
-				const target = e.currentTarget as HTMLElement;
-				const axis = parseInt(target.dataset.axis || '0', 10);
-				const direction = target.dataset.direction;
-				console.debug(e, `navigate ${axis} ${direction}`);
-				navigateSlice(axis, direction === 'next' ? 1 : -1);
-			});
-		});
+		const leading = shape.length > 2 ? shape.slice(0, shape.length - 2) : [];
+		setCube(viewerId, leading);
 	}
 
 	/**
-	 * Navigate to a different slice along a given axis.
+	 * Handle a slice request from the viewer widget (slider drag or play loop).
+	 * Updating the traitlet drives Python's on-demand slice extraction, which
+	 * pushes the new slice back via updateImage -> setSliceData.
 	 */
-	function navigateSlice(axis: number, delta: number): void {
-		const shape = model.get("shape");
-		const indices = [...model.get("current_slice_indices")];
-		const axisSize = shape[axis];
-		let newIndex = indices[axis] + delta;
-
-		// Wrap around
-		if (newIndex < 0) {
-			newIndex = axisSize - 1;
-		} else if (newIndex >= axisSize) {
-			newIndex = 0;
+	function handleSliceRequest(indices: number[]): void {
+		if (!viewerReady || isDisposed) return;
+		const current = model.get("current_slice_indices") as number[];
+		if (
+			current.length === indices.length &&
+			current.every((v, i) => v === indices[i])
+		) {
+			return; // already on this slice
 		}
-
-		if (newIndex !== indices[axis]) {
-			indices[axis] = newIndex;
-			model.set("current_slice_indices", indices);
-			model.save_changes(); // Trigger sync to backend
-		}
+		model.set("current_slice_indices", indices);
+		model.save_changes(); // trigger Python-side slice extraction
 	}
 
 	// Wait for the container to be in the DOM before initializing the viewer.
@@ -457,6 +409,10 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 			// Register callback for state changes from the viewer
 			onStateChange(viewerId, handleViewerStateChange);
 			onClick(viewerId, handleShiftClick);
+			onSliceRequest(viewerId, handleSliceRequest);
+			// Declare cube axes (slice UI lives in the widget), then push the
+			// initial slice.
+			updateCube();
 			updateImage();
 			applyInitialViewerConfig();
 			// Initial sync from viewer to get default values
@@ -467,9 +423,6 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 				console.error("Failed to create viewarr viewer:", err);
 			}
 		});
-
-	// Initial render of controls
-	renderControls();
 
 	// Listen for data changes from Python
 	model.on("change:data", updateImage);
@@ -482,9 +435,8 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 	model.on("change:widget_width", updateDimensions);
 	model.on("change:widget_height", updateDimensions);
 
-	// Listen for shape and slice index changes to update controls
-	model.on("change:shape", renderControls);
-	model.on("change:current_slice_indices", renderControls);
+	// Re-declare cube axes when the array shape changes (slice UI is in the widget)
+	model.on("change:shape", updateCube);
 	model.on("change:viewer_config", applyInitialViewerConfig);
 
 	// Listen for viewer property changes from Python (only apply if not triggered by viewer sync)

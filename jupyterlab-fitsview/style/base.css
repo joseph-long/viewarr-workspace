@@ -26,7 +26,7 @@
   flex-direction: column;
 }
 
-/* Control bar containing HDU buttons and slice controls */
+/* Control bar containing HDU buttons (slice + play controls live in the viewer) */
 .jp-FITSViewer-controlBar {
   display: flex;
   flex-direction: column;
@@ -111,71 +111,6 @@
 .jp-FITSViewer-headerIcon:hover {
   opacity: 1;
   text-decoration: none;
-}
-
-.jp-FITSViewer-sliceControls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  padding: 6px 8px;
-}
-
-.jp-FITSViewer-sliceControls:empty {
-  display: none;
-  padding: 0;
-}
-
-.jp-FITSViewer-sliceControl {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.jp-FITSViewer-sliceButton {
-  margin-top: 8px;
-  padding: 6px 12px;
-  background: var(--jp-layout-color3);
-  color: var(--jp-ui-font-color1);
-  border: 1px solid var(--jp-border-color1);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.9em;
-}
-
-.jp-FITSViewer-sliceButton:hover {
-  background: var(--jp-layout-color4);
-}
-
-.jp-FITSViewer-sliceControl .jp-FITSViewer-sliceButton {
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  margin: 0;
-  border: 1px solid var(--jp-border-color1);
-  border-radius: 4px;
-  background: var(--jp-layout-color2);
-  color: var(--jp-ui-font-color1);
-  cursor: pointer;
-  font-size: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.jp-FITSViewer-sliceControl .jp-FITSViewer-sliceButton:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.jp-FITSViewer-sliceControl .jp-FITSViewer-sliceButton:hover:not(:disabled) {
-  background: var(--jp-layout-color3);
-}
-
-.jp-FITSViewer-sliceLabel {
-  font-size: 13px;
-  color: var(--jp-ui-font-color1);
-  min-width: 100px;
-  text-align: center;
 }
 
 .jp-FITSViewer-viewerContainer {

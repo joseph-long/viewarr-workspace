@@ -77,7 +77,6 @@ export class FITSPanel extends Widget {
   private _sliceStates: Map<number, ISliceState> = new Map();
   // Currently active HDU index
   private _activeHduIndex: number | null = null;
-  private _sliceControlsContainer: HTMLDivElement | null = null;
   private _fetchAbortController: AbortController | null = null;
 
   constructor(context: DocumentRegistry.IContext<DocumentModel>) {
@@ -200,7 +199,6 @@ export class FITSPanel extends Widget {
         <div class="jp-FITSViewer-viewerPanel">
           <div class="jp-FITSViewer-controlBar">
             <div class="jp-FITSViewer-hduBar">${hduButtonsHtml}</div>
-            <div id="${this._baseViewerId}-controls" class="jp-FITSViewer-sliceControls"></div>
           </div>
           <div class="jp-FITSViewer-viewerStack">
             ${viewerContainersHtml}
@@ -220,10 +218,6 @@ export class FITSPanel extends Widget {
         this._viewerContainers.set(hdu.index, container);
       }
     }
-
-    this._sliceControlsContainer = document.getElementById(
-      `${this._baseViewerId}-controls`
-    ) as HTMLDivElement;
 
     // Wait for viewarr to be ready, then auto-display first viewable HDU
     // Note: We don't create the viewer here - it's created on-demand when needed
@@ -369,11 +363,49 @@ export class FITSPanel extends Widget {
       // Clear any placeholder content
       viewerContainer.innerHTML = '';
       await viewarr.createViewer(viewerId);
+      this._setupViewer(hduIndex, viewerId);
       return true;
     } catch (error) {
       console.error('Failed to create viewarr viewer:', error);
       return false;
     }
+  }
+
+  /**
+   * Declare the cube's sliceable leading axes to a freshly-created viewer and
+   * register the slice-request callback. The slice + play UI lives in the
+   * widget; slices are still served on demand from the FITS backend.
+   */
+  private _setupViewer(hduIndex: number, viewerId: string): void {
+    if (!viewarr) {
+      return;
+    }
+    const hdu = this._metadata?.hdus.find(h => h.index === hduIndex);
+    const shape = hdu?.shape;
+    if (!shape || shape.length < 2) {
+      return;
+    }
+    const leading = shape.length > 2 ? shape.slice(0, shape.length - 2) : [];
+    viewarr.setCube(viewerId, leading);
+    viewarr.onSliceRequest(viewerId, indices => {
+      void this._onSliceRequest(hduIndex, indices);
+    });
+  }
+
+  /**
+   * Handle a slice request from the viewer widget (slider drag or play loop):
+   * record the requested leading-axis indices and fetch that slice on demand.
+   */
+  private async _onSliceRequest(
+    hduIndex: number,
+    indices: number[]
+  ): Promise<void> {
+    const sliceState = this._sliceStates.get(hduIndex);
+    if (!sliceState) {
+      return;
+    }
+    sliceState.sliceIndices = indices.slice();
+    await this._fetchAndDisplaySlice();
   }
 
   /**
@@ -421,9 +453,6 @@ export class FITSPanel extends Widget {
       };
       this._sliceStates.set(hduIndex, sliceState);
     }
-
-    // Render slice controls for this HDU
-    this._renderSliceControls();
 
     // Check if viewer already has data loaded (don't re-fetch if switching back)
     const viewerId = this._getViewerId(hduIndex);
@@ -605,6 +634,7 @@ export class FITSPanel extends Widget {
         console.log('[FITSViewer] Clearing container and creating viewer');
         viewerContainer.innerHTML = '';
         await viewarr.createViewer(viewerId);
+        this._setupViewer(hduIndex, viewerId);
         console.log(
           '[FITSViewer] Viewer created, hasViewer:',
           viewarr.hasViewer(viewerId)
@@ -613,9 +643,9 @@ export class FITSPanel extends Widget {
         console.warn('[FITSViewer] No viewer container!');
       }
 
-      console.log('[FITSViewer] Calling setImageData');
-      viewarr.setImageData(viewerId, buffer, width, height, arrayType);
-      console.log('[FITSViewer] setImageData complete');
+      console.log('[FITSViewer] Calling setSliceData');
+      viewarr.setSliceData(viewerId, buffer, width, height, arrayType, sliceIndices);
+      console.log('[FITSViewer] setSliceData complete');
     } catch (error) {
       this._fetchAbortController = null;
       if ((error as Error).name === 'AbortError') {
@@ -624,90 +654,6 @@ export class FITSPanel extends Widget {
       }
       console.error('Failed to load slice:', error);
       progressContainer.innerHTML = `<span class="jp-FITSViewer-error">Error: ${error}</span>`;
-    }
-  }
-
-  /**
-   * Render slice navigation controls for leading axes
-   */
-  private _renderSliceControls(): void {
-    const sliceState = this._getActiveSliceState();
-    if (!this._sliceControlsContainer || !sliceState) {
-      return;
-    }
-
-    const { shape, sliceIndices } = sliceState;
-    const numLeadingAxes = shape.length - 2;
-
-    if (numLeadingAxes === 0) {
-      // No leading axes, hide controls
-      this._sliceControlsContainer.innerHTML = '';
-      return;
-    }
-
-    let html = '';
-    for (let axis = 0; axis < numLeadingAxes; axis++) {
-      const axisSize = shape[axis];
-      const currentIndex = sliceIndices[axis];
-      const axisLabel = numLeadingAxes === 1 ? 'Plane' : `Axis ${axis}`;
-
-      html += `
-        <div class="jp-FITSViewer-sliceControl" data-axis="${axis}">
-          <button class="jp-FITSViewer-sliceButton jp-FITSViewer-prevButton"
-                  data-axis="${axis}"
-                  data-direction="prev"
-                  ${currentIndex === 0 ? 'disabled' : ''}>
-            ◀
-          </button>
-          <span class="jp-FITSViewer-sliceLabel">
-            ${axisLabel}: <strong>${currentIndex + 1}</strong> / ${axisSize}
-          </span>
-          <button class="jp-FITSViewer-sliceButton jp-FITSViewer-nextButton"
-                  data-axis="${axis}"
-                  data-direction="next"
-                  ${currentIndex >= axisSize - 1 ? 'disabled' : ''}>
-            ▶
-          </button>
-        </div>
-      `;
-    }
-
-    this._sliceControlsContainer.innerHTML = html;
-
-    // Attach event listeners
-    const buttons = this._sliceControlsContainer.querySelectorAll(
-      '.jp-FITSViewer-sliceButton'
-    );
-    buttons.forEach(btn => {
-      btn.addEventListener('click', e => {
-        const target = e.currentTarget as HTMLElement;
-        const axis = parseInt(target.dataset.axis || '0', 10);
-        const direction = target.dataset.direction;
-        this._navigateSlice(axis, direction === 'next' ? 1 : -1);
-      });
-    });
-  }
-
-  /**
-   * Navigate to a different slice along a given axis
-   */
-  private _navigateSlice(axis: number, delta: number): void {
-    const sliceState = this._getActiveSliceState();
-    if (!sliceState) {
-      return;
-    }
-
-    const { shape, sliceIndices } = sliceState;
-    const axisSize = shape[axis];
-    const newIndex = Math.max(
-      0,
-      Math.min(axisSize - 1, sliceIndices[axis] + delta)
-    );
-
-    if (newIndex !== sliceIndices[axis]) {
-      sliceState.sliceIndices[axis] = newIndex;
-      this._renderSliceControls();
-      void this._fetchAndDisplaySlice();
     }
   }
 
@@ -756,8 +702,16 @@ export class FITSPanel extends Widget {
       const height = resultShape[resultShape.length - 2] || 1;
       const width = resultShape[resultShape.length - 1] || 1;
 
-      // Use arrayType from response for proper data interpretation
-      viewarr.setImageData(viewerId, buffer, width, height, arrayType);
+      // Tag the slice with its leading-axis indices so the widget can track the
+      // slider position and correlate play-mode prefetch responses.
+      viewarr.setSliceData(
+        viewerId,
+        buffer,
+        width,
+        height,
+        arrayType,
+        sliceIndices
+      );
     } catch (error) {
       console.error('Failed to load slice:', error);
     }

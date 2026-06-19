@@ -7,52 +7,6 @@
 	user-select: none;
 }
 
-.pyviewarr-controls {
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-	margin-bottom: 8px;
-	/* Disable text selection */
-	-webkit-user-select: none;
-	-moz-user-select: none;
-	-ms-user-select: none;
-	user-select: none;
-}
-
-.pyviewarr-sliceControl {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	font-size: var(--jp-ui-font-size1, 13px);
-}
-
-.pyviewarr-sliceButton {
-	width: 24px;
-	height: 24px;
-	border: 1px solid var(--jp-border-color1, var(--vscode-panel-border, #333));
-	background-color: var(--jp-layout-color1, var(--vscode-editor-background, #fff));
-	color: var(--jp-ui-font-color1, var(--vscode-foreground, #000));
-	cursor: pointer;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	font-size: 12px;
-	border-radius: 2px;
-}
-
-.pyviewarr-sliceButton:hover:not(:disabled) {
-	background-color: var(--jp-layout-color2, var(--vscode-list-hoverBackground, #f0f0f0));
-}
-
-.pyviewarr-sliceButton:disabled {
-	opacity: 0.5;
-	cursor: not-allowed;
-}
-
-.pyviewarr-sliceLabel {
-	white-space: nowrap;
-}
-
 .pyviewarr-container {
 	/* Use transparent background to inherit from the notebook environment.
 	   The canvas inside will render with its own background. */

@@ -15,3 +15,6 @@ viewarr/pkg
 
 # playwright test artifacts
 test-results/
+tests/e2e/screenshots/
+# notebooks the e2e suite creates via Jupyter "New Notebook"
+Untitled*.ipynb

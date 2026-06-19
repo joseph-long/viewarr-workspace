@@ -59,7 +59,7 @@ print('Created test.fits')`
     await expect(hduBar.locator('text=f32')).toBeVisible();
   });
 
-  test('should fetch data slice', async ({ page }) => {
+  test('should render the viewer canvas for a cube', async ({ page }) => {
     await page.filebrowser.open('test.fits');
 
     const viewer = page.getByRole('main').locator('.jp-FITSViewer');
@@ -70,12 +70,18 @@ print('Created test.fits')`
       'PRIMARY'
     );
 
-    // Click the test slice button
-    const sliceButton = viewer.locator('.jp-FITSViewer-sliceButton').last();
-    await sliceButton.click();
+    // The slice + play controls for the cube's leading axis now live inside the
+    // egui canvas (no longer DOM elements), so we assert the viewer canvas for
+    // the first HDU renders.
+    const canvas = viewer.locator('.jp-FITSViewer-viewerContainer canvas').first();
+    await expect(canvas).toBeVisible();
 
-    // Wait for slice label to update
-    const sliceResult = viewer.locator('.jp-FITSViewer-sliceLabel').first();
-    await expect(sliceResult).toContainText(/.*Plane:\s+2\s+\/\s+2.*/);
+    // The in-canvas slice/play bar can't be asserted on via the DOM, so save a
+    // screenshot for human verification. The test cube is 3D (2, 50, 50), so the
+    // top-center slice slider + play/speed controls should be visible.
+    await page.waitForTimeout(2000); // let egui paint the controls + first slice
+    await viewer.screenshot({
+      path: 'screenshots/fitsview-cube.png'
+    });
   });
 });

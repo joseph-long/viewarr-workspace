@@ -59,6 +59,26 @@ declare module "viewarr" {
 	): void;
 
 	/**
+	 * Declare the sliceable leading axes of an N-D cube. The widget renders the
+	 * slice + play controls; pass an empty array for a plain 2D image.
+	 * @param dims - Lengths of the leading (sliceable) axes, outer→inner.
+	 */
+	export function setCube(containerId: string, dims: number[]): void;
+
+	/**
+	 * Set image data for a specific cube slice, tagged with its slice indices.
+	 * @param indices - Slice indices this image corresponds to (may be empty).
+	 */
+	export function setSliceData(
+		containerId: string,
+		buffer: ArrayBuffer,
+		width: number,
+		height: number,
+		dtype: string,
+		indices: number[]
+	): void;
+
+	/**
 	 * Destroy a viewer instance and clean up resources.
 	 * @param containerId - The ID of the container (viewer instance).
 	 */
@@ -111,6 +131,10 @@ declare module "viewarr" {
 	export function onClick(
 		containerId: string,
 		callback: (event: ClickEvent) => void
+	): void;
+	export function onSliceRequest(
+		containerId: string,
+		callback: (indices: number[]) => void
 	): void;
 	export function clearCallbacks(containerId: string): void;
 	export function setViewerState(containerId: string, state: ViewerStateConfig): void;

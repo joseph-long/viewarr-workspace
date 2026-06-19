@@ -41,6 +41,9 @@ pub struct ViewerCallbacks {
     pub on_state_change: Option<js_sys::Function>,
     /// Called when the user shift-clicks on the image (continuous image coordinates)
     pub on_click: Option<js_sys::Function>,
+    /// Called when the widget needs a cube slice fetched (slider drag / play loop).
+    /// Receives the requested slice indices as a JS number array.
+    pub on_slice_request: Option<js_sys::Function>,
 }
 
 /// Callbacks that can be registered from JavaScript
@@ -152,20 +155,59 @@ impl ViewerHandle {
             )));
         }
 
-        // Determine if the source data is integer-typed (for display formatting)
-        let is_integer = matches!(
-            array_type,
-            "i8" | "u8" | "i16" | "u16" |
-            "i32" | "u32" | "i64" | "u64"
-        );
-        let value_decimals = match array_type {
-            "f32" => 4,
-            "f64" => 6,
-            _ => 0,
-        };
+        let (is_integer, value_decimals) = dtype_meta(array_type);
 
         let mut widget = self.widget.borrow_mut();
         widget.set_image(pixels, width, height, is_integer, value_decimals);
+
+        Ok(())
+    }
+
+    /// Declare the sliceable leading axes of an N-D cube.
+    ///
+    /// `dims` lists the lengths of the leading (sliceable) axes in outer→inner
+    /// order; an empty array means a plain 2D image (no slice controls). The
+    /// widget shows a slider + play control per axis and emits slice requests via
+    /// the `onSliceRequest` callback; the host serves each slice on demand and
+    /// delivers it with `setSliceData`.
+    #[wasm_bindgen(js_name = setCube)]
+    pub fn set_cube(&self, dims: Vec<u32>) {
+        let dims = dims.into_iter().map(|d| d as usize).collect();
+        self.widget.borrow_mut().set_cube(dims);
+    }
+
+    /// Set image data for a specific cube slice.
+    ///
+    /// Like `setImageData` but tagged with the slice `indices` it corresponds to,
+    /// so the widget can sync slider positions and correlate play-mode prefetch
+    /// responses. `indices` may be empty for a plain 2D image.
+    #[wasm_bindgen(js_name = setSliceData)]
+    pub fn set_slice_data(
+        &self,
+        buffer: &js_sys::ArrayBuffer,
+        width: u32,
+        height: u32,
+        array_type: &str,
+        indices: Vec<u32>,
+    ) -> Result<(), JsValue> {
+        let pixels = convert_buffer_to_f64(buffer, array_type)?;
+
+        let expected_len = (width as usize) * (height as usize);
+        if pixels.len() != expected_len {
+            return Err(JsValue::from_str(&format!(
+                "Buffer size mismatch: expected {} pixels ({}x{}), got {}",
+                expected_len,
+                width,
+                height,
+                pixels.len()
+            )));
+        }
+
+        let (is_integer, value_decimals) = dtype_meta(array_type);
+        let indices = indices.into_iter().map(|i| i as usize).collect();
+
+        let mut widget = self.widget.borrow_mut();
+        widget.receive_slice(indices, pixels, width, height, is_integer, value_decimals);
 
         Ok(())
     }
@@ -546,13 +588,36 @@ impl ViewerHandle {
         self.callbacks.borrow_mut().on_click = Some(callback);
     }
 
+    /// Register a callback invoked when the widget needs a cube slice fetched.
+    /// The callback receives the requested slice indices as a number array.
+    #[wasm_bindgen(js_name = onSliceRequest)]
+    pub fn on_slice_request(&self, callback: js_sys::Function) {
+        self.callbacks.borrow_mut().on_slice_request = Some(callback);
+    }
+
     /// Clear all registered callbacks.
     #[wasm_bindgen(js_name = clearCallbacks)]
     pub fn clear_callbacks(&self) {
         let mut callbacks = self.callbacks.borrow_mut();
         callbacks.on_state_change = None;
         callbacks.on_click = None;
+        callbacks.on_slice_request = None;
     }
+}
+
+/// Display metadata for a dtype: (is_integer, value_decimals for hover readout).
+#[cfg(target_arch = "wasm32")]
+fn dtype_meta(array_type: &str) -> (bool, usize) {
+    let is_integer = matches!(
+        array_type,
+        "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "i64" | "u64"
+    );
+    let value_decimals = match array_type {
+        "f32" => 4,
+        "f64" => 6,
+        _ => 0,
+    };
+    (is_integer, value_decimals)
 }
 
 /// Convert a JavaScript ArrayBuffer to Vec<f64> based on ArrayType string.

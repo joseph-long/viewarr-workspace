@@ -239,11 +239,50 @@ impl ViewerApp {
             let _ = callback.call1(&this, &event);
         }
     }
+
+    /// Emit any queued slice-index request to JavaScript.
+    fn check_and_notify_slice_request(&mut self) {
+        let request = self.widget.borrow_mut().take_slice_request();
+        let Some(indices) = request else {
+            return;
+        };
+
+        if let Some(ref callback) = self.callbacks.borrow().on_slice_request {
+            let arr = js_sys::Array::new();
+            for idx in indices {
+                arr.push(&(idx as f64).into());
+            }
+            let this = JsValue::NULL;
+            let _ = callback.call1(&this, &arr);
+        }
+    }
 }
 
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Use a CentralPanel with no margin/padding
+        // Slice/play controls live in a dedicated bar ABOVE the pannable image:
+        // they select which image is shown, a level up from the image's own
+        // overlays (zoom/stretch/colorbar). Only shown for cubes.
+        if self.widget.borrow().has_slices() {
+            // Even out the vertical fill: the default top-panel margin is
+            // symmetric (2px), but the panel's bottom separator line eats 1px of
+            // the lower fill, so add 1px to the bottom to balance it visually.
+            let slice_frame = egui::Frame::side_top_panel(&ctx.style()).inner_margin(
+                egui::Margin {
+                    left: 8,
+                    right: 8,
+                    top: 2,
+                    bottom: 3,
+                },
+            );
+            egui::TopBottomPanel::top("slice_controls")
+                .frame(slice_frame)
+                .show(ctx, |ui| {
+                    self.widget.borrow_mut().show_slice_controls(ui);
+                });
+        }
+
+        // Use a CentralPanel with no margin/padding for the pannable image
         let frame = egui::Frame::central_panel(&ctx.style()).inner_margin(0.0);
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             // Use the actual available size from egui's layout system
@@ -258,6 +297,7 @@ impl eframe::App for ViewerApp {
         // Check for state changes and notify JavaScript
         self.check_and_notify_state_change();
         self.check_and_notify_shift_click();
+        self.check_and_notify_slice_request();
 
         // Request continuous repaints for smooth updates
         ctx.request_repaint();

@@ -213,6 +213,48 @@ export function setImageData(containerId, buffer, width, height, dtype) {
 }
 
 /**
+ * Declare the sliceable leading axes of an N-D cube.
+ *
+ * The widget renders a slider + play control per axis and requests slices via
+ * the `onSliceRequest` callback. Pass an empty array for a plain 2D image.
+ *
+ * @param {string} containerId - The ID of the container (viewer instance).
+ * @param {number[]} dims - Lengths of the leading (sliceable) axes, outer→inner.
+ * @throws {Error} If the viewer is not found.
+ */
+export function setCube(containerId, dims) {
+  const viewer = viewers.get(containerId);
+  if (!viewer) {
+    throw new Error(`No viewer found for container "${containerId}"`);
+  }
+
+  viewer.handle.setCube(Uint32Array.from(dims ?? []));
+}
+
+/**
+ * Set image data for a specific cube slice.
+ *
+ * Like {@link setImageData} but tagged with the slice indices it represents, so
+ * the widget can sync slider positions and correlate play-mode prefetches.
+ *
+ * @param {string} containerId - The ID of the container (viewer instance).
+ * @param {ArrayBuffer} buffer - The raw pixel data.
+ * @param {number} width - Image width in pixels.
+ * @param {number} height - Image height in pixels.
+ * @param {string} dtype - Data type string (e.g. "f64", "i16", "u8").
+ * @param {number[]} indices - Slice indices this image corresponds to (may be empty).
+ * @throws {Error} If the viewer is not found or data is invalid.
+ */
+export function setSliceData(containerId, buffer, width, height, dtype, indices) {
+  const viewer = viewers.get(containerId);
+  if (!viewer) {
+    throw new Error(`No viewer found for container "${containerId}"`);
+  }
+
+  viewer.handle.setSliceData(buffer, width, height, dtype, Uint32Array.from(indices ?? []));
+}
+
+/**
  * Destroy a viewer instance and clean up resources.
  *
  * @param {string} containerId - The ID of the container (viewer instance).
@@ -800,6 +842,24 @@ export function onClick(containerId, callback) {
 }
 
 /**
+ * Register a callback invoked when the widget needs a cube slice fetched.
+ *
+ * The callback receives the requested slice indices as a `number[]`. The host
+ * should fetch that slice and deliver it via {@link setSliceData}.
+ *
+ * @param {string} containerId - The ID of the container (viewer instance).
+ * @param {(indices: number[]) => void} callback - Receives requested slice indices.
+ * @throws {Error} If the viewer is not found.
+ */
+export function onSliceRequest(containerId, callback) {
+  const viewer = viewers.get(containerId);
+  if (!viewer) {
+    throw new Error(`No viewer found for container "${containerId}"`);
+  }
+  viewer.handle.onSliceRequest((indices) => callback(Array.from(indices)));
+}
+
+/**
  * Clear all registered callbacks for a viewer.
  *
  * @param {string} containerId - The ID of the container (viewer instance).
@@ -816,6 +876,8 @@ export function clearCallbacks(containerId) {
 window.viewarr = {
   createViewer,
   setImageData,
+  setCube,
+  setSliceData,
   destroyViewer,
   hasViewer,
   getActiveViewers,
@@ -848,6 +910,7 @@ window.viewarr = {
   setViewerState,
   onStateChange,
   onClick,
+  onSliceRequest,
   clearCallbacks
 };
 
@@ -855,6 +918,8 @@ window.viewarr = {
 export default {
   createViewer,
   setImageData,
+  setCube,
+  setSliceData,
   destroyViewer,
   hasViewer,
   getActiveViewers,
@@ -887,5 +952,6 @@ export default {
   setViewerState,
   onStateChange,
   onClick,
+  onSliceRequest,
   clearCallbacks
 };

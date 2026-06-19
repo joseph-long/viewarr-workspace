@@ -18,6 +18,37 @@ declare module 'viewarr' {
   ): void;
 
   /**
+   * Declare the sliceable leading axes of an N-D cube. The widget renders the
+   * slice + play controls; pass an empty array for a plain 2D image.
+   * @param dims - Lengths of the leading (sliceable) axes, outer→inner.
+   */
+  export function setCube(containerId: string, dims: number[]): void;
+
+  /**
+   * Set image data for a specific cube slice, tagged with its slice indices so
+   * the widget can sync slider positions and correlate play-mode prefetches.
+   * @param indices - Slice indices this image corresponds to (may be empty).
+   */
+  export function setSliceData(
+    containerId: string,
+    buffer: ArrayBuffer,
+    width: number,
+    height: number,
+    dtype: string,
+    indices: number[]
+  ): void;
+
+  /**
+   * Register a callback invoked when the widget needs a cube slice fetched
+   * (slider drag or play loop). The host should fetch that slice and deliver it
+   * via setSliceData.
+   */
+  export function onSliceRequest(
+    containerId: string,
+    callback: (indices: number[]) => void
+  ): void;
+
+  /**
    * Notify a viewer that its container has been resized.
    */
   export function notifyResize(

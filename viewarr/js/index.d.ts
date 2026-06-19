@@ -66,6 +66,39 @@ export function setImageData(
 ): void;
 
 /**
+ * Declare the sliceable leading axes of an N-D cube.
+ *
+ * The widget renders a slider + play control per axis and requests slices via
+ * the `onSliceRequest` callback. Pass an empty array for a plain 2D image.
+ *
+ * @param containerId - The ID of the container (viewer instance).
+ * @param dims - Lengths of the leading (sliceable) axes, outer→inner order.
+ */
+export function setCube(containerId: string, dims: number[]): void;
+
+/**
+ * Set image data for a specific cube slice.
+ *
+ * Like {@link setImageData} but tagged with the slice indices it represents, so
+ * the widget can sync slider positions and correlate play-mode prefetches.
+ *
+ * @param containerId - The ID of the container (viewer instance).
+ * @param buffer - The raw pixel data.
+ * @param width - Image width in pixels.
+ * @param height - Image height in pixels.
+ * @param arrayType - JavaScript TypedArray type name for interpreting the buffer.
+ * @param indices - Slice indices this image corresponds to (may be empty).
+ */
+export function setSliceData(
+  containerId: string,
+  buffer: ArrayBuffer,
+  width: number,
+  height: number,
+  arrayType: ArrayType,
+  indices: number[]
+): void;
+
+/**
  * Destroy a viewer instance and clean up resources.
  *
  * @param containerId - The ID of the container (viewer instance).
@@ -361,6 +394,19 @@ export function onClick(
 ): void;
 
 /**
+ * Register a callback invoked when the widget needs a cube slice fetched
+ * (slider drag or play loop). The callback receives the requested slice indices;
+ * the host should fetch that slice and deliver it via {@link setSliceData}.
+ *
+ * @param containerId - The ID of the container (viewer instance).
+ * @param callback - Callback function to receive requested slice indices.
+ */
+export function onSliceRequest(
+  containerId: string,
+  callback: (indices: number[]) => void
+): void;
+
+/**
  * Clear all registered callbacks for a viewer.
  *
  * @param containerId - The ID of the container (viewer instance).
@@ -370,6 +416,8 @@ export function clearCallbacks(containerId: string): void;
 declare const viewarr: {
   createViewer: typeof createViewer;
   setImageData: typeof setImageData;
+  setCube: typeof setCube;
+  setSliceData: typeof setSliceData;
   destroyViewer: typeof destroyViewer;
   hasViewer: typeof hasViewer;
   getActiveViewers: typeof getActiveViewers;
@@ -396,6 +444,7 @@ declare const viewarr: {
   setMarkers: typeof setMarkers;
   onStateChange: typeof onStateChange;
   onClick: typeof onClick;
+  onSliceRequest: typeof onSliceRequest;
   clearCallbacks: typeof clearCallbacks;
 };
 

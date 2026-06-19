@@ -28,6 +28,16 @@ const COLORBAR_MAX_HEIGHT: f32 = 300.0;
 const COLORBAR_MARGIN: f32 = 10.0;
 /// Duration to show zoom level overlay after zooming
 const ZOOM_OVERLAY_DURATION: f64 = 0.5;
+/// Default play interval in seconds (¼ s)
+const DEFAULT_PLAY_INTERVAL: f64 = 0.25;
+/// Selectable play intervals: (seconds, dropdown label, compact glyph for the
+/// square selector button).
+const PLAY_SPEEDS: [(f64, &str, &str); 4] = [
+    (0.125, "1/8 s", "⅛"),
+    (0.25, "1/4 s", "¼"),
+    (0.5, "1/2 s", "½"),
+    (1.0, "1 s", "1"),
+];
 
 /// Actions returned from zoom controls overlay
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -53,6 +63,30 @@ enum StretchAction {
     SetColormap(Colormap),
     ToggleReverse,
     ResetStretch,
+}
+
+/// Actions returned from the slice / play controls overlay
+#[derive(Clone, Debug, PartialEq)]
+enum SliceAction {
+    None,
+    /// Manually set the index along the given axis (e.g. slider drag).
+    SetIndex(usize, usize),
+    /// Start playing the given axis.
+    Play(usize),
+    /// Stop playback.
+    Pause,
+    /// Change the play interval (seconds).
+    SetSpeed(f64),
+}
+
+/// A prefetched slice held until it is time to display it (play mode).
+struct PendingSlice {
+    indices: Vec<usize>,
+    pixels: Vec<f64>,
+    width: u32,
+    height: u32,
+    is_integer: bool,
+    value_decimals: usize,
 }
 
 /// Stretch function type
@@ -180,6 +214,25 @@ pub struct ArrayViewerWidget {
     pending_shift_click: Option<(f64, f64)>,
     /// Marker positions in continuous image coordinates (x, y).
     markers: Vec<(f32, f32)>,
+
+    // === Cube / slice state ===
+    /// Lengths of the sliceable leading axes (outer→inner). Empty = plain 2D.
+    slice_dims: Vec<usize>,
+    /// Current index along each sliceable axis (the displayed slice).
+    current_indices: Vec<usize>,
+    /// Which sliceable axis is currently playing, if any.
+    playing_axis: Option<usize>,
+    /// Play interval in seconds.
+    play_interval: f64,
+    /// egui monotonic time (seconds) at which the current frame was displayed.
+    /// The play interval for the next frame is measured from this instant.
+    display_time: f64,
+    /// Indices currently requested from the host (one prefetch in flight).
+    requested_indices: Option<Vec<usize>>,
+    /// Prefetched frame held until the interval elapses (play mode only).
+    pending_slice: Option<PendingSlice>,
+    /// Slice-index request to emit to JS, drained each frame by the app shell.
+    pending_slice_request: Option<Vec<usize>>,
 }
 
 impl Default for ArrayViewerWidget {
@@ -274,6 +327,14 @@ impl ArrayViewerWidget {
             overlay_message: String::new(),
             pending_shift_click: None,
             markers: Vec::new(),
+            slice_dims: Vec::new(),
+            current_indices: Vec::new(),
+            playing_axis: None,
+            play_interval: DEFAULT_PLAY_INTERVAL,
+            display_time: 0.0,
+            requested_indices: None,
+            pending_slice: None,
+            pending_slice_request: None,
         }
     }
 
@@ -410,6 +471,114 @@ impl ArrayViewerWidget {
     /// Consume and return the latest shift-click event (if any).
     pub fn take_shift_click_event(&mut self) -> Option<(f64, f64)> {
         self.pending_shift_click.take()
+    }
+
+    // =========================================================================
+    // Cube / slice navigation
+    // =========================================================================
+
+    /// Declare the sliceable leading axes of an N-D cube (their lengths, in
+    /// outer→inner order). An empty list means plain 2D — no slice controls.
+    ///
+    /// If the dimensions are unchanged this is a no-op (current indices and any
+    /// in-flight playback are preserved). Otherwise indices reset to zero and
+    /// playback stops. The host is responsible for pushing the initial slice via
+    /// [`receive_slice`]; this method never requests data itself.
+    pub fn set_cube(&mut self, dims: Vec<usize>) {
+        if dims == self.slice_dims {
+            return;
+        }
+        self.slice_dims = dims;
+        self.current_indices = vec![0; self.slice_dims.len()];
+        self.playing_axis = None;
+        self.requested_indices = None;
+        self.pending_slice = None;
+        self.pending_slice_request = None;
+    }
+
+    /// Deliver pixel data tagged with the slice `indices` it represents.
+    ///
+    /// While playing, a slice matching the in-flight prefetch request is held in
+    /// `pending_slice` and shown later by [`update_playback`] once the interval
+    /// elapses. Otherwise (manual navigation, or a non-cube image) it is
+    /// displayed immediately.
+    pub fn receive_slice(
+        &mut self,
+        indices: Vec<usize>,
+        pixels: Vec<f64>,
+        width: u32,
+        height: u32,
+        is_integer: bool,
+        value_decimals: usize,
+    ) {
+        let is_prefetch = self.playing_axis.is_some()
+            && self.requested_indices.as_ref() == Some(&indices);
+        if is_prefetch {
+            self.pending_slice = Some(PendingSlice {
+                indices,
+                pixels,
+                width,
+                height,
+                is_integer,
+                value_decimals,
+            });
+            return;
+        }
+        // Manual / unsolicited slice: display now.
+        if self.requested_indices.as_ref() == Some(&indices) {
+            self.requested_indices = None;
+        }
+        if !indices.is_empty() {
+            self.current_indices = indices;
+        }
+        self.set_image(pixels, width, height, is_integer, value_decimals);
+    }
+
+    /// Advance play-mode state. Called once per frame before texture rebuild.
+    ///
+    /// Display cadence is `max(interval, fetch_time)`: a prefetched frame is only
+    /// shown once both the configured interval has elapsed *and* the data has
+    /// arrived, then the next prefetch is triggered immediately.
+    fn update_playback(&mut self, now: f64) {
+        let Some(axis) = self.playing_axis else {
+            return;
+        };
+        if axis >= self.slice_dims.len() {
+            self.playing_axis = None;
+            return;
+        }
+
+        // Promote a ready prefetched frame once the interval window has passed.
+        let ready = self
+            .pending_slice
+            .as_ref()
+            .map(|p| self.requested_indices.as_ref() == Some(&p.indices))
+            .unwrap_or(false);
+        let interval_elapsed = now - self.display_time >= self.play_interval;
+        if ready && interval_elapsed {
+            let p = self.pending_slice.take().unwrap();
+            self.current_indices = p.indices;
+            self.requested_indices = None;
+            self.display_time = now;
+            self.set_image(p.pixels, p.width, p.height, p.is_integer, p.value_decimals);
+        }
+
+        // With no request in flight, trigger the next prefetch right away.
+        if self.requested_indices.is_none() {
+            let len = self.slice_dims[axis];
+            let mut next = self.current_indices.clone();
+            if len > 0 {
+                next[axis] = (next[axis] + 1) % len; // loop back at the end
+            }
+            self.requested_indices = Some(next.clone());
+            self.pending_slice_request = Some(next);
+        }
+    }
+
+    /// Consume and return a pending slice-index request (if any) to be emitted
+    /// to the host. Mirrors [`take_shift_click_event`].
+    pub fn take_slice_request(&mut self) -> Option<Vec<usize>> {
+        self.pending_slice_request.take()
     }
 
     /// Get the current marker list in continuous image coordinates.
@@ -859,6 +1028,10 @@ impl ArrayViewerWidget {
     pub fn show(&mut self, ui: &mut Ui, container_size: Vec2) -> Response {
         let ctx = ui.ctx().clone();
 
+        // Advance play-mode state (may promote a prefetched slice into view).
+        let now = ctx.input(|i| i.time);
+        self.update_playback(now);
+
         // Check if texture needs rebuilding
         if self.texture_dirty {
             self.texture_dirty = false;
@@ -1178,6 +1351,41 @@ impl ArrayViewerWidget {
         response
     }
 
+    /// Apply an action collected from the slice / play controls.
+    fn apply_slice_action(&mut self, action: SliceAction, now: f64) {
+        match action {
+            SliceAction::None => {}
+            SliceAction::SetIndex(axis, index) => {
+                // Manual scrubbing on the playing axis stops playback.
+                if self.playing_axis == Some(axis) {
+                    self.playing_axis = None;
+                    self.pending_slice = None;
+                }
+                if let Some(slot) = self.current_indices.get_mut(axis) {
+                    *slot = index;
+                }
+                // Request the chosen slice from the host.
+                self.requested_indices = Some(self.current_indices.clone());
+                self.pending_slice_request = Some(self.current_indices.clone());
+            }
+            SliceAction::Play(axis) => {
+                self.playing_axis = Some(axis);
+                self.requested_indices = None;
+                self.pending_slice = None;
+                // Anchor the interval window at the moment play starts.
+                self.display_time = now;
+            }
+            SliceAction::Pause => {
+                self.playing_axis = None;
+                self.requested_indices = None;
+                self.pending_slice = None;
+            }
+            SliceAction::SetSpeed(interval) => {
+                self.play_interval = interval;
+            }
+        }
+    }
+
     /// Handle keyboard shortcuts for zoom
     fn handle_keyboard_input(&mut self, ctx: &egui::Context) {
         // Don't process keyboard shortcuts when any text input has focus
@@ -1353,13 +1561,15 @@ impl ArrayViewerWidget {
 
     /// Render stretch controls at top-right of widget.
     /// Returns an action to be applied after rendering.
-    fn render_stretch_controls(&self, ctx: &egui::Context, _widget_rect: egui::Rect) -> StretchAction {
+    fn render_stretch_controls(&self, ctx: &egui::Context, widget_rect: egui::Rect) -> StretchAction {
         let margin = 10.0;
 
         let mut action = StretchAction::None;
 
         egui::Area::new(egui::Id::new("stretch_controls"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-margin, margin))
+            // Keep this overlay within the image area, below any slice bar above.
+            .constrain_to(widget_rect)
             .show(ctx, |ui| {
                 let stretch_type = self.stretch_type();
                 let colormap = self.colormap();
@@ -1427,6 +1637,116 @@ impl ArrayViewerWidget {
             });
 
         action
+    }
+
+    /// Whether this viewer has sliceable cube axes (i.e. should show the slice bar).
+    pub fn has_slices(&self) -> bool {
+        !self.slice_dims.is_empty()
+    }
+
+    /// The axis that the single play button animates: the innermost leading axis,
+    /// which is the conventional spectral/time axis for a cube.
+    fn play_target_axis(&self) -> usize {
+        self.slice_dims.len().saturating_sub(1)
+    }
+
+    /// Render the cube slice + play controls into a dedicated bar (an egui panel
+    /// above the pannable image, not an overlay on it). One compact row per axis:
+    /// a square play button and square speed selector on the left, a full-width
+    /// scrubber in the middle, and a fixed-width `index / total` readout on the
+    /// right. No-op for plain 2D.
+    pub fn show_slice_controls(&mut self, ui: &mut Ui) {
+        if self.slice_dims.is_empty() {
+            return;
+        }
+        let now = ui.input(|i| i.time);
+        let play_axis = self.play_target_axis();
+        let mut action = SliceAction::None;
+
+        // Square side shared by the play button and speed selector.
+        let side = 22.0;
+
+        for axis in 0..self.slice_dims.len() {
+            let len = self.slice_dims[axis];
+            let cur = self.current_indices.get(axis).copied().unwrap_or(0);
+            let max = len.saturating_sub(1);
+            // Fixed width for each number cell: enough to hold the largest value
+            // so the slash and totals never shift as the index changes.
+            let num_w = (format!("{len}").len() as f32) * 8.0 + 4.0;
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+
+                // Left: square play button + square speed selector. Only the
+                // play-target axis carries them; other rows pad to keep the
+                // scrubbers aligned.
+                if axis == play_axis {
+                    let playing = self.playing_axis == Some(play_axis);
+                    let icon = if playing { phosphor::PAUSE } else { phosphor::PLAY };
+                    let play_resp = ui.add_sized(
+                        egui::vec2(side, side),
+                        egui::Button::new(egui::RichText::new(icon).size(13.0)),
+                    );
+                    if play_resp.clicked() {
+                        action = if playing {
+                            SliceAction::Pause
+                        } else {
+                            SliceAction::Play(play_axis)
+                        };
+                    }
+                    play_resp.on_hover_text(if playing { "Pause" } else { "Play" });
+
+                    // Square speed selector; compact glyph on the button, full
+                    // "N s" labels in the dropdown.
+                    let glyph = PLAY_SPEEDS
+                        .iter()
+                        .find(|(v, _, _)| (*v - self.play_interval).abs() < 1e-9)
+                        .map(|(_, _, g)| *g)
+                        .unwrap_or("¼");
+                    ui.spacing_mut().interact_size = egui::vec2(side, side);
+                    ui.spacing_mut().button_padding = egui::vec2(2.0, 2.0);
+                    egui::ComboBox::from_id_salt("slice_speed")
+                        .selected_text(glyph)
+                        .width(side)
+                        .show_ui(ui, |ui| {
+                            for (interval, label, _) in PLAY_SPEEDS {
+                                let selected = (self.play_interval - interval).abs() < 1e-9;
+                                if ui.selectable_label(selected, label).clicked() {
+                                    action = SliceAction::SetSpeed(interval);
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("Seconds per frame");
+                } else {
+                    ui.add_space(side * 2.0 + 4.0);
+                }
+
+                // Right side, laid out right-to-left: `index / total` with
+                // fixed-width cells, then the scrubber fills the gap to the left.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_sized(
+                        egui::vec2(num_w, side),
+                        egui::Label::new(format!("{len}")).selectable(false),
+                    );
+                    ui.label("/");
+                    ui.add_sized(
+                        egui::vec2(num_w, side),
+                        egui::Label::new(format!("{}", cur + 1)).selectable(false),
+                    );
+
+                    let mut idx = cur;
+                    ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(40.0);
+                    let resp =
+                        ui.add(egui::Slider::new(&mut idx, 0..=max).show_value(false));
+                    if resp.changed() && idx != cur {
+                        action = SliceAction::SetIndex(axis, idx);
+                    }
+                });
+            });
+        }
+
+        self.apply_slice_action(action, now);
     }
 
     /// Render colorbar overlay at top-left of widget with editable limit values
@@ -2026,4 +2346,113 @@ fn overlay_frame(ui: &Ui) -> egui::Frame {
 /// Format zoom level as a nice multiple string with consistent decimal places
 fn format_zoom_multiple(zoom: f32) -> String {
     format!("{:.3}x", zoom)
+}
+
+#[cfg(test)]
+mod slice_tests {
+    use super::*;
+
+    /// A 2x2 f64 slice payload for a given index list.
+    fn deliver(w: &mut ArrayViewerWidget, indices: Vec<usize>) {
+        w.receive_slice(indices, vec![0.0, 1.0, 2.0, 3.0], 2, 2, false, 6);
+    }
+
+    #[test]
+    fn set_cube_resets_indices_and_clears_play() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![4]);
+        assert_eq!(w.current_indices, vec![0]);
+
+        // Same dims is a no-op that preserves state.
+        w.current_indices = vec![2];
+        w.set_cube(vec![4]);
+        assert_eq!(w.current_indices, vec![2]);
+
+        // Changing dims resets indices and stops playback.
+        w.playing_axis = Some(0);
+        w.set_cube(vec![3, 5]);
+        assert_eq!(w.current_indices, vec![0, 0]);
+        assert_eq!(w.playing_axis, None);
+    }
+
+    #[test]
+    fn manual_slice_displays_immediately() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![4]);
+        deliver(&mut w, vec![2]);
+        assert_eq!(w.current_indices, vec![2]);
+        assert!(w.has_image());
+        assert!(w.pending_slice.is_none());
+    }
+
+    #[test]
+    fn manual_set_index_emits_request() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![4]);
+        deliver(&mut w, vec![0]);
+        w.apply_slice_action(SliceAction::SetIndex(0, 3), 1.0);
+        assert_eq!(w.current_indices, vec![3]);
+        assert_eq!(w.take_slice_request(), Some(vec![3]));
+    }
+
+    #[test]
+    fn play_waits_for_interval_when_fetch_is_fast() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![4]);
+        w.play_interval = 0.25;
+        deliver(&mut w, vec![0]);
+
+        // Start playing at t=0; first tick prefetches the next slice.
+        w.apply_slice_action(SliceAction::Play(0), 0.0);
+        w.update_playback(0.0);
+        assert_eq!(w.requested_indices, Some(vec![1]));
+        assert_eq!(w.take_slice_request(), Some(vec![1]));
+
+        // Fast fetch: data arrives early and is held, not shown.
+        deliver(&mut w, vec![1]);
+        assert!(w.pending_slice.is_some());
+        w.update_playback(0.1);
+        assert_eq!(w.current_indices, vec![0], "must wait out the interval");
+
+        // Once the interval elapses, the frame is shown and the next prefetched.
+        w.update_playback(0.25);
+        assert_eq!(w.current_indices, vec![1]);
+        assert!(w.pending_slice.is_none());
+        assert_eq!(w.requested_indices, Some(vec![2]));
+    }
+
+    #[test]
+    fn play_shows_when_available_if_fetch_is_slow() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![4]);
+        w.play_interval = 0.25;
+        deliver(&mut w, vec![0]);
+
+        w.apply_slice_action(SliceAction::Play(0), 0.0);
+        w.update_playback(0.0);
+        assert_eq!(w.take_slice_request(), Some(vec![1]));
+
+        // Interval passes with no data yet: stay on the current frame.
+        w.update_playback(0.3);
+        assert_eq!(w.current_indices, vec![0]);
+        assert_eq!(w.requested_indices, Some(vec![1]));
+
+        // Slow fetch finally arrives; the next tick shows it right away.
+        deliver(&mut w, vec![1]);
+        w.update_playback(0.31);
+        assert_eq!(w.current_indices, vec![1]);
+        assert_eq!(w.requested_indices, Some(vec![2]));
+    }
+
+    #[test]
+    fn play_loops_back_to_start_at_the_end() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![3]);
+        w.play_interval = 0.1;
+        deliver(&mut w, vec![2]); // start on the last slice
+
+        w.apply_slice_action(SliceAction::Play(0), 0.0);
+        w.update_playback(0.0);
+        assert_eq!(w.requested_indices, Some(vec![0]), "wraps past the end");
+    }
 }

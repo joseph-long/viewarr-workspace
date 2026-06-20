@@ -34,6 +34,22 @@ jupyter labextension list 2>&1 | grep -i fitsview   # should show "OK"
 After changing viewarr's Rust source, rebuild it once (step 1) and both packages pick up the
 new `viewarr/pkg/`.
 
+## Testing both packages from one environment (uv workspace)
+
+The repo root is a [uv workspace](https://docs.astral.sh/uv/concepts/projects/workspaces/)
+(`pyproject.toml` with `[tool.uv.workspace]`) tying both Python packages into a single
+environment and lockfile (`uv.lock`). After building the JS (steps 1–2 above), one sync gets
+you an env that can test both:
+
+```bash
+uv sync                                                      # one .venv at the repo root
+uv run pytest pyviewarr/tests jupyterlab-fitsview/fitsview/tests
+```
+
+`uv sync` does **not** build the JS — it relies on each package's build hook skipping when its
+bundle already exists, so build viewarr and the two bundles first (steps 1–2). Each package
+still keeps its own `pyproject.toml` and pip-installable extras for non-uv users.
+
 ## CI / releases
 
 A single workflow (`.github/workflows/ci.yml`) builds viewarr once, then builds and tests both

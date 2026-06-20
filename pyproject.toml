@@ -1,0 +1,35 @@
+# uv workspace root for the viewarr monorepo's two Python packages.
+#
+# This is a *virtual* root (no [project] table): it isn't a package itself, it
+# just ties the two distributions into a single uv environment + lockfile so one
+# `uv sync` lets you develop and test both. Each package keeps its own
+# pyproject.toml (and its pip-installable extras) for non-uv users.
+#
+# NOTE: `uv sync` does NOT build the JS. It relies on each package's
+# hatch-jupyter-builder hook skipping when its bundle already exists
+# (skip-if-exists), so build the JS first (see README):
+#
+#   (cd viewarr && npm install && npm run build)
+#   (cd pyviewarr && npm install && npm run build)
+#   (cd jupyterlab-fitsview && jlpm install && jlpm build)
+#
+# then `uv sync` and e.g. `uv run pytest pyviewarr/tests jupyterlab-fitsview/fitsview/tests`.
+
+[tool.uv.workspace]
+members = ["pyviewarr", "jupyterlab-fitsview"]
+
+[dependency-groups]
+# Combined dev/test dependencies for both packages, installed into the single
+# workspace environment by `uv sync`.
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio",
+    "pytest-cov",
+    "pytest-jupyter[server]>=0.6.0",
+    "coverage",
+    "pygments",
+    "jupyterlab",
+    "matplotlib>=3.5",
+    "astropy>=6.1.7",
+    "watchfiles",
+]

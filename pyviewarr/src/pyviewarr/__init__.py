@@ -310,18 +310,12 @@ class ViewArrWidget(anywidget.AnyWidget):
     _esm = pathlib.Path(__file__).parent / "static" / "widget.js"
     _css = pathlib.Path(__file__).parent / "static" / "widget.css"
 
-    # Binary image data (synced as DataView in JavaScript)
-    data = traitlets.Bytes(b"").tag(sync=True)
-
-    # Image dimensions
+    # Image dimensions of the currently shown slice (informational / introspection;
+    # the actual pixels are sent on demand over the custom message channel).
     image_width = traitlets.Int(0).tag(sync=True)
     image_height = traitlets.Int(0).tag(sync=True)
 
-    # Monotonic token that increments whenever image payload traits are updated.
-    # Frontend applies setImageData when it observes a new token value.
-    _image_update_token = traitlets.Int(0).tag(sync=True)
-
-    # Data type string for viewarr (e.g., "f32", "u16")
+    # Data type string for viewarr (e.g., "f32", "u16") of the current slice.
     dtype = traitlets.Unicode("f64").tag(sync=True)
 
     # Widget display dimensions (CSS pixels)
@@ -331,7 +325,8 @@ class ViewArrWidget(anywidget.AnyWidget):
     # Array shape (list of dimensions)
     shape = traitlets.List(traitlets.Int()).tag(sync=True)
 
-    # Current slice indices for leading axes (empty for 2D arrays)
+    # Current slice indices for leading axes (empty for 2D arrays). Informational:
+    # navigation is driven by the frontend via the "request_slice" message.
     current_slice_indices = traitlets.List(traitlets.Int()).tag(sync=True)
 
     # Optional initial viewer state object (mapped to JS state keys)
@@ -426,8 +421,11 @@ class ViewArrWidget(anywidget.AnyWidget):
         super().__init__(**kwargs)
         self._on_shift_click = shift_click_callback
         self._array = None
-        self.observe(self._on_slice_indices_changed, names=["current_slice_indices"])
         self.observe(self._on_shift_click_event, names=["_shift_click_event"])
+        # Slices are served on demand over a custom message channel rather than
+        # via synced traits, so every request produces a fresh slice (synced List
+        # traits would dedup an unchanged value and stall a play-mode prefetch).
+        self.on_msg(self._handle_frontend_msg)
 
     def set_shift_click_callback(
         self, callback: Optional[ShiftClickCallback]
@@ -447,33 +445,53 @@ class ViewArrWidget(anywidget.AnyWidget):
         if isinstance(x, (int, float)) and isinstance(y, (int, float)):
             callback(float(x), float(y))
 
-    def _on_slice_indices_changed(self, change):
-        """Update the displayed slice when slice indices change."""
-        self._update_slice()
-
-    def _update_slice(self):
-        """Compute the current 2D slice and update traits."""
-        if self._array is None:
+    def _handle_frontend_msg(self, _widget, content, _buffers):
+        """Handle a custom message from the frontend (e.g. a slice request)."""
+        if not isinstance(content, dict):
             return
+        if content.get("type") == "request_slice":
+            indices = [int(i) for i in content.get("indices", [])]
+            self._send_slice(indices)
 
+    def _compute_slice(self, indices):
+        """Return the 2D slice at ``indices`` as a contiguous little-endian array."""
         arr = self._array
-        indices = self.current_slice_indices
-
-        # Slice the array: leading axes use indices, last two are full slices
         if len(indices) > 0:
             slice_obj = tuple(indices) + (slice(None), slice(None))
             slice_arr = arr[slice_obj]
         else:
             slice_arr = arr
-
-        # Ensure slice is contiguous and little-endian
         slice_arr = np.ascontiguousarray(slice_arr)
-        slice_arr = slice_arr.astype(slice_arr.dtype.newbyteorder("<"))
+        return slice_arr.astype(slice_arr.dtype.newbyteorder("<"))
 
-        self.dtype = _numpy_dtype_to_viewarr(slice_arr.dtype)
+    def _refresh_slice_state(self, indices):
+        """Compute the slice at ``indices`` and update the informational traits."""
+        slice_arr = self._compute_slice(indices)
+        self.current_slice_indices = list(indices)
         self.image_height, self.image_width = slice_arr.shape
-        self.data = slice_arr.tobytes()
-        self._image_update_token += 1
+        self.dtype = _numpy_dtype_to_viewarr(slice_arr.dtype)
+        return slice_arr
+
+    def _send_slice(self, indices):
+        """Serve a slice to the frontend over the custom message channel.
+
+        Always produces a slice for the requested indices (no dedup), so a
+        play-mode prefetch that re-requests the slice the kernel already holds
+        still completes.
+        """
+        if self._array is None:
+            return
+        slice_arr = self._refresh_slice_state(indices)
+        self.send(
+            {
+                "type": "slice",
+                "indices": list(indices),
+                "width": int(self.image_width),
+                "height": int(self.image_height),
+                "dtype": self.dtype,
+            },
+            buffers=[slice_arr.tobytes()],
+        )
 
     def set_array(self, arr: np.ndarray) -> None:
         """Set the array data to display.
@@ -493,12 +511,11 @@ class ViewArrWidget(anywidget.AnyWidget):
         # Set shape
         self.shape = list(arr.shape)
 
-        # Initialize slice indices for leading axes
+        # Initialize on the first slice. We only refresh the informational traits
+        # here; the frontend pulls the actual pixels on demand (on viewer-ready
+        # and whenever the shape changes) via the "request_slice" message.
         num_leading_axes = arr.ndim - 2
-        self.current_slice_indices = [0] * num_leading_axes
-
-        # Update the displayed slice
-        self._update_slice()
+        self._refresh_slice_state([0] * num_leading_axes)
 
     def get_current_slice(self) -> np.ndarray:
         """Get the current 2D slice being displayed.

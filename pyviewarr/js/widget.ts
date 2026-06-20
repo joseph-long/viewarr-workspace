@@ -40,15 +40,9 @@ import "./widget.css";
 
 /* Specifies attributes defined with traitlets in ../src/pyviewarr/__init__.py */
 interface WidgetModel {
-	data: DataView;
-	image_width: number;
-	image_height: number;
-	_image_update_token: number;
-	dtype: string;
 	widget_width: number;
 	widget_height: number;
 	shape: number[];
-	current_slice_indices: number[];
 	viewer_config: ViewerStateConfig;
 	overlay_message: string;
 	_shift_click_event: { x: number; y: number; token: number } | Record<string, never>;
@@ -131,7 +125,6 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 	let viewerReady = false;
 	let isDisposed = false;
 	let updatingFromViewer = false;  // Guard against feedback loops
-	let lastAppliedImageToken = -1;
 
 	/**
 	 * Handle state change callback from the Rust viewer.
@@ -330,30 +323,35 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 	}
 
 	/**
-	 * Update the image data in the viewer.
+	 * Handle a custom message from the kernel. Slice pixels are delivered here
+	 * (rather than via synced traits) so every request produces a fresh slice.
 	 */
-	function updateImage(): void {
+	function handleCustomMessage(content: any, buffers: DataView[]): void {
 		if (!viewerReady || isDisposed) return;
-
-		const imageUpdateToken = model.get("_image_update_token");
-		if (imageUpdateToken === lastAppliedImageToken) return;
-		const dataView = model.get("data");
-		const imageWidth = model.get("image_width");
-		const imageHeight = model.get("image_height");
-		const dtype = model.get("dtype");
-
-		if (dataView && dataView.byteLength > 0 && imageWidth > 0 && imageHeight > 0) {
-			// Extract ArrayBuffer from DataView (slice creates a new ArrayBuffer, not SharedArrayBuffer)
-			const buffer = dataView.buffer.slice(
-				dataView.byteOffset,
-				dataView.byteOffset + dataView.byteLength
-			) as ArrayBuffer;
-			// Tag the image with its slice indices so the widget can track the
-			// slider position and correlate play-mode prefetch responses.
-			const indices = model.get("current_slice_indices");
-			setSliceData(viewerId, buffer, imageWidth, imageHeight, dtype, indices);
-			lastAppliedImageToken = imageUpdateToken;
+		if (!content || content.type !== "slice" || !buffers || !buffers.length) {
+			return;
 		}
+		const view = buffers[0];
+		const buffer = view.buffer.slice(
+			view.byteOffset,
+			view.byteOffset + view.byteLength
+		) as ArrayBuffer;
+		// Tagged with its slice indices so the widget can track the slider
+		// position and correlate play-mode prefetch responses.
+		setSliceData(
+			viewerId,
+			buffer,
+			content.width,
+			content.height,
+			content.dtype,
+			content.indices ?? []
+		);
+	}
+
+	/** Leading-axis indices for the first slice of the current array. */
+	function leadingZeros(): number[] {
+		const shape = model.get("shape");
+		return new Array(Math.max(0, shape.length - 2)).fill(0);
 	}
 
 	/**
@@ -378,22 +376,27 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 	}
 
 	/**
-	 * Handle a slice request from the viewer widget (slider drag or play loop).
-	 * Updating the traitlet drives Python's on-demand slice extraction, which
-	 * pushes the new slice back via updateImage -> setSliceData.
+	 * Declare the cube and pull its first slice. Called when the viewer becomes
+	 * ready and whenever the array shape changes.
 	 */
-	function handleSliceRequest(indices: number[]): void {
+	function loadCube(): void {
 		if (!viewerReady || isDisposed) return;
-		const current = model.get("current_slice_indices") as number[];
-		if (
-			current.length === indices.length &&
-			current.every((v, i) => v === indices[i])
-		) {
-			return; // already on this slice
-		}
-		model.set("current_slice_indices", indices);
-		model.save_changes(); // trigger Python-side slice extraction
+		updateCube();
+		requestSlice(leadingZeros());
 	}
+
+	/**
+	 * Ask the kernel for a slice over the custom message channel. The kernel
+	 * always replies with the pixels (no dedup), so a play-mode prefetch that
+	 * re-requests the slice the kernel already holds still completes.
+	 */
+	function requestSlice(indices: number[]): void {
+		if (!viewerReady || isDisposed) return;
+		model.send({ type: "request_slice", indices });
+	}
+
+	// Handle a slice request from the viewer widget (slider drag or play loop).
+	const handleSliceRequest = requestSlice;
 
 	// Wait for the container to be in the DOM before initializing the viewer.
 	// This is necessary because createViewer uses document.getElementById(),
@@ -406,14 +409,13 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 		.then(() => {
 			if (isDisposed) return;
 			viewerReady = true;
-			// Register callback for state changes from the viewer
+			// Register callbacks from the viewer
 			onStateChange(viewerId, handleViewerStateChange);
 			onClick(viewerId, handleShiftClick);
 			onSliceRequest(viewerId, handleSliceRequest);
-			// Declare cube axes (slice UI lives in the widget), then push the
-			// initial slice.
-			updateCube();
-			updateImage();
+			// Declare cube axes (slice UI lives in the widget) and pull the
+			// first slice.
+			loadCube();
 			applyInitialViewerConfig();
 			// Initial sync from viewer to get default values
 			initialSyncViewerToModel();
@@ -424,19 +426,15 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 			}
 		});
 
-	// Listen for data changes from Python
-	model.on("change:data", updateImage);
-	model.on("change:image_width", updateImage);
-	model.on("change:image_height", updateImage);
-	model.on("change:dtype", updateImage);
-	model.on("change:_image_update_token", updateImage);
+	// Slice pixels arrive over the custom message channel.
+	model.on("msg:custom", handleCustomMessage);
 
 	// Listen for widget dimension changes
 	model.on("change:widget_width", updateDimensions);
 	model.on("change:widget_height", updateDimensions);
 
-	// Re-declare cube axes when the array shape changes (slice UI is in the widget)
-	model.on("change:shape", updateCube);
+	// Re-declare the cube and reload its first slice when the array changes.
+	model.on("change:shape", loadCube);
 	model.on("change:viewer_config", applyInitialViewerConfig);
 
 	// Listen for viewer property changes from Python (only apply if not triggered by viewer sync)

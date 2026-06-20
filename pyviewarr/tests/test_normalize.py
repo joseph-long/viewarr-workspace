@@ -290,6 +290,32 @@ class TestWidget:
         slice_data = widget.get_current_slice()
         np.testing.assert_array_equal(slice_data, data[2])
 
+    def test_request_slice_always_serves(self):
+        """A slice request always sends the pixels, even when the requested
+        indices match what the kernel already holds (no dedup) — otherwise a
+        play-mode prefetch that re-requests the held slice would stall."""
+        widget = ViewArrWidget()
+        data = np.arange(3 * 4 * 5).reshape(3, 4, 5).astype(np.float64)
+        widget.set_array(data)
+
+        sent = []
+        widget.send = lambda content, buffers=None: sent.append((content, buffers))
+
+        widget._handle_frontend_msg(widget, {"type": "request_slice", "indices": [1]}, [])
+        assert len(sent) == 1
+        content, buffers = sent[0]
+        assert content["type"] == "slice"
+        assert content["indices"] == [1]
+        assert (content["width"], content["height"]) == (5, 4)
+        np.testing.assert_array_equal(
+            np.frombuffer(buffers[0], dtype="<f8").reshape(4, 5), data[1]
+        )
+
+        # Re-requesting the same indices still serves a slice.
+        widget._handle_frontend_msg(widget, {"type": "request_slice", "indices": [1]}, [])
+        assert len(sent) == 2
+        assert sent[1][0]["indices"] == [1]
+
     def test_get_normalization(self):
         """get_normalization should return ViewarrNormalize with current settings."""
         widget = ViewArrWidget()

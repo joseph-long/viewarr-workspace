@@ -123,6 +123,21 @@
   position: relative;
 }
 
+/* When the egui canvas (which eframe makes focusable) has keyboard focus,
+   recolor the border to a contrasting brand color and add an inset line — a
+   doubled border — so it's clear which viewer keypresses (zoom +/-/0, F1) will
+   go to. Drawn inside the existing border, so the layout never shifts. */
+.jp-FITSViewer-viewerContainer:focus-within {
+  border-color: var(--jp-brand-color1);
+  box-shadow: inset 0 0 0 1px var(--jp-brand-color1);
+}
+
+/* Suppress the canvas's default focus outline; the container border above is
+   the focus indicator. */
+.jp-FITSViewer-viewerContainer canvas:focus {
+  outline: none;
+}
+
 .jp-FITSViewer-viewerPlaceholder {
   display: flex;
   align-items: center;

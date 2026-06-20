@@ -28,6 +28,9 @@ test("pyviewarr cube widget renders the in-canvas slice controls", async ({
 	// the DOM, so save a screenshot for human verification: the top-center slice
 	// slider + play/speed controls should be visible over the image.
 	await page.waitForTimeout(2000); // let egui paint the controls + first slice
+	// Click the canvas to give it keyboard focus -> the doubled focus ring draws.
+	await canvas.click({ position: { x: 180, y: 200 } });
+	await page.waitForTimeout(300);
 	await widget.screenshot({ path: "tests/e2e/screenshots/pyviewarr-cube.png" });
 });
 

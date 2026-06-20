@@ -23,6 +23,11 @@ hdu = fits.PrimaryHDU(data)
 hdu.header['OBJECT'] = 'Test Object'
 hdul = fits.HDUList([hdu])
 hdul.writeto('test.fits', overwrite=True)
+
+# A many-plane cube for the scrub/latency test
+fits.PrimaryHDU(
+    np.random.random((100, 64, 64)).astype(np.float32)
+).writeto('cube.fits', overwrite=True)
 print('Created test.fits')`
     );
 
@@ -83,5 +88,60 @@ print('Created test.fits')`
     await viewer.screenshot({
       path: 'screenshots/fitsview-cube.png'
     });
+  });
+
+  test('coalesces slice requests under latency and shows the index overlay', async ({
+    page
+  }) => {
+    // cube.fits (100 planes) is created in beforeEach.
+    // Add 300ms latency to every slice fetch and count them. (Slices are plain
+    // HTTP GETs, so page.route can intercept them.)
+    let sliceRequests = 0;
+    await page.route('**/fitsview/slice*', async route => {
+      sliceRequests += 1;
+      await new Promise(r => setTimeout(r, 300));
+      await route.continue();
+    });
+
+    await page.filebrowser.open('cube.fits');
+    const viewer = page.getByRole('main').locator('.jp-FITSViewer');
+    await expect(viewer).toBeVisible();
+    const canvas = viewer
+      .locator('.jp-FITSViewer-viewerContainer canvas')
+      .first();
+    await expect(canvas).toBeVisible();
+    await page.waitForTimeout(1500); // initial slice loads
+    const baseline = sliceRequests;
+
+    // Fast-drag the scrubber across the whole axis. The scrubber track is in the
+    // top bar (~13px down); start past the play+speed controls on the left and
+    // sweep to just before the index readout on the right.
+    const box = (await canvas.boundingBox())!;
+    const trackY = box.y + 13;
+    const startX = box.x + 100;
+    const endX = box.x + box.width - 90;
+    await page.mouse.move(startX, trackY);
+    await page.mouse.down();
+    const steps = 16;
+    for (let i = 1; i <= steps; i++) {
+      await page.mouse.move(startX + ((endX - startX) * i) / steps, trackY);
+    }
+    await page.mouse.up();
+
+    // The displayed frame now lags the handle -> the big centered index overlay
+    // is showing. Capture it before the in-flight slice lands.
+    await viewer.screenshot({
+      path: 'screenshots/fitsview-scrub-overlay.png'
+    });
+
+    // Let the coalesced fetch settle.
+    await page.waitForTimeout(1500);
+
+    // The drag swept ~100 frames, but coalescing keeps at most one request in
+    // flight, so only a few slices were actually fetched (a request per latency
+    // window, not one per frame).
+    const dragRequests = sliceRequests - baseline;
+    expect(dragRequests).toBeGreaterThan(0);
+    expect(dragRequests).toBeLessThan(10);
   });
 });

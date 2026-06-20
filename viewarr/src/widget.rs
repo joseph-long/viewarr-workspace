@@ -220,8 +220,13 @@ pub struct ArrayViewerWidget {
     // === Cube / slice state ===
     /// Lengths of the sliceable leading axes (outer→inner). Empty = plain 2D.
     slice_dims: Vec<usize>,
-    /// Current index along each sliceable axis (the displayed slice).
+    /// Target index along each sliceable axis — the scrubber handle / play
+    /// position the user is pointing at (may lead [`displayed_indices`] while a
+    /// slice is being fetched).
     current_indices: Vec<usize>,
+    /// Indices of the slice actually shown on screen. Lags `current_indices`
+    /// during a high-latency scrub; the loading overlay shows while they differ.
+    displayed_indices: Vec<usize>,
     /// The "live" axis whose controls are enabled (selected via the radio).
     active_axis: usize,
     /// Which sliceable axis is currently playing, if any.
@@ -333,6 +338,7 @@ impl ArrayViewerWidget {
             markers: Vec::new(),
             slice_dims: Vec::new(),
             current_indices: Vec::new(),
+            displayed_indices: Vec::new(),
             active_axis: 0,
             playing_axis: None,
             play_interval: DEFAULT_PLAY_INTERVAL,
@@ -495,6 +501,7 @@ impl ArrayViewerWidget {
         }
         self.slice_dims = dims;
         self.current_indices = vec![0; self.slice_dims.len()];
+        self.displayed_indices = self.current_indices.clone();
         // Default the live axis to the innermost (conventional spectral/time axis).
         self.active_axis = self.slice_dims.len().saturating_sub(1);
         self.playing_axis = None;
@@ -532,13 +539,31 @@ impl ArrayViewerWidget {
             return;
         }
         // Manual / unsolicited slice: display now.
-        if self.requested_indices.as_ref() == Some(&indices) {
+        let fulfilled = self.requested_indices.as_ref() == Some(&indices);
+        if fulfilled {
             self.requested_indices = None;
         }
-        if !indices.is_empty() {
-            self.current_indices = indices;
+        // An unsolicited slice (initial load / programmatic) also moves the
+        // handle; a fulfilled scrub response must NOT, or it would snap the
+        // handle back from where the user has dragged to.
+        if !fulfilled && !indices.is_empty() {
+            self.current_indices = indices.clone();
         }
+        self.displayed_indices = indices;
         self.set_image(pixels, width, height, is_integer, value_decimals);
+
+        // Coalesced follow-up: if the handle moved past this slice while it was
+        // loading, request the latest target now. This keeps at most one scrub
+        // request in flight — local connections see the intermediate frames,
+        // high-latency ones skip straight to where the handle ended up.
+        if self.playing_axis.is_none()
+            && self.requested_indices.is_none()
+            && !self.current_indices.is_empty()
+            && self.current_indices != self.displayed_indices
+        {
+            self.requested_indices = Some(self.current_indices.clone());
+            self.pending_slice_request = Some(self.current_indices.clone());
+        }
     }
 
     /// Advance play-mode state. Called once per frame before texture rebuild.
@@ -564,7 +589,8 @@ impl ArrayViewerWidget {
         let interval_elapsed = now - self.display_time >= self.play_interval;
         if ready && interval_elapsed {
             let p = self.pending_slice.take().unwrap();
-            self.current_indices = p.indices;
+            self.current_indices = p.indices.clone();
+            self.displayed_indices = p.indices;
             self.requested_indices = None;
             self.display_time = now;
             self.set_image(p.pixels, p.width, p.height, p.is_integer, p.value_decimals);
@@ -1292,6 +1318,7 @@ impl ArrayViewerWidget {
         let stretch_action = self.render_stretch_controls(&ctx, rect);
         self.render_colorbar(&ctx, rect);
         self.render_stretch_info_overlay(&ctx, rect);
+        self.render_slice_scrub_overlay(&ctx, rect);
         self.render_zoom_info_overlay(&ctx, rect, current_time);
         self.render_pivot_hint_overlay(&ctx, rect);
         let hover_overlay_rect = self.render_hover_overlay(&ctx, rect);
@@ -1379,9 +1406,14 @@ impl ArrayViewerWidget {
                 if let Some(slot) = self.current_indices.get_mut(axis) {
                     *slot = index;
                 }
-                // Request the chosen slice from the host.
-                self.requested_indices = Some(self.current_indices.clone());
-                self.pending_slice_request = Some(self.current_indices.clone());
+                // Coalesce: only fetch if nothing is already in flight. If a
+                // request is pending, the follow-up in `receive_slice` will pick
+                // up wherever the handle ends up — so a fast drag across many
+                // frames never floods the backend.
+                if self.requested_indices.is_none() {
+                    self.requested_indices = Some(self.current_indices.clone());
+                    self.pending_slice_request = Some(self.current_indices.clone());
+                }
             }
             SliceAction::Play(axis) => {
                 self.playing_axis = Some(axis);
@@ -2012,6 +2044,43 @@ impl ArrayViewerWidget {
             });
     }
 
+    /// Render a big centered index overlay while a scrubbed slice is still
+    /// loading (the shown frame lags the handle). The frame draws over it once
+    /// it arrives; on a high-latency scrub the number just keeps updating.
+    fn render_slice_scrub_overlay(&self, ctx: &egui::Context, widget_rect: egui::Rect) {
+        if self.slice_dims.is_empty() || self.current_indices == self.displayed_indices {
+            return;
+        }
+        let axis = self
+            .active_axis
+            .min(self.slice_dims.len().saturating_sub(1));
+        let cur = self.current_indices.get(axis).copied().unwrap_or(0);
+
+        // Center on the image area (offset from screen center by the panel above).
+        let offset = widget_rect.center() - ctx.screen_rect().center();
+        egui::Area::new(egui::Id::new("slice_scrub_overlay"))
+            .anchor(egui::Align2::CENTER_CENTER, offset)
+            .interactable(false)
+            .show(ctx, |ui| {
+                let text_color = get_overlay_text_color(ui);
+                let bg = get_overlay_bg(ui);
+                egui::Frame::NONE
+                    .fill(bg)
+                    .corner_radius(8.0)
+                    .inner_margin(egui::Margin::symmetric(24, 16))
+                    .show(ui, |ui| {
+                        // Extend (don't wrap) so the box sizes to the number.
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        ui.label(
+                            egui::RichText::new(format!("{}", cur + 1))
+                                .color(text_color)
+                                .size(48.0)
+                                .strong(),
+                        );
+                    });
+            });
+    }
+
     /// Render zoom level overlay while zooming (similar to contrast adjustment overlay)
     fn render_zoom_info_overlay(&self, ctx: &egui::Context, widget_rect: egui::Rect, current_time: f64) {
         // Check if we should show the overlay (during and shortly after zoom changes)
@@ -2479,6 +2548,33 @@ mod slice_tests {
         assert_eq!(w.active_axis, 1);
         w.set_cube(vec![5]);
         assert_eq!(w.active_axis, 0);
+    }
+
+    #[test]
+    fn scrubbing_coalesces_to_one_request_then_jumps_to_latest() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![100]);
+        w.receive_slice(vec![0], vec![0.0, 1.0, 2.0, 3.0], 2, 2, false, 6); // showing 0
+
+        // Fast drag 10 -> 20 -> 99: only the first emits a request; the rest
+        // coalesce (one in flight).
+        w.apply_slice_action(SliceAction::SetIndex(0, 10), 0.0);
+        assert_eq!(w.take_slice_request(), Some(vec![10]));
+        w.apply_slice_action(SliceAction::SetIndex(0, 20), 0.0);
+        w.apply_slice_action(SliceAction::SetIndex(0, 99), 0.0);
+        assert_eq!(w.current_indices, vec![99], "handle follows the drag");
+        assert_eq!(w.take_slice_request(), None, "no extra requests while one is in flight");
+
+        // The in-flight slice (10) arrives; the handle is now at 99, so it jumps
+        // straight there (skipping 20).
+        w.receive_slice(vec![10], vec![0.0, 1.0, 2.0, 3.0], 2, 2, false, 6);
+        assert_eq!(w.displayed_indices, vec![10]);
+        assert_eq!(w.take_slice_request(), Some(vec![99]));
+
+        // 99 arrives -> caught up, no further requests.
+        w.receive_slice(vec![99], vec![0.0, 1.0, 2.0, 3.0], 2, 2, false, 6);
+        assert_eq!(w.displayed_indices, vec![99]);
+        assert_eq!(w.take_slice_request(), None);
     }
 
     #[test]

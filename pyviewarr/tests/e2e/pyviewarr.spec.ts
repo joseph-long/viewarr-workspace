@@ -30,3 +30,30 @@ test("pyviewarr cube widget renders the in-canvas slice controls", async ({
 	await page.waitForTimeout(2000); // let egui paint the controls + first slice
 	await widget.screenshot({ path: "tests/e2e/screenshots/pyviewarr-cube.png" });
 });
+
+// 4D cube -> two sliceable axes -> two identical control rows with a radio
+// column selecting the live axis.
+const CUBE_4D_CELL = `import numpy as np
+import pyviewarr
+
+arr = np.arange(3 * 2 * 4 * 4, dtype=np.float32).reshape(3, 2, 4, 4)
+w = pyviewarr.show(arr, width=420, height=300)
+w`;
+
+test("pyviewarr 4D cube renders aligned rows with an axis radio", async ({
+	page
+}) => {
+	await page.notebook.createNew();
+	await page.notebook.setCell(0, "code", CUBE_4D_CELL);
+	await page.notebook.run();
+
+	const widget = page.locator(".jp-OutputArea-output .pyviewarr").first();
+	await expect(widget).toBeVisible();
+	const canvas = widget.locator(".pyviewarr-container canvas").first();
+	await expect(canvas).toBeVisible();
+
+	await page.waitForTimeout(2000);
+	await widget.screenshot({
+		path: "tests/e2e/screenshots/pyviewarr-cube-4d.png"
+	});
+});

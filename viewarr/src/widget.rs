@@ -69,6 +69,8 @@ enum StretchAction {
 #[derive(Clone, Debug, PartialEq)]
 enum SliceAction {
     None,
+    /// Make the given axis the "live" one (radio selection).
+    SetActive(usize),
     /// Manually set the index along the given axis (e.g. slider drag).
     SetIndex(usize, usize),
     /// Start playing the given axis.
@@ -220,6 +222,8 @@ pub struct ArrayViewerWidget {
     slice_dims: Vec<usize>,
     /// Current index along each sliceable axis (the displayed slice).
     current_indices: Vec<usize>,
+    /// The "live" axis whose controls are enabled (selected via the radio).
+    active_axis: usize,
     /// Which sliceable axis is currently playing, if any.
     playing_axis: Option<usize>,
     /// Play interval in seconds.
@@ -329,6 +333,7 @@ impl ArrayViewerWidget {
             markers: Vec::new(),
             slice_dims: Vec::new(),
             current_indices: Vec::new(),
+            active_axis: 0,
             playing_axis: None,
             play_interval: DEFAULT_PLAY_INTERVAL,
             display_time: 0.0,
@@ -490,6 +495,8 @@ impl ArrayViewerWidget {
         }
         self.slice_dims = dims;
         self.current_indices = vec![0; self.slice_dims.len()];
+        // Default the live axis to the innermost (conventional spectral/time axis).
+        self.active_axis = self.slice_dims.len().saturating_sub(1);
         self.playing_axis = None;
         self.requested_indices = None;
         self.pending_slice = None;
@@ -1355,6 +1362,14 @@ impl ArrayViewerWidget {
     fn apply_slice_action(&mut self, action: SliceAction, now: f64) {
         match action {
             SliceAction::None => {}
+            SliceAction::SetActive(axis) => {
+                // Switching the live axis pauses any playback and does NOT start
+                // the newly selected axis (the displayed frame is kept).
+                self.playing_axis = None;
+                self.requested_indices = None;
+                self.pending_slice = None;
+                self.active_axis = axis;
+            }
             SliceAction::SetIndex(axis, index) => {
                 // Manual scrubbing on the playing axis stops playback.
                 if self.playing_axis == Some(axis) {
@@ -1644,27 +1659,28 @@ impl ArrayViewerWidget {
         !self.slice_dims.is_empty()
     }
 
-    /// The axis that the single play button animates: the innermost leading axis,
-    /// which is the conventional spectral/time axis for a cube.
-    fn play_target_axis(&self) -> usize {
-        self.slice_dims.len().saturating_sub(1)
-    }
-
     /// Render the cube slice + play controls into a dedicated bar (an egui panel
-    /// above the pannable image, not an overlay on it). One compact row per axis:
-    /// a square play button and square speed selector on the left, a full-width
-    /// scrubber in the middle, and a fixed-width `index / total` readout on the
-    /// right. No-op for plain 2D.
+    /// above the pannable image, not an overlay on it). Every axis gets an
+    /// identical row — radio (which axis is "live"), square play button, square
+    /// speed selector, a full-width scrubber, and a fixed-width `index / total`
+    /// readout. Only the live axis's controls are enabled. The radio column is
+    /// omitted for a single axis (there's nothing to choose). No-op for plain 2D.
     pub fn show_slice_controls(&mut self, ui: &mut Ui) {
         if self.slice_dims.is_empty() {
             return;
         }
         let now = ui.input(|i| i.time);
-        let play_axis = self.play_target_axis();
         let mut action = SliceAction::None;
 
         // Square side shared by the play button and speed selector.
         let side = 22.0;
+        let multi = self.slice_dims.len() > 1;
+
+        let glyph = PLAY_SPEEDS
+            .iter()
+            .find(|(v, _, _)| (*v - self.play_interval).abs() < 1e-9)
+            .map(|(_, _, g)| *g)
+            .unwrap_or("¼");
 
         for axis in 0..self.slice_dims.len() {
             let len = self.slice_dims[axis];
@@ -1673,75 +1689,75 @@ impl ArrayViewerWidget {
             // Fixed width for each number cell: enough to hold the largest value
             // so the slash and totals never shift as the index changes.
             let num_w = (format!("{len}").len() as f32) * 8.0 + 4.0;
+            let is_active = self.active_axis == axis;
 
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+            ui.push_id(axis, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
 
-                // Left: square play button + square speed selector. Only the
-                // play-target axis carries them; other rows pad to keep the
-                // scrubbers aligned.
-                if axis == play_axis {
-                    let playing = self.playing_axis == Some(play_axis);
-                    let icon = if playing { phosphor::PAUSE } else { phosphor::PLAY };
-                    let play_resp = ui.add_sized(
-                        egui::vec2(side, side),
-                        egui::Button::new(egui::RichText::new(icon).size(13.0)),
-                    );
-                    if play_resp.clicked() {
-                        action = if playing {
-                            SliceAction::Pause
-                        } else {
-                            SliceAction::Play(play_axis)
-                        };
+                    // Radio to pick the live axis (omitted when there's only one).
+                    if multi && ui.radio(is_active, "").clicked() {
+                        action = SliceAction::SetActive(axis);
                     }
-                    play_resp.on_hover_text(if playing { "Pause" } else { "Play" });
 
-                    // Square speed selector; compact glyph on the button, full
-                    // "N s" labels in the dropdown.
-                    let glyph = PLAY_SPEEDS
-                        .iter()
-                        .find(|(v, _, _)| (*v - self.play_interval).abs() < 1e-9)
-                        .map(|(_, _, g)| *g)
-                        .unwrap_or("¼");
-                    ui.spacing_mut().interact_size = egui::vec2(side, side);
-                    ui.spacing_mut().button_padding = egui::vec2(2.0, 2.0);
-                    egui::ComboBox::from_id_salt("slice_speed")
-                        .selected_text(glyph)
-                        .width(side)
-                        .show_ui(ui, |ui| {
-                            for (interval, label, _) in PLAY_SPEEDS {
-                                let selected = (self.play_interval - interval).abs() < 1e-9;
-                                if ui.selectable_label(selected, label).clicked() {
-                                    action = SliceAction::SetSpeed(interval);
+                    // Everything else is identical per row, but only enabled for
+                    // the live axis.
+                    ui.add_enabled_ui(is_active, |ui| {
+                        let playing = self.playing_axis == Some(axis);
+                        let icon = if playing { phosphor::PAUSE } else { phosphor::PLAY };
+                        let play_resp = ui.add_sized(
+                            egui::vec2(side, side),
+                            egui::Button::new(egui::RichText::new(icon).size(13.0)),
+                        );
+                        if play_resp.clicked() {
+                            action = if playing {
+                                SliceAction::Pause
+                            } else {
+                                SliceAction::Play(axis)
+                            };
+                        }
+                        play_resp.on_hover_text(if playing { "Pause" } else { "Play" });
+
+                        // Square speed selector; compact glyph on the button,
+                        // full "N s" labels in the dropdown.
+                        ui.spacing_mut().interact_size = egui::vec2(side, side);
+                        ui.spacing_mut().button_padding = egui::vec2(2.0, 2.0);
+                        egui::ComboBox::from_id_salt("slice_speed")
+                            .selected_text(glyph)
+                            .width(side)
+                            .show_ui(ui, |ui| {
+                                for (interval, label, _) in PLAY_SPEEDS {
+                                    let selected = (self.play_interval - interval).abs() < 1e-9;
+                                    if ui.selectable_label(selected, label).clicked() {
+                                        action = SliceAction::SetSpeed(interval);
+                                    }
                                 }
+                            })
+                            .response
+                            .on_hover_text("Seconds per frame");
+
+                        // Right side, laid out right-to-left: `index / total`
+                        // with fixed-width cells, then the scrubber fills the gap.
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_sized(
+                                egui::vec2(num_w, side),
+                                egui::Label::new(format!("{len}")).selectable(false),
+                            );
+                            ui.label("/");
+                            ui.add_sized(
+                                egui::vec2(num_w, side),
+                                egui::Label::new(format!("{}", cur + 1)).selectable(false),
+                            );
+
+                            let mut idx = cur;
+                            ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(40.0);
+                            let resp =
+                                ui.add(egui::Slider::new(&mut idx, 0..=max).show_value(false));
+                            if resp.changed() && idx != cur {
+                                action = SliceAction::SetIndex(axis, idx);
                             }
-                        })
-                        .response
-                        .on_hover_text("Seconds per frame");
-                } else {
-                    ui.add_space(side * 2.0 + 4.0);
-                }
-
-                // Right side, laid out right-to-left: `index / total` with
-                // fixed-width cells, then the scrubber fills the gap to the left.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_sized(
-                        egui::vec2(num_w, side),
-                        egui::Label::new(format!("{len}")).selectable(false),
-                    );
-                    ui.label("/");
-                    ui.add_sized(
-                        egui::vec2(num_w, side),
-                        egui::Label::new(format!("{}", cur + 1)).selectable(false),
-                    );
-
-                    let mut idx = cur;
-                    ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(40.0);
-                    let resp =
-                        ui.add(egui::Slider::new(&mut idx, 0..=max).show_value(false));
-                    if resp.changed() && idx != cur {
-                        action = SliceAction::SetIndex(axis, idx);
-                    }
+                        });
+                    });
                 });
             });
         }
@@ -2454,5 +2470,31 @@ mod slice_tests {
         w.apply_slice_action(SliceAction::Play(0), 0.0);
         w.update_playback(0.0);
         assert_eq!(w.requested_indices, Some(vec![0]), "wraps past the end");
+    }
+
+    #[test]
+    fn set_cube_defaults_live_axis_to_innermost() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![3, 4]);
+        assert_eq!(w.active_axis, 1);
+        w.set_cube(vec![5]);
+        assert_eq!(w.active_axis, 0);
+    }
+
+    #[test]
+    fn switching_active_axis_pauses_without_starting_new() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![3, 4]); // two axes; live axis defaults to 1
+        w.receive_slice(vec![0, 0], vec![0.0, 1.0, 2.0, 3.0], 2, 2, false, 6);
+
+        w.apply_slice_action(SliceAction::Play(1), 0.0);
+        assert_eq!(w.playing_axis, Some(1));
+
+        // Selecting another axis pauses playback and makes it live, but does not
+        // begin playing the new axis.
+        w.apply_slice_action(SliceAction::SetActive(0), 0.5);
+        assert_eq!(w.active_axis, 0);
+        assert_eq!(w.playing_axis, None);
+        assert_eq!(w.requested_indices, None);
     }
 }

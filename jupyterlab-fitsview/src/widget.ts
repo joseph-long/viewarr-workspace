@@ -648,7 +648,14 @@ export class FITSPanel extends Widget {
       }
 
       console.log('[FITSViewer] Calling setSliceData');
-      viewarr.setSliceData(viewerId, buffer, width, height, arrayType, sliceIndices);
+      viewarr.setSliceData(
+        viewerId,
+        buffer,
+        width,
+        height,
+        arrayType,
+        sliceIndices
+      );
       console.log('[FITSViewer] setSliceData complete');
     } catch (error) {
       this._fetchAbortController = null;

@@ -46,7 +46,10 @@ declare module 'viewarr' {
    * every path where a fetch fails or is dropped.
    * @param indices - The indices of the request being abandoned.
    */
-  export function failSliceRequest(containerId: string, indices: number[]): void;
+  export function failSliceRequest(
+    containerId: string,
+    indices: number[]
+  ): void;
 
   /**
    * Register a callback invoked when the widget needs a cube slice fetched

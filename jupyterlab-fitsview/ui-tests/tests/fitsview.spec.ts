@@ -78,7 +78,9 @@ print('Created test.fits')`
     // The slice + play controls for the cube's leading axis now live inside the
     // egui canvas (no longer DOM elements), so we assert the viewer canvas for
     // the first HDU renders.
-    const canvas = viewer.locator('.jp-FITSViewer-viewerContainer canvas').first();
+    const canvas = viewer
+      .locator('.jp-FITSViewer-viewerContainer canvas')
+      .first();
     await expect(canvas).toBeVisible();
 
     // The in-canvas slice/play bar can't be asserted on via the DOM, so save a

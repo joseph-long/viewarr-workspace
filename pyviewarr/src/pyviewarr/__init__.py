@@ -1,5 +1,6 @@
 import importlib.metadata
 import pathlib
+import warnings
 from IPython.display import display
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, Literal, Optional, Tuple, TYPE_CHECKING, Union
@@ -450,8 +451,19 @@ class ViewArrWidget(anywidget.AnyWidget):
         if not isinstance(content, dict):
             return
         if content.get("type") == "request_slice":
-            indices = [int(i) for i in content.get("indices", [])]
-            self._send_slice(indices)
+            try:
+                indices = [int(i) for i in content.get("indices", [])]
+            except (TypeError, ValueError):
+                return
+            # Every request must get an answer. The viewer only has one slice
+            # request in flight at a time, so a request that goes unanswered --
+            # because the array is gone, the indices are stale, or reading the
+            # slice raised -- would leave its scrubber dead for the rest of the
+            # session. Report the failure instead of letting it escape here.
+            try:
+                self._send_slice(indices)
+            except Exception as exc:  # noqa: BLE001 - must not wedge the viewer
+                self._send_slice_error(indices, exc)
 
     def _compute_slice(self, indices):
         """Return the 2D slice at ``indices`` as a contiguous little-endian array."""
@@ -480,7 +492,7 @@ class ViewArrWidget(anywidget.AnyWidget):
         still completes.
         """
         if self._array is None:
-            return
+            raise RuntimeError("no array is set on this viewer")
         slice_arr = self._refresh_slice_state(indices)
         self.send(
             {
@@ -491,6 +503,26 @@ class ViewArrWidget(anywidget.AnyWidget):
                 "dtype": self.dtype,
             },
             buffers=[slice_arr.tobytes()],
+        )
+
+    def _send_slice_error(self, indices, exc):
+        """Tell the frontend a slice request could not be served.
+
+        The frontend hands this to the viewer so it stops waiting on the reply
+        and the slider keeps working; without it one failed read disables
+        slice navigation until the widget is recreated.
+        """
+        warnings.warn(
+            f"pyviewarr could not serve slice {list(indices)}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        self.send(
+            {
+                "type": "slice_error",
+                "indices": list(indices),
+                "message": f"{type(exc).__name__}: {exc}",
+            }
         )
 
     def set_array(self, arr: np.ndarray) -> None:

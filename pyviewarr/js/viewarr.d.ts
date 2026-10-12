@@ -79,6 +79,16 @@ declare module "viewarr" {
 	): void;
 
 	/**
+	 * Abandon an in-flight slice request that could not be fulfilled.
+	 *
+	 * The widget only issues a new request while none is in flight, so a
+	 * request that never gets a reply leaves the scrubber permanently dead.
+	 * Call this on every path where a fetch fails or is dropped.
+	 * @param indices - The indices of the request being abandoned.
+	 */
+	export function failSliceRequest(containerId: string, indices: number[]): void;
+
+	/**
 	 * Destroy a viewer instance and clean up resources.
 	 * @param containerId - The ID of the container (viewer instance).
 	 */

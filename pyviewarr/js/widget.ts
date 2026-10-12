@@ -3,6 +3,7 @@ import {
 	createViewer,
 	setCube,
 	setSliceData,
+	failSliceRequest,
 	destroyViewer,
 	getContrast,
 	setContrast,
@@ -327,8 +328,22 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 	 * (rather than via synced traits) so every request produces a fresh slice.
 	 */
 	function handleCustomMessage(content: any, buffers: DataView[]): void {
-		if (!viewerReady || isDisposed) return;
-		if (!content || content.type !== "slice" || !buffers || !buffers.length) {
+		if (!viewerReady || isDisposed || !content) return;
+
+		// The kernel could not serve this slice. Release the viewer's in-flight
+		// request so the scrubber keeps working — it only issues a new request
+		// while none is outstanding, so swallowing this would disable slice
+		// navigation until the widget is recreated.
+		if (content.type === "slice_error") {
+			console.error(
+				"pyviewarr: slice request failed:",
+				content.message ?? "unknown error"
+			);
+			failSliceRequest(viewerId, content.indices ?? []);
+			return;
+		}
+
+		if (content.type !== "slice" || !buffers || !buffers.length) {
 			return;
 		}
 		const view = buffers[0];
@@ -336,16 +351,24 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 			view.byteOffset,
 			view.byteOffset + view.byteLength
 		) as ArrayBuffer;
+		const indices = content.indices ?? [];
 		// Tagged with its slice indices so the widget can track the slider
 		// position and correlate play-mode prefetch responses.
-		setSliceData(
-			viewerId,
-			buffer,
-			content.width,
-			content.height,
-			content.dtype,
-			content.indices ?? []
-		);
+		try {
+			setSliceData(
+				viewerId,
+				buffer,
+				content.width,
+				content.height,
+				content.dtype,
+				indices
+			);
+		} catch (err) {
+			// A malformed payload (buffer size disagreeing with width/height,
+			// say) must not leave the request hanging either.
+			console.error("pyviewarr: could not display slice:", err);
+			failSliceRequest(viewerId, indices);
+		}
 	}
 
 	/** Leading-axis indices for the first slice of the current array. */
@@ -391,7 +414,11 @@ function render({ model, el }: RenderProps<WidgetModel>) {
 	 * re-requests the slice the kernel already holds still completes.
 	 */
 	function requestSlice(indices: number[]): void {
-		if (!viewerReady || isDisposed) return;
+		if (!viewerReady || isDisposed) {
+			// Nothing will answer, so do not leave the viewer waiting on it.
+			failSliceRequest(viewerId, indices);
+			return;
+		}
 		model.send({ type: "request_slice", indices });
 	}
 

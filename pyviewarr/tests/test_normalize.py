@@ -316,6 +316,52 @@ class TestWidget:
         assert len(sent) == 2
         assert sent[1][0]["indices"] == [1]
 
+    def test_failed_slice_request_reports_instead_of_hanging(self):
+        """A request the kernel cannot serve must still get a reply.
+
+        The viewer keeps only one slice request in flight, so an unanswered
+        request would leave its scrubber dead for the rest of the session."""
+        widget = ViewArrWidget()
+        data = np.arange(3 * 4 * 5).reshape(3, 4, 5).astype(np.float64)
+        widget.set_array(data)
+
+        sent = []
+        widget.send = lambda content, buffers=None: sent.append((content, buffers))
+
+        # Index past the end of the leading axis: reading it raises.
+        with pytest.warns(RuntimeWarning, match="could not serve slice"):
+            widget._handle_frontend_msg(
+                widget, {"type": "request_slice", "indices": [99]}, []
+            )
+
+        assert len(sent) == 1
+        content, _ = sent[0]
+        assert content["type"] == "slice_error"
+        assert content["indices"] == [99]
+        assert content["message"]
+
+        # The widget still serves good requests afterwards.
+        widget._handle_frontend_msg(widget, {"type": "request_slice", "indices": [2]}, [])
+        assert sent[1][0]["type"] == "slice"
+        assert sent[1][0]["indices"] == [2]
+
+    def test_slice_request_without_an_array_reports_an_error(self):
+        """With no array set there is nothing to send, but the frontend still
+        needs an answer so it can release the viewer's in-flight request."""
+        widget = ViewArrWidget()
+
+        sent = []
+        widget.send = lambda content, buffers=None: sent.append((content, buffers))
+
+        with pytest.warns(RuntimeWarning, match="could not serve slice"):
+            widget._handle_frontend_msg(
+                widget, {"type": "request_slice", "indices": [0]}, []
+            )
+
+        assert len(sent) == 1
+        assert sent[0][0]["type"] == "slice_error"
+        assert sent[0][0]["indices"] == [0]
+
     def test_get_normalization(self):
         """get_normalization should return ViewarrNormalize with current settings."""
         widget = ViewArrWidget()

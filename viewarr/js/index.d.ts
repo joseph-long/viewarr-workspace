@@ -99,6 +99,20 @@ export function setSliceData(
 ): void;
 
 /**
+ * Abandon an in-flight slice request the host could not fulfil.
+ *
+ * Call this whenever a slice fetch fails or is dropped, passing the indices
+ * {@link onSliceRequest} handed you. The widget only issues a new request while
+ * none is in flight, so a request that never gets a reply leaves the scrubber
+ * permanently dead — one failed round-trip would otherwise cost the user the
+ * whole session. Playback stops and the last good slice stays on screen.
+ *
+ * @param containerId - The ID of the container (viewer instance).
+ * @param indices - The indices of the request being abandoned.
+ */
+export function failSliceRequest(containerId: string, indices: number[]): void;
+
+/**
  * Destroy a viewer instance and clean up resources.
  *
  * @param containerId - The ID of the container (viewer instance).
@@ -418,6 +432,7 @@ declare const viewarr: {
   setImageData: typeof setImageData;
   setCube: typeof setCube;
   setSliceData: typeof setSliceData;
+  failSliceRequest: typeof failSliceRequest;
   destroyViewer: typeof destroyViewer;
   hasViewer: typeof hasViewer;
   getActiveViewers: typeof getActiveViewers;

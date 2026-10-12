@@ -215,6 +215,19 @@ impl ViewerHandle {
         Ok(())
     }
 
+    /// Abandon an in-flight slice request the host could not fulfil.
+    ///
+    /// Hosts **must** call this when a fetch fails or is otherwise dropped. The
+    /// widget only issues a new slice request while none is in flight, so a
+    /// request that never gets a reply leaves the scrubber permanently dead —
+    /// one failed network round-trip would otherwise cost the user the whole
+    /// session. Playback stops too, and the last good slice stays on screen.
+    #[wasm_bindgen(js_name = failSliceRequest)]
+    pub fn fail_slice_request(&self, indices: Vec<u32>) {
+        let indices: Vec<usize> = indices.into_iter().map(|i| i as usize).collect();
+        self.widget.borrow_mut().fail_slice_request(&indices);
+    }
+
     /// End event loop and release resources
     #[wasm_bindgen(js_name = destroy)]
     pub fn destroy(&self) {

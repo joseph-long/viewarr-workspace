@@ -39,6 +39,16 @@ declare module 'viewarr' {
   ): void;
 
   /**
+   * Abandon an in-flight slice request that could not be fulfilled.
+   *
+   * The widget only issues a new request while none is in flight, so a request
+   * that never gets a reply leaves the scrubber permanently dead. Call this on
+   * every path where a fetch fails or is dropped.
+   * @param indices - The indices of the request being abandoned.
+   */
+  export function failSliceRequest(containerId: string, indices: number[]): void;
+
+  /**
    * Register a callback invoked when the widget needs a cube slice fetched
    * (slider drag or play loop). The host should fetch that slice and deliver it
    * via setSliceData.

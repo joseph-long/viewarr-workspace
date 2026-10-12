@@ -623,9 +623,13 @@ impl ArrayViewerWidget {
     /// be fetched cannot be played through. The currently displayed image is
     /// left alone, so the viewer keeps showing the last good slice.
     pub fn fail_slice_request(&mut self, indices: &[usize]) {
-        if self.requested_indices.as_deref() == Some(indices) {
-            self.requested_indices = None;
+        // Only the request actually in flight can be failed. A stale or
+        // duplicate report — for a slice that already arrived, or one this
+        // widget never asked for — must not stop playback as a side effect.
+        if self.requested_indices.as_deref() != Some(indices) {
+            return;
         }
+        self.requested_indices = None;
         self.playing_axis = None;
         self.pending_slice = None;
     }
@@ -2513,6 +2517,22 @@ mod slice_tests {
 
         w.apply_slice_action(SliceAction::SetIndex(0, 1), 2.0);
         assert_eq!(w.take_slice_request(), Some(vec![1]));
+    }
+
+    #[test]
+    fn failing_a_stale_request_is_a_no_op() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![4]);
+        deliver(&mut w, vec![0]);
+        w.apply_slice_action(SliceAction::Play(0), 0.0);
+        w.update_playback(0.0);
+        assert_eq!(w.requested_indices, Some(vec![1]));
+
+        // A late failure report for a slice that is no longer in flight must
+        // not tear down playback that has already moved on.
+        w.fail_slice_request(&[0]);
+        assert_eq!(w.playing_axis, Some(0));
+        assert_eq!(w.requested_indices, Some(vec![1]));
     }
 
     #[test]

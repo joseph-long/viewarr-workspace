@@ -402,6 +402,10 @@ export class FITSPanel extends Widget {
   ): Promise<void> {
     const sliceState = this._sliceStates.get(hduIndex);
     if (!sliceState) {
+      // Nothing here can serve the request, so tell the widget it died.
+      // Otherwise it waits forever on a reply that is never coming and the
+      // scrubber stops responding for the rest of the session.
+      viewarr?.failSliceRequest(this._getViewerId(hduIndex), indices);
       return;
     }
     sliceState.sliceIndices = indices.slice();
@@ -668,14 +672,15 @@ export class FITSPanel extends Widget {
       return;
     }
 
+    const viewerId = this._getViewerId(hduIndex);
+    const { shape, sliceIndices } = sliceState;
+
     // Ensure viewer exists (creates on-demand)
     const viewerReady = await this._ensureViewer(hduIndex);
     if (!viewerReady) {
+      viewarr.failSliceRequest(viewerId, sliceIndices);
       return;
     }
-
-    const viewerId = this._getViewerId(hduIndex);
-    const { shape, sliceIndices } = sliceState;
 
     // Build slice string: for leading axes use current index, for image axes use full extent
     const slices = shape
@@ -714,6 +719,11 @@ export class FITSPanel extends Widget {
       );
     } catch (error) {
       console.error('Failed to load slice:', error);
+      // A dropped reply wedges the widget: it only issues a new slice request
+      // while none is in flight, so swallowing this failure would leave the
+      // scrubber dead until the document is reloaded. One flaky request should
+      // cost one frame, not the session.
+      viewarr.failSliceRequest(viewerId, sliceIndices);
     }
   }
 

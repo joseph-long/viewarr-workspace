@@ -1,0 +1,34 @@
+[package]
+name = "viewarr-native"
+version = "0.1.0"
+edition = "2021"
+authors = ["Joseph D. Long <me@joseph-long.com>"]
+license = "MIT"
+description = "Native desktop front-end for the viewarr array/image viewer"
+repository = "https://github.com/joseph-long/viewarr"
+
+[lib]
+name = "viewarr_native"
+path = "src/lib.rs"
+
+[[bin]]
+name = "viewarr"
+path = "src/main.rs"
+
+[dependencies]
+# The one real copy of the viewer lives at ../viewarr; this crate is a native
+# shell around the same ArrayViewerWidget the WASM build hands to JavaScript.
+viewarr = { path = "../viewarr" }
+
+# Keep these pinned to the same versions viewarr uses, so there is exactly one
+# egui in the dependency graph (two copies would not share types).
+egui = "0.33.3"
+eframe = "0.33.3"
+egui-phosphor = "0.11"
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+memmap2 = "0.9"
+
+[profile.release]
+opt-level = 2

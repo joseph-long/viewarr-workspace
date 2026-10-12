@@ -21,10 +21,13 @@ use web_sys::HtmlCanvasElement;
 
 #[cfg(target_arch = "wasm32")]
 mod app;
-mod colormap;
 mod colormap_luts;
-mod transform;
-mod widget;
+
+// Public so native front-ends (e.g. the `viewarr-native` desktop app) can host
+// the same widget the WASM build exposes to JavaScript.
+pub mod colormap;
+pub mod transform;
+pub mod widget;
 
 #[cfg(target_arch = "wasm32")]
 use app::ViewerApp;

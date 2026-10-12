@@ -614,6 +614,22 @@ impl ArrayViewerWidget {
         self.pending_slice_request.take()
     }
 
+    /// Abandon an in-flight slice request the host could not fulfil.
+    ///
+    /// Hosts must call this when a fetch fails, because the coalescing in
+    /// [`apply_slice_action`] only issues a new request while none is in
+    /// flight: a dropped request would leave `requested_indices` set forever
+    /// and the scrubber silently dead. Playback stops too — a slice that cannot
+    /// be fetched cannot be played through. The currently displayed image is
+    /// left alone, so the viewer keeps showing the last good slice.
+    pub fn fail_slice_request(&mut self, indices: &[usize]) {
+        if self.requested_indices.as_deref() == Some(indices) {
+            self.requested_indices = None;
+        }
+        self.playing_axis = None;
+        self.pending_slice = None;
+    }
+
     /// Get the current marker list in continuous image coordinates.
     pub fn markers(&self) -> &[(f32, f32)] {
         &self.markers
@@ -2478,6 +2494,39 @@ mod slice_tests {
         w.apply_slice_action(SliceAction::SetIndex(0, 3), 1.0);
         assert_eq!(w.current_indices, vec![3]);
         assert_eq!(w.take_slice_request(), Some(vec![3]));
+    }
+
+    #[test]
+    fn failed_request_frees_the_scrubber() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![4]);
+        deliver(&mut w, vec![0]);
+
+        w.apply_slice_action(SliceAction::SetIndex(0, 3), 1.0);
+        assert_eq!(w.take_slice_request(), Some(vec![3]));
+
+        // The host cannot serve it. Without clearing the in-flight marker the
+        // next scrub below would be coalesced away and never requested.
+        w.fail_slice_request(&[3]);
+        assert_eq!(w.requested_indices, None);
+        assert!(w.has_image(), "the last good slice stays on screen");
+
+        w.apply_slice_action(SliceAction::SetIndex(0, 1), 2.0);
+        assert_eq!(w.take_slice_request(), Some(vec![1]));
+    }
+
+    #[test]
+    fn failed_request_stops_playback() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_cube(vec![4]);
+        deliver(&mut w, vec![0]);
+        w.apply_slice_action(SliceAction::Play(0), 0.0);
+        w.update_playback(0.0);
+        assert_eq!(w.take_slice_request(), Some(vec![1]));
+
+        w.fail_slice_request(&[1]);
+        assert_eq!(w.playing_axis, None, "do not keep looping on unreadable data");
+        assert_eq!(w.requested_indices, None);
     }
 
     #[test]

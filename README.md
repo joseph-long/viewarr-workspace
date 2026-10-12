@@ -5,15 +5,21 @@ A monorepo for the `viewarr` Rust/WASM array viewer and the two packages that bu
 | Path                  | What it is                                                            |
 | --------------------- | --------------------------------------------------------------------- |
 | `viewarr/`            | The Rust/WASM array+image viewer (egui). **Single source of truth.**  |
+| `viewarr-native/`     | Native desktop app — the `viewarr` CLI, opens FITS files in a window.  |
 | `pyviewarr/`          | `pyviewarr` anywidget — PyPI package `pyviewarr`.                      |
 | `jupyterlab-fitsview/`| FITS viewer JupyterLab extension — PyPI package `fitsview`.            |
 
 ## Single-sourced viewarr
 
-There is exactly one copy of `viewarr`, at the top level. Each downstream package has a
-`viewarr` **symlink → `../viewarr`**, so their existing `file:`-based dependencies resolve to
-the one real directory. Build viewarr once and both packages consume the same
+There is exactly one copy of `viewarr`, at the top level. Each downstream JS/Python package
+has a `viewarr` **symlink → `../viewarr`**, so their existing `file:`-based dependencies
+resolve to the one real directory. Build viewarr once and both packages consume the same
 `viewarr/pkg/` output. `viewarr/pkg/` is a build artifact (gitignored), not committed.
+
+`viewarr-native/` reaches the same directory a different way — a Cargo `path` dependency on
+`../viewarr` — because it links the Rust library directly instead of consuming the WASM
+bundle. It needs no `wasm-pack` build, and hosts the same `ArrayViewerWidget` the browser
+gets, so the viewer behaves identically in all three front-ends.
 
 ## Local development
 
@@ -30,6 +36,19 @@ cd ../jupyterlab-fitsview && jlpm install && jlpm build
 pip install -e .
 jupyter labextension list 2>&1 | grep -i fitsview   # should show "OK"
 ```
+
+### Native desktop app
+
+Independent of the steps above — it builds straight from the Rust source, with no
+`wasm-pack` or npm involved:
+
+```bash
+cd viewarr-native
+cargo run --release -- path/to/image.fits   # or: cargo install --path .
+```
+
+See [`viewarr-native/README.md`](viewarr-native/README.md) for CLI options and the
+FITS features it covers.
 
 After changing viewarr's Rust source, rebuild it once (step 1) and both packages pick up the
 new `viewarr/pkg/`.

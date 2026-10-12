@@ -33,6 +33,7 @@ htmlcov/
 # viewarr (Rust/WASM) build artifacts
 viewarr/target/
 viewarr/pkg/
+viewarr-native/target/
 *.wasm
 
 # Package-specific build artifacts

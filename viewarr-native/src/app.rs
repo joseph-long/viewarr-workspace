@@ -261,12 +261,13 @@ impl eframe::App for NativeViewerApp {
         // Slice/play controls sit in their own bar directly above the image,
         // the innermost chrome because they choose which image is shown.
         if self.tabs.get(self.active).is_some_and(Tab::has_slices) {
-            let slice_frame = egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
-                left: 8,
-                right: 8,
-                top: 2,
-                bottom: 3,
-            });
+            let slice_frame =
+                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
+                    left: 8,
+                    right: 8,
+                    top: 2,
+                    bottom: 3,
+                });
             egui::TopBottomPanel::top("slice_controls")
                 .frame(slice_frame)
                 .show(ctx, |ui| {
@@ -340,7 +341,10 @@ mod tests {
         assert_eq!(app.active, 1);
         app.switch_tab(true);
         app.switch_tab(true);
-        assert_eq!(app.active, 0, "forward from the last tab wraps to the first");
+        assert_eq!(
+            app.active, 0,
+            "forward from the last tab wraps to the first"
+        );
 
         app.switch_tab(false);
         assert_eq!(app.active, 2, "back from the first tab wraps to the last");
@@ -386,7 +390,11 @@ mod tests {
 
         assert_eq!(app.tabs.len(), 2, "replacing must not add a tab");
         assert_eq!(app.active, 1);
-        assert_eq!(app.tabs[0].title(), "image2d.fits", "the other tab is untouched");
+        assert_eq!(
+            app.tabs[0].title(),
+            "image2d.fits",
+            "the other tab is untouched"
+        );
         assert_eq!(app.tabs[1].title(), "cube4d.fits");
     }
 

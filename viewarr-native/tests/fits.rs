@@ -27,10 +27,7 @@ fn assert_pixels(actual: &[f64], expected: &[f64]) {
         if e.is_nan() {
             assert!(a.is_nan(), "pixel {i}: expected NaN, got {a}");
         } else {
-            assert!(
-                (a - e).abs() < 1e-9,
-                "pixel {i}: expected {e}, got {a}"
-            );
+            assert!((a - e).abs() < 1e-9, "pixel {i}: expected {e}, got {a}");
         }
     }
 }
@@ -53,10 +50,30 @@ fn reads_a_2d_float_image_in_fits_order() {
     // which is the bottom row in FITS convention — exactly the order the widget
     // wants, so no flip happens anywhere.
     let expected: Vec<f64> = vec![
-        0.0, 1.0, 2.0, 3.0, 4.0, 5.0, //
-        10.0, 11.0, 12.0, 13.0, 14.0, 15.0, //
-        20.0, 21.0, 22.0, 23.0, 24.0, 25.0, //
-        30.0, 31.0, 32.0, 33.0, 34.0, f64::NAN,
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0, //
+        10.0,
+        11.0,
+        12.0,
+        13.0,
+        14.0,
+        15.0, //
+        20.0,
+        21.0,
+        22.0,
+        23.0,
+        24.0,
+        25.0, //
+        30.0,
+        31.0,
+        32.0,
+        33.0,
+        34.0,
+        f64::NAN,
     ];
     assert_pixels(&fits.read_plane(hdu, &[]).unwrap(), &expected);
 }
@@ -67,7 +84,11 @@ fn reads_unsigned_16_bit_cube_planes() {
     let hdu = &fits.hdus[0];
 
     assert_eq!(hdu.axes, vec![5, 3, 4]);
-    assert_eq!(hdu.slice_dims(), vec![4], "NAXIS3 is the one sliceable axis");
+    assert_eq!(
+        hdu.slice_dims(),
+        vec![4],
+        "NAXIS3 is the one sliceable axis"
+    );
     // BITPIX 16 with BZERO 32768 is the standard unsigned-16 encoding; it still
     // yields whole numbers, so the readout should stay integral.
     assert!(hdu.is_integer());
@@ -170,7 +191,10 @@ fn reports_tile_compressed_images_instead_of_misreading_them() {
     let fits = open("compressed.fits");
     let hdu = &fits.hdus[1];
 
-    assert!(hdu.compressed, "a BINTABLE with ZIMAGE=T is a compressed image");
+    assert!(
+        hdu.compressed,
+        "a BINTABLE with ZIMAGE=T is a compressed image"
+    );
     assert!(!hdu.is_viewable_image());
     // The real image shape comes from ZNAXISn, so the error message can say
     // what was skipped rather than describing the compressed-tile table.

@@ -322,6 +322,62 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # viewarr-native (the `viewarr` desktop binary)
+  #
+  # Deliberately does NOT depend on build-viewarr: this package links the Rust
+  # library directly instead of consuming the WASM bundle, so it needs no
+  # artifact and runs in parallel with everything above.
+  #
+  # Both platforms are built because the viewer is expected to run on Linux
+  # workstations as well as the Macs it is developed on, and the windowing and
+  # file-dialog backends differ entirely between them.
+  # ---------------------------------------------------------------------------
+  viewarr-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: viewarr-native
+    steps:
+      - uses: actions/checkout@v7
+
+      # winit and the glow renderer link against these; rfd needs nothing extra
+      # because it talks to the XDG desktop portal over D-Bus rather than GTK.
+      - name: Install Linux windowing libraries
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libssl-dev
+
+      # Same rustup install the viewarr build uses; the default profile brings
+      # rustfmt along with it.
+      - name: Install Rust
+        working-directory: .
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # Covers the FITS reader (against the astropy-written fixtures) and the
+      # tab bookkeeping. Neither opens a window, so this runs fine headless.
+      - name: Test
+        run: cargo test
+
+      # The tests alone would not catch a break in the GUI code, since nothing
+      # headless instantiates it -- but it still has to compile and link.
+      - name: Build release binary
+        run: cargo build --release
+
+  # ---------------------------------------------------------------------------
   # Publish BOTH packages to PyPI on a published GitHub release.
   # One release ships the freshly built viewarr into both packages.
   # ---------------------------------------------------------------------------

@@ -151,10 +151,7 @@ struct Header {
 
 impl Header {
     fn get(&self, key: &str) -> Option<&Value> {
-        self.cards
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v)
+        self.cards.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
     fn int(&self, key: &str) -> Option<i64> {
@@ -251,7 +248,9 @@ fn parse_header(buf: &[u8], offset: usize) -> Result<(Header, usize)> {
         }
         let block = &buf[pos..pos + BLOCK];
         pos += BLOCK;
-        for card in block.chunks_exact(CARD) {
+        // BLOCK is a whole number of CARDs (36 of them), so nothing is left over.
+        let (cards_in_block, _) = block.as_chunks::<CARD>();
+        for card in cards_in_block {
             // Headers are restricted to printable ASCII, so this is lossless in
             // practice and merely defensive for malformed files.
             let text = String::from_utf8_lossy(card);
@@ -358,8 +357,8 @@ pub struct FitsFile {
 impl FitsFile {
     /// Memory-map `path` and walk its HDU chain. No pixel data is read here.
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path)
-            .with_context(|| format!("could not open {}", path.display()))?;
+        let file =
+            File::open(path).with_context(|| format!("could not open {}", path.display()))?;
         // SAFETY: the usual mmap caveat — another process truncating the file
         // while we hold the map would fault. Acceptable for a desktop viewer.
         let mmap = unsafe { Mmap::map(&file) }
@@ -395,7 +394,9 @@ impl FitsFile {
     /// file dialog pick their HDU — and explain a refusal — the same way.
     pub fn resolve_hdu(&self, requested: Option<&str>) -> Result<usize> {
         let Some(requested) = requested else {
-            return self.default_image_hdu().ok_or_else(|| self.no_image_error());
+            return self
+                .default_image_hdu()
+                .ok_or_else(|| self.no_image_error());
         };
 
         let index = if let Ok(index) = requested.parse::<usize>() {

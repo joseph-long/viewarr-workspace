@@ -1,116 +1,266 @@
-//! The native eframe shell hosting an `ArrayViewerWidget`.
+//! The native eframe shell: a button bar, a tab bar, and per-tab content.
 //!
-//! This is the desktop counterpart to viewarr's WASM `ViewerApp`: same layout
-//! (a slice-control bar above a pannable image), but where the web build routes
-//! slice requests out to JavaScript, here we serve them straight from the
-//! memory-mapped FITS file.
+//! Chrome that belongs to the application (open buttons, which files are open)
+//! lives above the viewer rather than on top of it, so the canvas stays pure
+//! image. The layout nests outward-in:
+//!
+//! ```text
+//! ┌ button bar ────────── application: acts on whichever tab is active
+//! ├ tab bar ───────────── application: which files are open
+//! ├ file info ─────────── per tab: swaps when the active tab changes
+//! ├ slice controls ───── per tab: only for files with sliceable axes
+//! └ viewer canvas ────── per tab
+//! ```
 
-use anyhow::Result;
-use egui_phosphor as phosphor;
+use std::path::{Path, PathBuf};
 
-use viewarr::widget::ArrayViewerWidget;
+use egui_phosphor::regular as phosphor;
 
-use crate::fits::FitsFile;
+use crate::tab::Tab;
+
+/// What a file-picking button asked for.
+enum OpenMode {
+    /// Replace the active tab's contents, as a plain "Open" does.
+    Replace,
+    /// Add a tab and switch to it.
+    NewTab,
+}
 
 pub struct NativeViewerApp {
-    fits: FitsFile,
-    hdu_index: usize,
-    widget: ArrayViewerWidget,
-    /// Set when a slice read fails, so the failure is visible in the window
-    /// rather than only on stderr.
-    error: Option<String>,
+    tabs: Vec<Tab>,
+    active: usize,
+    /// Why the last open attempt failed. Shown in the button bar, since at that
+    /// point there may be no tab to attach it to.
+    open_error: Option<String>,
 }
 
 impl NativeViewerApp {
-    /// Build the app and load the first plane, so the window has something to
-    /// show on its very first frame.
-    pub fn new(cc: &eframe::CreationContext<'_>, fits: FitsFile, hdu_index: usize) -> Result<Self> {
+    /// Build the app around whatever files the command line named. An empty
+    /// list is fine — the window opens with the Open button and nothing else.
+    pub fn new(cc: &eframe::CreationContext<'_>, tabs: Vec<Tab>) -> Self {
         // The widget labels its controls with Phosphor glyphs; without this font
         // every button renders as tofu.
         let mut fonts = egui::FontDefinitions::default();
-        phosphor::add_to_fonts(&mut fonts, phosphor::Variant::Regular);
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
 
-        let mut widget = ArrayViewerWidget::new();
-
-        let hdu = &fits.hdus[hdu_index];
-        let dims = hdu.slice_dims();
-        let indices = vec![0usize; dims.len()];
-        widget.set_cube(dims);
-
-        let pixels = fits.read_plane(hdu, &indices)?;
-        widget.receive_slice(
-            indices,
-            pixels,
-            hdu.width() as u32,
-            hdu.height() as u32,
-            hdu.is_integer(),
-            hdu.value_decimals(),
-        );
-
-        let file_label = fits
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| fits.path.display().to_string());
-        widget.set_overlay_message(&format!("{file_label} · {} · {}", hdu.name, hdu.shape_string()));
-
-        Ok(Self {
-            fits,
-            hdu_index,
-            widget,
-            error: None,
-        })
+        Self::with_tabs(tabs)
     }
 
-    /// Fulfil whatever slice the widget is asking for. Reads are from a mapped
-    /// file and so complete in-frame; the loop converges because the widget
-    /// coalesces to at most one outstanding request, and the bound just
-    /// guarantees we always hand control back to the frame.
-    fn serve_slice_requests(&mut self) {
-        for _ in 0..8 {
-            let Some(indices) = self.widget.take_slice_request() else {
-                return;
-            };
+    /// The tab bookkeeping on its own, with no egui context — which is also
+    /// what lets the tab behaviour below be tested without a window.
+    fn with_tabs(tabs: Vec<Tab>) -> Self {
+        Self {
+            tabs,
+            active: 0,
+            open_error: None,
+        }
+    }
 
-            let (result, width, height, is_integer, decimals) = {
-                let hdu = &self.fits.hdus[self.hdu_index];
-                (
-                    self.fits.read_plane(hdu, &indices),
-                    hdu.width() as u32,
-                    hdu.height() as u32,
-                    hdu.is_integer(),
-                    hdu.value_decimals(),
-                )
-            };
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.active)
+    }
 
-            match result {
-                Ok(pixels) => {
-                    self.error = None;
-                    self.widget
-                        .receive_slice(indices, pixels, width, height, is_integer, decimals);
-                }
-                Err(err) => {
-                    // Tell the widget the request died, or its coalescing would
-                    // wait forever on a reply that is never coming and the
-                    // scrubber would stop responding. The previous plane stays
-                    // on screen; we just surface why the new one never arrived.
-                    let message = format!("could not read slice {indices:?}: {err:#}");
-                    eprintln!("viewarr: {message}");
-                    self.widget.fail_slice_request(&indices);
-                    self.error = Some(message);
-                    return;
+    /// Ask for a file and open it. A cancelled dialog is not an error and
+    /// leaves everything as it was.
+    fn pick_and_open(&mut self, mode: OpenMode) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Open array file")
+            .add_filter("FITS", &["fits", "fit", "fts"])
+            .add_filter("All files", &["*"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.open_path(&path, mode);
+    }
+
+    /// Open `path`, reporting a failure in the button bar rather than closing
+    /// or disturbing whatever is already open.
+    fn open_path(&mut self, path: &Path, mode: OpenMode) {
+        match Tab::open(path, None) {
+            Ok(tab) => {
+                self.open_error = None;
+                match mode {
+                    OpenMode::Replace if !self.tabs.is_empty() => {
+                        self.tabs[self.active] = tab;
+                    }
+                    // With nothing open yet, "Open" has no tab to replace, so
+                    // it opens the first one.
+                    _ => {
+                        self.tabs.push(tab);
+                        self.active = self.tabs.len() - 1;
+                    }
                 }
             }
+            Err(err) => {
+                let message = format!("{err:#}");
+                eprintln!("viewarr: {message}");
+                self.open_error = Some(message);
+            }
         }
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(index);
+        // Keep the selection on a real tab, preferring the one that slid into
+        // the closed tab's place.
+        self.active = self.active.min(self.tabs.len().saturating_sub(1));
+    }
+
+    /// Step the active tab, wrapping around at both ends.
+    fn switch_tab(&mut self, forward: bool) {
+        let count = self.tabs.len();
+        if count < 2 {
+            return;
+        }
+        self.active = if forward {
+            (self.active + 1) % count
+        } else {
+            (self.active + count - 1) % count
+        };
+    }
+
+    /// Cmd+Shift+Arrow on macOS, Ctrl+Shift+Arrow elsewhere — `COMMAND` is
+    /// egui's per-platform spelling of exactly that. Consumed so the keystroke
+    /// does not also reach the viewer widget.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let shortcut = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        let (prev, next) = ctx.input_mut(|i| {
+            (
+                i.consume_key(shortcut, egui::Key::ArrowLeft),
+                i.consume_key(shortcut, egui::Key::ArrowRight),
+            )
+        });
+        if prev {
+            self.switch_tab(false);
+        }
+        if next {
+            self.switch_tab(true);
+        }
+    }
+
+    /// Application chrome: acts on whichever tab is active.
+    fn show_button_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("button_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(format!("{} Open…", phosphor::FOLDER_OPEN))
+                    .on_hover_text("Replace the contents of the current tab")
+                    .clicked()
+                {
+                    self.pick_and_open(OpenMode::Replace);
+                }
+                if ui
+                    .button(format!("{} Open in Tab", phosphor::PLUS))
+                    .on_hover_text("Open a file in a new tab")
+                    .clicked()
+                {
+                    self.pick_and_open(OpenMode::NewTab);
+                }
+
+                if let Some(error) = &self.open_error {
+                    ui.separator();
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            });
+        });
+    }
+
+    /// Which files are open. Hidden entirely when there is nothing open, so an
+    /// empty window is not cluttered by an empty bar.
+    fn show_tab_bar(&mut self, ctx: &egui::Context) {
+        if self.tabs.is_empty() {
+            return;
+        }
+
+        egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
+            // Many open files should scroll rather than squeeze every tab down
+            // to an unreadable sliver.
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let mut selected = self.active;
+                    let mut to_close = None;
+
+                    for (index, tab) in self.tabs.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            if ui
+                                .selectable_label(index == self.active, tab.title())
+                                .on_hover_text(tab.path_string())
+                                .clicked()
+                            {
+                                selected = index;
+                            }
+                            if ui
+                                .small_button(phosphor::X)
+                                .on_hover_text("Close this tab")
+                                .clicked()
+                            {
+                                to_close = Some(index);
+                            }
+                        });
+                        ui.separator();
+                    }
+
+                    self.active = selected;
+                    if let Some(index) = to_close {
+                        self.close_tab(index);
+                    }
+                });
+            });
+        });
+    }
+
+    /// Per-tab chrome, subordinate to the tab bar: what this tab is showing.
+    /// Rebuilt from the active tab each frame, so it swaps with the selection.
+    fn show_file_info(&mut self, ctx: &egui::Context) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let (title, path, hdu, shape, dtype) = (
+            tab.title().to_string(),
+            tab.path_string(),
+            tab.hdu_name().to_string(),
+            tab.shape_string(),
+            tab.dtype_name(),
+        );
+        let error = tab.error().map(str::to_string);
+
+        egui::TopBottomPanel::top("file_info").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(title).strong())
+                    .on_hover_text(path);
+                ui.separator();
+                ui.label(hdu);
+                ui.separator();
+                ui.label(shape);
+                ui.separator();
+                ui.label(dtype);
+
+                if let Some(error) = error {
+                    ui.separator();
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            });
+        });
     }
 }
 
 impl eframe::App for NativeViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Slice/play controls sit in their own bar above the image, a level up
-        // from the image's own overlays. Only shown for cubes.
-        if self.widget.has_slices() {
+        self.handle_shortcuts(ctx);
+
+        self.show_button_bar(ctx);
+        self.show_tab_bar(ctx);
+        self.show_file_info(ctx);
+
+        // Slice/play controls sit in their own bar directly above the image,
+        // the innermost chrome because they choose which image is shown.
+        if self.tabs.get(self.active).is_some_and(Tab::has_slices) {
             let slice_frame = egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
                 left: 8,
                 right: 8,
@@ -120,28 +270,165 @@ impl eframe::App for NativeViewerApp {
             egui::TopBottomPanel::top("slice_controls")
                 .frame(slice_frame)
                 .show(ctx, |ui| {
-                    self.widget.show_slice_controls(ui);
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        tab.show_slice_controls(ui);
+                    }
                 });
-        }
-
-        if let Some(error) = &self.error {
-            egui::TopBottomPanel::bottom("error_bar").show(ctx, |ui| {
-                ui.colored_label(ui.visuals().error_fg_color, error);
-            });
         }
 
         let frame = egui::Frame::central_panel(&ctx.style()).inner_margin(0.0);
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-            let container_size = ui.available_size();
-            self.widget.show(ui, container_size);
+            match self.tabs.get_mut(self.active) {
+                Some(tab) => tab.show_viewer(ui),
+                None => {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("Open a file to begin.");
+                    });
+                }
+            }
         });
 
         // Serve after rendering, so a request raised this frame is satisfied
         // before the next one draws.
-        self.serve_slice_requests();
+        if let Some(tab) = self.active_tab_mut() {
+            tab.serve_slice_requests();
+        }
 
         // Match the web shell: repaint continuously so playback, the zoom
         // indicator fade, and drag feedback all animate smoothly.
         ctx.request_repaint();
+    }
+}
+
+/// Open every path the command line named, in order. A file that will not open
+/// is reported but does not stop the rest from loading.
+pub fn open_paths(paths: &[PathBuf], requested_hdu: Option<&str>) -> (Vec<Tab>, Vec<String>) {
+    let mut tabs = Vec::new();
+    let mut errors = Vec::new();
+    for path in paths {
+        match Tab::open(path, requested_hdu) {
+            Ok(tab) => tabs.push(tab),
+            Err(err) => errors.push(format!("{err:#}")),
+        }
+    }
+    (tabs, errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(name)
+    }
+
+    fn app_with(names: &[&str]) -> NativeViewerApp {
+        let paths: Vec<PathBuf> = names.iter().map(|n| fixture(n)).collect();
+        let (tabs, errors) = open_paths(&paths, None);
+        assert!(errors.is_empty(), "fixtures should open: {errors:?}");
+        NativeViewerApp::with_tabs(tabs)
+    }
+
+    #[test]
+    fn switching_wraps_in_both_directions() {
+        let mut app = app_with(&["image2d.fits", "cube3d.fits", "cube4d.fits"]);
+        assert_eq!(app.active, 0);
+
+        app.switch_tab(true);
+        assert_eq!(app.active, 1);
+        app.switch_tab(true);
+        app.switch_tab(true);
+        assert_eq!(app.active, 0, "forward from the last tab wraps to the first");
+
+        app.switch_tab(false);
+        assert_eq!(app.active, 2, "back from the first tab wraps to the last");
+    }
+
+    #[test]
+    fn switching_is_a_no_op_without_somewhere_to_go() {
+        let mut app = app_with(&[]);
+        app.switch_tab(true);
+        assert_eq!(app.active, 0, "no tabs: nothing to select");
+
+        let mut app = app_with(&["image2d.fits"]);
+        app.switch_tab(true);
+        app.switch_tab(false);
+        assert_eq!(app.active, 0, "one tab: it stays selected");
+    }
+
+    #[test]
+    fn closing_keeps_the_selection_on_a_real_tab() {
+        let mut app = app_with(&["image2d.fits", "cube3d.fits", "cube4d.fits"]);
+
+        // Closing the active last tab must not leave `active` past the end.
+        app.active = 2;
+        app.close_tab(2);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 1);
+
+        app.close_tab(0);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active, 0);
+
+        app.close_tab(0);
+        assert!(app.tabs.is_empty());
+        assert_eq!(app.active, 0, "an empty app still has a valid index");
+    }
+
+    #[test]
+    fn open_replaces_the_active_tab_in_place() {
+        let mut app = app_with(&["image2d.fits", "cube3d.fits"]);
+        app.active = 1;
+
+        app.open_path(&fixture("cube4d.fits"), OpenMode::Replace);
+
+        assert_eq!(app.tabs.len(), 2, "replacing must not add a tab");
+        assert_eq!(app.active, 1);
+        assert_eq!(app.tabs[0].title(), "image2d.fits", "the other tab is untouched");
+        assert_eq!(app.tabs[1].title(), "cube4d.fits");
+    }
+
+    #[test]
+    fn open_in_tab_appends_and_selects_it() {
+        let mut app = app_with(&["image2d.fits"]);
+
+        app.open_path(&fixture("cube3d.fits"), OpenMode::NewTab);
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 1, "a newly opened tab becomes the active one");
+        assert_eq!(app.tabs[1].title(), "cube3d.fits");
+    }
+
+    #[test]
+    fn open_with_nothing_open_yet_creates_the_first_tab() {
+        // "Open" has no tab to replace when the window started empty, so it
+        // has to open one rather than doing nothing.
+        let mut app = app_with(&[]);
+        app.open_path(&fixture("image2d.fits"), OpenMode::Replace);
+
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active, 0);
+    }
+
+    #[test]
+    fn a_failed_open_reports_without_disturbing_what_is_open() {
+        let mut app = app_with(&["image2d.fits"]);
+
+        app.open_path(&fixture("compressed.fits"), OpenMode::NewTab);
+
+        assert_eq!(app.tabs.len(), 1, "the failed file must not become a tab");
+        assert_eq!(app.tabs[0].title(), "image2d.fits");
+        let error = app.open_error.as_deref().expect("the failure is reported");
+        assert!(
+            error.contains("tile-compressed"),
+            "the reason should survive to the UI: {error}"
+        );
+
+        // A later good open clears the message.
+        app.open_path(&fixture("cube3d.fits"), OpenMode::NewTab);
+        assert!(app.open_error.is_none());
+        assert_eq!(app.tabs.len(), 2);
     }
 }

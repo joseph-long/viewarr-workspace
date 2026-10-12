@@ -6,3 +6,4 @@
 
 pub mod app;
 pub mod fits;
+pub mod tab;

@@ -11,11 +11,35 @@ Or install it onto your `PATH`:
 
 ```bash
 cargo install --path .
-viewarr path/to/image.fits
+viewarr path/to/image.fits        # one file
+viewarr a.fits b.fits c.fits      # one tab each
+viewarr                           # empty window; open files from the toolbar
 ```
 
 There is no macOS app bundle yet — this is a plain CLI binary that opens a
 window.
+
+## The window
+
+Chrome stacks above the image rather than floating on top of it, so the canvas
+stays pure image. Each bar is subordinate to the one above:
+
+```
+┌ button bar ───────── Open… / Open in Tab — act on whichever tab is active
+├ tab bar ──────────── which files are open
+├ file info ────────── name · HDU · shape · type, for the active tab
+├ slice controls ───── only for files with sliceable axes
+└ viewer canvas
+```
+
+- **Open…** replaces the contents of the current tab. With nothing open yet, it
+  opens the first one.
+- **Open in Tab** adds a tab and switches to it.
+- **Cmd+Shift+←/→** (Ctrl+Shift+←/→ off macOS) moves between tabs, wrapping at
+  both ends. **✕** on a tab closes it.
+
+Every tab holds its own viewer state, so zoom, stretch, colormap and slice
+position are per-file and survive switching away and back.
 
 ## What it shows
 
@@ -30,13 +54,17 @@ front, so scrubbing through a cube larger than RAM works.
 ## Options
 
 ```
-viewarr [--hdu <INDEX|EXTNAME>] [--list] <PATH>
+viewarr [--hdu <INDEX|EXTNAME>] [--list] [PATHS]...
 ```
 
-- `--list` prints the file's HDUs and exits, without opening a window.
+- `--list` prints each named file's HDUs and exits, without opening a window.
 - `--hdu` picks which HDU to display, by index (`--hdu 1`) or by `EXTNAME`
-  (`--hdu SCI`). The default is the first HDU holding a displayable image, which
-  skips the dataless primary HDU that multi-extension files usually start with.
+  (`--hdu SCI`); it applies to every file named on the command line. The default
+  is the first HDU holding a displayable image, which skips the dataless primary
+  HDU that multi-extension files usually start with. Files opened from the
+  toolbar always use that default — there is no HDU picker in the window yet.
+- A file that will not open is reported on stderr and skipped; the rest still
+  open. If every named file fails, no window opens and the exit status is 1.
 
 ## Supported formats
 
@@ -65,3 +93,9 @@ cargo test
 written by `astropy.io.fits`, with expected pixel values taken from reading them
 back with astropy. The fixtures encode each pixel's own coordinates in its
 value, so a transposed, flipped, or mis-strided read fails loudly.
+
+The tab bookkeeping in `src/app.rs` is unit-tested against those same fixtures —
+switching, wrapping, closing, and the difference between Open and Open in Tab —
+since none of that is visible to the FITS tests and all of it is easy to get
+subtly wrong. What the tests cannot cover is the drawing itself or the native
+file dialog; those need a human looking at the window.

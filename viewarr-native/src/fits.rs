@@ -388,6 +388,73 @@ impl FitsFile {
         self.hdus.iter().position(Hdu::is_viewable_image)
     }
 
+    /// Resolve which HDU to display: the caller's choice by index or `EXTNAME`,
+    /// or the first displayable image when they did not name one.
+    ///
+    /// Lives here rather than in the CLI so that files opened through the GUI's
+    /// file dialog pick their HDU — and explain a refusal — the same way.
+    pub fn resolve_hdu(&self, requested: Option<&str>) -> Result<usize> {
+        let Some(requested) = requested else {
+            return self.default_image_hdu().ok_or_else(|| self.no_image_error());
+        };
+
+        let index = if let Ok(index) = requested.parse::<usize>() {
+            if index >= self.hdus.len() {
+                bail!(
+                    "{} has no HDU {index} (it has {})",
+                    self.path.display(),
+                    self.hdus.len()
+                );
+            }
+            index
+        } else {
+            self.hdus
+                .iter()
+                .position(|h| h.name.eq_ignore_ascii_case(requested))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "{} has no HDU named {requested:?}; run with --list to see what it does have",
+                        self.path.display()
+                    )
+                })?
+        };
+
+        let hdu = &self.hdus[index];
+        if hdu.compressed {
+            bail!(
+                "HDU {index} ({}) is a tile-compressed image ({}), which this build cannot decompress yet",
+                hdu.name,
+                hdu.shape_string()
+            );
+        }
+        if !hdu.is_viewable_image() {
+            bail!(
+                "HDU {index} ({}) holds no 2-D-or-larger image data; run with --list to see what the file contains",
+                hdu.name
+            );
+        }
+        Ok(index)
+    }
+
+    /// Explain what went wrong when nothing in the file can be displayed,
+    /// naming compressed HDUs specifically since those are a common and
+    /// fixable surprise.
+    fn no_image_error(&self) -> anyhow::Error {
+        let compressed = self.hdus.iter().filter(|h| h.compressed).count();
+        if compressed > 0 {
+            anyhow!(
+                "{} has no uncompressed image HDU ({compressed} tile-compressed image(s) found, \
+                 which this build cannot decompress yet)",
+                self.path.display()
+            )
+        } else {
+            anyhow!(
+                "{} has no image HDU with 2 or more axes; run with --list to see what it contains",
+                self.path.display()
+            )
+        }
+    }
+
     /// Read a single 2-D plane as `f64`, in the row-major, bottom-row-first
     /// order the widget expects — which is exactly FITS storage order, so no
     /// flipping is needed here.

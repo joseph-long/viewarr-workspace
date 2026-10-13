@@ -57,6 +57,10 @@ const COLORBAR_BOX_WIDTH: f32 = 70.0;
 /// The box's full footprint including the text edit's own margins, used to
 /// decide when the pointer counts as being on the colorbar.
 const COLORBAR_BOX_OUTER_W: f32 = COLORBAR_BOX_WIDTH + 14.0;
+/// Degrees of rotation per point of vertical drag on the rotation grip.
+/// A full turn costs about a screen-height of travel, which leaves fine angles
+/// reachable without making a half-turn a marathon.
+const ROTATION_DRAG_DEG_PER_POINT: f32 = 0.5;
 /// Duration to show zoom level overlay after zooming
 const ZOOM_OVERLAY_DURATION: f64 = 0.5;
 /// Default play interval in seconds (¼ s)
@@ -1408,43 +1412,7 @@ impl ArrayViewerWidget {
         self.render_overlay_message(&ctx, rect, hover_overlay_rect, zoom_controls_rect);
         self.render_build_info(&ctx, rect);
 
-        // Apply collected actions from bottom controls
-        match control_action {
-            ZoomAction::None => {}
-            ZoomAction::ZoomIn => self.zoom_in(None, viewport_center),
-            ZoomAction::ZoomOut => self.zoom_out(None, viewport_center),
-            ZoomAction::Reset => self.zoom_to_fit(),
-            ZoomAction::ResetRotation => {
-                let current = self.transform.rotation();
-                if current.abs() > 0.001 {
-                    self.transform.set_rotation(0.0);
-                    if !self.rotation_input_focused {
-                        self.rotation_input_text = "0.0".to_string();
-                    }
-                }
-            }
-            ZoomAction::RotateBy(delta) => {
-                self.transform.rotate_by(delta);
-                // Only update text if user is not currently editing
-                if !self.rotation_input_focused {
-                    self.rotation_input_text = format!("{:.1}", self.transform.rotation());
-                }
-            }
-            ZoomAction::TogglePivotMarker => {
-                self.transform.show_pivot_marker = !self.transform.show_pivot_marker;
-            }
-            ZoomAction::ResetPivot => {
-                self.transform.set_pivot_to_center(self.width, self.height);
-            }
-            ZoomAction::CenterOnPoint(x, y) => {
-                self.transform.center_on_image_point(
-                    egui::pos2(x, y),
-                    egui::vec2(self.width as f32, self.height as f32),
-                    egui::vec2(0.0, 0.0), // Will be computed
-                    egui::Rect::NOTHING,
-                );
-            }
-        }
+        self.apply_zoom_action(control_action, viewport_center);
 
         match stretch_action {
             StretchAction::None => {}
@@ -1465,6 +1433,49 @@ impl ArrayViewerWidget {
         }
 
         response
+    }
+
+    /// Apply an action collected from the zoom/rotation control row.
+    ///
+    /// Split out of `show` so the row's behaviour can be driven in tests
+    /// without standing up the whole widget.
+    fn apply_zoom_action(&mut self, action: ZoomAction, viewport_center: egui::Pos2) {
+        match action {
+        ZoomAction::None => {}
+        ZoomAction::ZoomIn => self.zoom_in(None, viewport_center),
+        ZoomAction::ZoomOut => self.zoom_out(None, viewport_center),
+        ZoomAction::Reset => self.zoom_to_fit(),
+        ZoomAction::ResetRotation => {
+            let current = self.transform.rotation();
+            if current.abs() > 0.001 {
+                self.transform.set_rotation(0.0);
+                if !self.rotation_input_focused {
+                    self.rotation_input_text = "0.0".to_string();
+                }
+            }
+        }
+        ZoomAction::RotateBy(delta) => {
+            self.transform.rotate_by(delta);
+            // Only update text if user is not currently editing
+            if !self.rotation_input_focused {
+                self.rotation_input_text = format!("{:.1}", self.transform.rotation());
+            }
+        }
+        ZoomAction::TogglePivotMarker => {
+            self.transform.show_pivot_marker = !self.transform.show_pivot_marker;
+        }
+        ZoomAction::ResetPivot => {
+            self.transform.set_pivot_to_center(self.width, self.height);
+        }
+        ZoomAction::CenterOnPoint(x, y) => {
+            self.transform.center_on_image_point(
+                egui::pos2(x, y),
+                egui::vec2(self.width as f32, self.height as f32),
+                egui::vec2(0.0, 0.0), // Will be computed
+                egui::Rect::NOTHING,
+            );
+        }
+        }
     }
 
     /// Apply an action collected from the slice / play controls.
@@ -1652,6 +1663,35 @@ impl ArrayViewerWidget {
                         if ui.add_sized(small_button_size, cw_btn).on_hover_text("Rotate 15° CW").clicked() {
                             action = ZoomAction::RotateBy(-transform::ROTATION_STEP);
                         }
+
+                        // Continuous rotation, for angles the 15° steps cannot
+                        // reach. Vertical drag rather than horizontal: the row
+                        // is a horizontal strip, so sideways travel would run
+                        // straight into its neighbours after a few degrees.
+                        let (grip_rect, grip_response) =
+                            ui.allocate_exact_size(small_button_size, egui::Sense::drag());
+                        let grip_color = if grip_response.dragged() {
+                            text_color
+                        } else if grip_response.hovered() {
+                            text_color
+                        } else {
+                            text_color.gamma_multiply(0.6)
+                        };
+                        paint_grip_lines(ui.painter(), grip_rect, grip_color);
+                        if grip_response.dragged() {
+                            let dy = grip_response.drag_delta().y;
+                            if dy != 0.0 {
+                                // Screen y grows downward and rotation is
+                                // counter-clockwise-positive, so dragging up
+                                // has to turn the image left.
+                                action = ZoomAction::RotateBy(
+                                    -dy * ROTATION_DRAG_DEG_PER_POINT,
+                                );
+                            }
+                        }
+                        grip_response
+                            .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+                            .on_hover_text("Drag up/down to rotate left/right");
 
                         ui.separator();
 
@@ -2276,19 +2316,7 @@ impl ArrayViewerWidget {
                         egui::Stroke::new(1.0_f32, line),
                         egui::StrokeKind::Inside,
                     );
-                    // Parallel lines across the tab: the conventional "drag me"
-                    // texture, horizontal because the tab travels vertically.
-                    let inset = 3.0;
-                    for i in 0..3 {
-                        let ly = rect.center().y + (i as f32 - 1.0) * 4.0;
-                        painter.line_segment(
-                            [
-                                egui::pos2(rect.min.x + inset, ly),
-                                egui::pos2(rect.max.x - inset, ly),
-                            ],
-                            egui::Stroke::new(1.0_f32, line),
-                        );
-                    }
+                    paint_grip_lines(painter, rect, line);
                 }
 
                 if response.drag_started() {
@@ -2933,6 +2961,22 @@ fn colorbar_y_to_value(bar: egui::Rect, span: (f64, f64), y: f32) -> f64 {
         0.0
     };
     lo + t * (hi - lo)
+}
+
+/// The conventional "drag me" texture: parallel lines across `rect`, drawn
+/// horizontally because every grip in this widget travels vertically.
+fn paint_grip_lines(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let inset = 3.0;
+    for i in 0..3 {
+        let y = rect.center().y + (i as f32 - 1.0) * 4.0;
+        painter.line_segment(
+            [
+                egui::pos2(rect.min.x + inset, y),
+                egui::pos2(rect.max.x - inset, y),
+            ],
+            egui::Stroke::new(1.0_f32, color),
+        );
+    }
 }
 
 /// Halo and core colours for the colorbar's arrows and leader lines.
@@ -4283,6 +4327,163 @@ mod hover_overlay_tests {
         assert!(
             !joined.contains("--"),
             "placeholders should be gone entirely: {texts:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rotation_grip_tests {
+    use super::*;
+
+    fn widget_with_image() -> ArrayViewerWidget {
+        let mut w = ArrayViewerWidget::new();
+        w.set_image(vec![0.0, 1.0, 2.0, 3.0], 2, 2, false, 6);
+        w
+    }
+
+    /// Run one frame of the zoom/rotation control row and apply whatever it
+    /// produced, exactly as `show` does. Returns the grip's rect, found by the
+    /// parallel lines it paints -- the only horizontal hairlines in the row.
+    fn run_controls(
+        w: &mut ArrayViewerWidget,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::Rect {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                let (action, _) = w.render_zoom_controls(ctx, screen.center(), screen);
+                w.apply_zoom_action(action, screen.center());
+            },
+        );
+
+        fn collect(shape: &egui::Shape, out: &mut Vec<[egui::Pos2; 2]>) {
+            match shape {
+                egui::Shape::LineSegment { points, .. } if points[0].y == points[1].y => {
+                    out.push(*points)
+                }
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        collect(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut segments = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut segments);
+        }
+
+        let mut rect = egui::Rect::NOTHING;
+        for seg in segments {
+            rect.extend_with(seg[0]);
+            rect.extend_with(seg[1]);
+        }
+        rect
+    }
+
+    fn drag_grip(w: &mut ArrayViewerWidget, ctx: &egui::Context, grip: egui::Rect, dy: f32) {
+        let from = grip.center();
+        let to = egui::pos2(from.x, from.y + dy);
+        // Walk the pointer over first. A press that teleports it would land on
+        // the grip carrying the whole jump as drag delta, which a real pointer
+        // arriving by moving never does.
+        run_controls(w, ctx, vec![egui::Event::PointerMoved(from)]);
+        run_controls(
+            w,
+            ctx,
+            vec![egui::Event::PointerButton {
+                pos: from,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        run_controls(w, ctx, vec![egui::Event::PointerMoved(to)]);
+        run_controls(
+            w,
+            ctx,
+            vec![egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+    }
+
+    /// Lay the row out and find the grip. egui sizes on one pass and paints on
+    /// the next, so this takes two frames.
+    fn settle(w: &mut ArrayViewerWidget, ctx: &egui::Context) -> egui::Rect {
+        run_controls(w, ctx, Vec::new());
+        let grip = run_controls(w, ctx, Vec::new());
+        assert!(grip.is_positive(), "the grip should have been painted");
+        grip
+    }
+
+    #[test]
+    fn dragging_up_turns_left_and_down_turns_right() {
+        let mut w = widget_with_image();
+        let ctx = egui::Context::default();
+        let grip = settle(&mut w, &ctx);
+
+        // Up the screen is negative y; rotation is counter-clockwise-positive.
+        drag_grip(&mut w, &ctx, grip, -40.0);
+        let after_up = w.rotation();
+        assert!(
+            after_up > 0.0,
+            "dragging up should turn the image left, got {after_up}"
+        );
+        assert!(
+            (after_up - 40.0 * ROTATION_DRAG_DEG_PER_POINT).abs() < 1.0,
+            "expected about {} degrees, got {after_up}",
+            40.0 * ROTATION_DRAG_DEG_PER_POINT
+        );
+
+        drag_grip(&mut w, &ctx, grip, 40.0);
+        assert!(
+            w.rotation().abs() < 1.0,
+            "dragging back down should undo it, got {}",
+            w.rotation()
+        );
+    }
+
+    #[test]
+    fn the_text_box_follows_the_drag() {
+        let mut w = widget_with_image();
+        let ctx = egui::Context::default();
+        let grip = settle(&mut w, &ctx);
+
+        drag_grip(&mut w, &ctx, grip, -30.0);
+
+        assert!(w.rotation().abs() > 0.1, "the drag should have done something");
+        assert_eq!(
+            w.rotation_input_text,
+            format!("{:.1}", w.rotation()),
+            "the box should show the angle the drag produced"
+        );
+    }
+
+    #[test]
+    fn rotation_from_the_grip_is_continuous_not_stepped() {
+        // The whole point of the grip: angles the 15-degree buttons cannot hit.
+        let mut w = widget_with_image();
+        let ctx = egui::Context::default();
+        let grip = settle(&mut w, &ctx);
+
+        drag_grip(&mut w, &ctx, grip, -7.0);
+
+        let angle = w.rotation();
+        assert!(angle.abs() > 0.01, "nothing moved: {angle}");
+        assert!(
+            (angle % transform::ROTATION_STEP).abs() > 0.01,
+            "expected an off-step angle, got {angle}"
         );
     }
 }

@@ -858,18 +858,27 @@ impl ArrayViewerWidget {
     /// If colorbar is locked, unlock and recompute limits from current image.
     pub fn reset_display(&mut self) {
         self.reset_current_stretch();
+        self.reset_limits_and_unlock();
+    }
+
+    /// Put the limits back on the data, unlocking them first if they were
+    /// pinned, and leave the stretch alone.
+    ///
+    /// Kept separate from [`Self::reset_current_stretch`] because the two are
+    /// independent: losing a carefully placed pair of limits because the
+    /// contrast needed resetting -- or the reverse -- is what makes a reset
+    /// button not worth pressing.
+    pub fn reset_limits_and_unlock(&mut self) {
         if self.colorbar_locked {
             self.colorbar_locked = false;
             if let Some(pixels) = self.pixels.as_deref() {
                 let (min_val, max_val) = Self::auto_limits_from_pixels(pixels);
                 self.apply_limits(min_val, max_val, true);
                 self.texture_dirty = true;
-            } else {
-                self.reset_limits();
+                return;
             }
-        } else {
-            self.reset_limits();
         }
+        self.reset_limits();
     }
 
     /// Set whether user is currently adjusting stretch
@@ -2417,72 +2426,104 @@ impl ArrayViewerWidget {
     /// Lock and reset buttons, stacked under the bar.
     fn render_colorbar_buttons(&mut self, ctx: &egui::Context, bar_rect: egui::Rect) {
         let spacing = 4.0_f32;
-        let button_size = COLORBAR_BAR_WIDTH;
+        let size = COLORBAR_BAR_WIDTH;
+        // Stacked under the bar, in the order they are most often wanted.
+        let slot = |n: f32| egui::pos2(bar_rect.min.x, bar_rect.max.y + (spacing + size) * n + spacing);
 
-        let lock_button_pos = egui::pos2(bar_rect.min.x, bar_rect.max.y + spacing);
-        egui::Area::new(egui::Id::new("colorbar_lock_button"))
-            .fixed_pos(lock_button_pos)
+        if Self::colorbar_button(
+            ctx,
+            "colorbar_lock_button",
+            slot(0.0),
+            size,
+            if self.is_colorbar_locked() {
+                phosphor::LOCK
+            } else {
+                phosphor::LOCK_OPEN
+            },
+            // The lock is a state, not an action, so it is always clickable;
+            // "lit" here means engaged rather than available.
+            true,
+            self.is_colorbar_locked(),
+            if self.is_colorbar_locked() {
+                "Limits stay put when a new array is loaded"
+            } else {
+                "Limits are recomputed when a new array is loaded"
+            },
+        ) {
+            self.toggle_colorbar_lock();
+        }
+
+        let limits_changed = self.is_limits_modified() || self.is_colorbar_locked();
+        if Self::colorbar_button(
+            ctx,
+            "colorbar_reset_button",
+            slot(1.0),
+            size,
+            phosphor::ARROW_COUNTER_CLOCKWISE,
+            limits_changed,
+            limits_changed,
+            "Reset the min/max limits to the data",
+        ) {
+            self.reset_limits_and_unlock();
+        }
+
+        // Its own control rather than a second job for the arrow above: the
+        // stretch and the limits are set independently, so resetting one
+        // should not undo the other. The histogram glyph points at what the
+        // contrast/bias actually act on -- the same distribution the hover
+        // overlay draws -- which keeps it from reading as another limits reset.
+        let stretch_changed = self.is_stretch_modified();
+        if Self::colorbar_button(
+            ctx,
+            "colorbar_stretch_reset_button",
+            slot(2.0),
+            size,
+            phosphor::CHART_BAR,
+            stretch_changed,
+            stretch_changed,
+            "Reset contrast and bias",
+        ) {
+            self.reset_current_stretch();
+        }
+    }
+
+    /// One square overlay button under the colorbar. Returns whether it was
+    /// clicked this frame.
+    #[allow(clippy::too_many_arguments)]
+    fn colorbar_button(
+        ctx: &egui::Context,
+        id: &str,
+        pos: egui::Pos2,
+        size: f32,
+        glyph: &str,
+        enabled: bool,
+        lit: bool,
+        tooltip: &str,
+    ) -> bool {
+        let mut clicked = false;
+        egui::Area::new(egui::Id::new(id))
+            .fixed_pos(pos)
             .order(egui::Order::Middle)
             .show(ctx, |ui| {
                 let text_color = get_overlay_text_color(ui);
                 let bg_color = get_overlay_bg(ui);
-                let is_locked = self.is_colorbar_locked();
 
                 ui.style_mut().spacing.button_padding = egui::vec2(2.0, 2.0);
-                let btn_icon = egui::RichText::new(if is_locked {
-                    phosphor::LOCK
-                } else {
-                    phosphor::LOCK_OPEN
-                })
-                .color(if is_locked {
-                    text_color
-                } else {
-                    text_color.gamma_multiply(0.4)
-                })
-                .size(12.0);
-                let btn = egui::Button::new(btn_icon)
-                    .fill(bg_color)
-                    .min_size(egui::vec2(button_size, button_size));
-                let response = ui.add(btn);
-                if response.clicked() {
-                    self.toggle_colorbar_lock();
-                }
-                response.on_hover_text(if is_locked {
-                    "Limits stay put when a new array is loaded"
-                } else {
-                    "Limits are recomputed when a new array is loaded"
-                });
-            });
-
-        let reset_button_pos =
-            egui::pos2(bar_rect.min.x, bar_rect.max.y + spacing + button_size + spacing);
-        egui::Area::new(egui::Id::new("colorbar_reset_button"))
-            .fixed_pos(reset_button_pos)
-            .order(egui::Order::Middle)
-            .show(ctx, |ui| {
-                let text_color = get_overlay_text_color(ui);
-                let bg_color = get_overlay_bg(ui);
-                let is_modified = self.is_display_modified() || self.is_colorbar_locked();
-
-                ui.style_mut().spacing.button_padding = egui::vec2(2.0, 2.0);
-                let btn_icon = egui::RichText::new(phosphor::ARROW_COUNTER_CLOCKWISE)
-                    .color(if is_modified {
+                let icon = egui::RichText::new(glyph)
+                    .color(if lit {
                         text_color
                     } else {
                         text_color.gamma_multiply(0.4)
                     })
                     .size(12.0);
-                let btn = egui::Button::new(btn_icon)
+                let button = egui::Button::new(icon)
                     .fill(bg_color)
-                    .min_size(egui::vec2(button_size, button_size));
-                let response = ui.add_enabled(is_modified, btn);
-                if response.clicked() {
-                    // Puts both limits back on the ends of the bar, which is
-                    // the only way out of a stretch dragged somewhere useless.
-                    self.reset_display();
-                }
-                response.on_hover_text("Reset contrast/bias and restore min/max limits");
+                    .min_size(egui::vec2(size, size));
+                let response = ui.add_enabled(enabled, button);
+                clicked = response.clicked();
+                response.on_hover_text(tooltip);
             });
+        clicked
     }
 
     /// Render contrast/bias values while adjusting
@@ -3980,6 +4021,107 @@ mod colorbar_tests {
         // they have to follow the ramp when it flips.
         assert_eq!(w.ramp_color(0.0), top);
         assert_eq!(w.ramp_color(1.0), bottom);
+    }
+
+    #[test]
+    fn resetting_the_stretch_leaves_the_limits_alone() {
+        let mut w = widget_with(vec![0.0, 10.0, 20.0, 30.0], 2, 2);
+        w.set_value_range(5.0, 25.0);
+        w.set_contrast(3.0);
+        w.set_bias(0.2);
+        assert!(w.is_limits_modified() && w.is_stretch_modified());
+
+        w.reset_current_stretch();
+
+        assert!(!w.is_stretch_modified(), "contrast/bias should be back to default");
+        assert_eq!(
+            w.value_range(),
+            (5.0, 25.0),
+            "limits placed by hand must survive a stretch reset"
+        );
+    }
+
+    #[test]
+    fn resetting_the_limits_leaves_the_stretch_alone() {
+        let mut w = widget_with(vec![0.0, 10.0, 20.0, 30.0], 2, 2);
+        let original = w.value_range();
+        w.set_value_range(5.0, 25.0);
+        w.set_contrast(3.0);
+        w.set_bias(0.2);
+
+        w.reset_limits_and_unlock();
+
+        assert_eq!(w.value_range(), original, "limits should be back on the data");
+        assert!(
+            w.is_stretch_modified(),
+            "a contrast/bias dialled in by hand must survive a limits reset"
+        );
+        let cb = w.current_contrast_bias();
+        assert!((cb.contrast - 3.0).abs() < 1e-9 && (cb.bias - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resetting_the_limits_also_unpins_a_locked_colorbar() {
+        let mut w = widget_with(vec![0.0, 10.0, 20.0, 30.0], 2, 2);
+        w.toggle_colorbar_lock();
+        w.set_value_range(5.0, 25.0);
+        assert!(w.is_colorbar_locked());
+
+        w.reset_limits_and_unlock();
+
+        assert!(!w.is_colorbar_locked(), "the lock is what pins the limits");
+        assert!(!w.is_limits_modified());
+    }
+
+    #[test]
+    fn reset_display_still_does_both() {
+        // The combined reset remains available to hosts even though the two
+        // buttons now drive the halves separately.
+        let mut w = widget_with(vec![0.0, 10.0, 20.0, 30.0], 2, 2);
+        let original = w.value_range();
+        w.set_value_range(5.0, 25.0);
+        w.set_contrast(3.0);
+
+        w.reset_display();
+
+        assert_eq!(w.value_range(), original);
+        assert!(!w.is_stretch_modified());
+    }
+
+    #[test]
+    fn the_button_stack_does_not_overlap_itself() {
+        // Three square buttons under the bar, each clear of the next.
+        let mut w = widget_with(vec![0.0, 10.0, 20.0, 30.0], 2, 2);
+        let ctx = egui::Context::default();
+        run_colorbar_frame(&mut w, &ctx, None);
+        let shapes = run_colorbar_shapes(&mut w, &ctx, Vec::new());
+
+        let bar = harness_bar();
+        let mut tops: Vec<f32> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r)
+                    if (r.rect.min.x - bar.min.x).abs() < 1.0
+                        && r.rect.min.y > bar.max.y
+                        && (r.rect.width() - COLORBAR_BAR_WIDTH).abs() < 2.0 =>
+                {
+                    Some(r.rect.min.y)
+                }
+                _ => None,
+            })
+            .collect();
+        tops.sort_by(f32::total_cmp);
+        tops.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+
+        assert_eq!(tops.len(), 3, "expected three buttons under the bar: {tops:?}");
+        for pair in tops.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= COLORBAR_BAR_WIDTH,
+                "buttons at {} and {} overlap",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 
     #[test]

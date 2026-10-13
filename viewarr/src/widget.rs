@@ -143,18 +143,6 @@ enum LimitHandle {
     Max,
 }
 
-/// An in-progress drag of a colorbar limit handle.
-///
-/// The value span is captured when the drag starts and held for its duration:
-/// the span is derived from the very limits being dragged, so recomputing it
-/// each frame would rescale the bar under the pointer and leave the value
-/// chasing itself.
-#[derive(Clone, Copy)]
-struct ColorbarDrag {
-    handle: LimitHandle,
-    span: (f64, f64),
-}
-
 /// Stretch function type
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StretchType {
@@ -266,8 +254,14 @@ pub struct ArrayViewerWidget {
     texture: Option<TextureHandle>,
     /// Colorbar texture
     colorbar_texture: Option<TextureHandle>,
-    /// The colorbar limit handle currently being dragged, if any.
-    colorbar_drag: Option<ColorbarDrag>,
+    /// While a limit handle is being dragged, the value span the bar covered
+    /// when the drag began.
+    ///
+    /// Held still for the drag's duration: the span is derived from the very
+    /// limits being dragged, so recomputing it each frame would rescale the bar
+    /// under the pointer and leave the value chasing itself. `Some` doubles as
+    /// "a drag is in progress".
+    colorbar_drag: Option<(f64, f64)>,
     /// Cached value histogram drawn over the colorbar on hover/drag.
     colorbar_histogram: Option<ColorbarHistogram>,
     /// Track if right mouse button started a drag (for contrast/bias adjustment)
@@ -2024,11 +2018,11 @@ impl ArrayViewerWidget {
         let painter = Self::colorbar_painter(ctx);
         painter.add(egui::Shape::line(
             points.clone(),
-            egui::Stroke::new(3.0, Color32::from_black_alpha(160)),
+            egui::Stroke::new(3.0_f32, Color32::from_black_alpha(160)),
         ));
         painter.add(egui::Shape::line(
             points,
-            egui::Stroke::new(1.0, Color32::WHITE),
+            egui::Stroke::new(1.0_f32, Color32::WHITE),
         ));
     }
 
@@ -2050,10 +2044,7 @@ impl ArrayViewerWidget {
         );
 
         // Hold the span still for the length of a drag; see ColorbarDrag.
-        let span = match self.colorbar_drag {
-            Some(drag) => drag.span,
-            None => self.colorbar_span(),
-        };
+        let span = self.colorbar_drag.unwrap_or_else(|| self.colorbar_span());
         let (vmin, vmax) = self.scaling_range();
         // Each box is centred on its own handle, so an arrow and its value are
         // always on the same line.
@@ -2160,7 +2151,7 @@ impl ArrayViewerWidget {
         painter.rect_stroke(
             bar.expand(1.0),
             0.0,
-            egui::Stroke::new(1.0, Color32::GRAY),
+            egui::Stroke::new(1.0_f32, Color32::GRAY),
             egui::StrokeKind::Outside,
         );
     }
@@ -2196,14 +2187,14 @@ impl ArrayViewerWidget {
                 egui::pos2(base_x, y + COLORBAR_ARROW_HALF_H),
             ],
             core,
-            egui::Stroke::new(1.5, halo),
+            egui::Stroke::new(1.5_f32, halo),
         ));
 
         let box_edge = bar.max.x + COLORBAR_CONNECTOR_W;
         // Halo under core, same reason as the arrow's outline.
-        let mut run = |from: egui::Pos2, to: egui::Pos2| {
-            painter.line_segment([from, to], egui::Stroke::new(3.5, halo));
-            painter.line_segment([from, to], egui::Stroke::new(1.5, core));
+        let run = |from: egui::Pos2, to: egui::Pos2| {
+            painter.line_segment([from, to], egui::Stroke::new(3.5_f32, halo));
+            painter.line_segment([from, to], egui::Stroke::new(1.5_f32, core));
         };
         if engaged {
             // Stop either side of the tab rather than drawing through it.
@@ -2275,7 +2266,7 @@ impl ArrayViewerWidget {
                     painter.rect_stroke(
                         rect,
                         2.0,
-                        egui::Stroke::new(1.0, line),
+                        egui::Stroke::new(1.0_f32, line),
                         egui::StrokeKind::Inside,
                     );
                     // Parallel lines across the tab: the conventional "drag me"
@@ -2288,13 +2279,13 @@ impl ArrayViewerWidget {
                                 egui::pos2(rect.min.x + inset, ly),
                                 egui::pos2(rect.max.x - inset, ly),
                             ],
-                            egui::Stroke::new(1.0, line),
+                            egui::Stroke::new(1.0_f32, line),
                         );
                     }
                 }
 
                 if response.drag_started() {
-                    self.colorbar_drag = Some(ColorbarDrag { handle, span });
+                    self.colorbar_drag = Some(span);
                 }
                 if response.dragged() {
                     if let Some(pos) = response.interact_pointer_pos() {
@@ -2542,7 +2533,7 @@ impl ArrayViewerWidget {
         let cur = self.current_indices.get(axis).copied().unwrap_or(0);
 
         // Center on the image area (offset from screen center by the panel above).
-        let offset = widget_rect.center() - ctx.screen_rect().center();
+        let offset = widget_rect.center() - ctx.content_rect().center();
         egui::Area::new(egui::Id::new("slice_scrub_overlay"))
             .anchor(egui::Align2::CENTER_CENTER, offset)
             .interactable(false)
@@ -2603,7 +2594,11 @@ impl ArrayViewerWidget {
     }
 
     /// Render build info at bottom-center of widget (debug toggle)
-    fn render_build_info(&self, ctx: &egui::Context, widget_rect: egui::Rect) {
+    ///
+    /// Takes the widget rect for symmetry with its sibling overlays but does
+    /// not need it: the Area is anchored within egui's content rect, which
+    /// already excludes any panels above the image.
+    fn render_build_info(&self, ctx: &egui::Context, _widget_rect: egui::Rect) {
         if !self.show_build_info {
             return;
         }
@@ -2711,7 +2706,7 @@ impl ArrayViewerWidget {
     fn render_pivot_marker(&self, painter: &egui::Painter, screen_pos: egui::Pos2) {
         let size = 12.0;
         let stroke_color = egui::Color32::from_rgba_unmultiplied(255, 100, 100, 200);
-        let stroke = egui::Stroke::new(2.0, stroke_color);
+        let stroke = egui::Stroke::new(2.0_f32, stroke_color);
         
         // Draw crosshair
         painter.line_segment(
@@ -2752,8 +2747,8 @@ impl ArrayViewerWidget {
         };
         let marker_color = egui::Color32::from_rgb(0, 255, 255);
         let half_size = 6.0;
-        let outline = egui::Stroke::new(4.0, outline_color);
-        let fill = egui::Stroke::new(2.0, marker_color);
+        let outline = egui::Stroke::new(4.0_f32, outline_color);
+        let fill = egui::Stroke::new(2.0_f32, marker_color);
 
         for &(x, y) in &self.markers {
             let screen_pos = self
@@ -3220,7 +3215,6 @@ mod colorbar_tests {
         ctx: &egui::Context,
         pointer: Option<egui::Pos2>,
     ) -> Vec<egui::epaint::PathShape> {
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
         let mut events = Vec::new();
         if let Some(pos) = pointer {
             events.push(egui::Event::PointerMoved(pos));
@@ -3817,10 +3811,7 @@ mod colorbar_tests {
         run_colorbar_frame(&mut w, &ctx, None);
 
         // Pretend a drag is in flight, pointer well away from the bar.
-        w.colorbar_drag = Some(ColorbarDrag {
-            handle: LimitHandle::Max,
-            span: w.colorbar_span(),
-        });
+        w.colorbar_drag = Some(w.colorbar_span());
         let during = run_colorbar_frame(&mut w, &ctx, Some(egui::pos2(700.0, 500.0)));
         assert_eq!(
             histogram_paths(&during).len(),

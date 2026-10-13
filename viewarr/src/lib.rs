@@ -518,8 +518,8 @@ impl ViewerHandle {
             egui::vec2(viewport_height * img_aspect, viewport_height)
         };
 
-        // Calculate zoom needed to fit the region
-        let region_aspect = region_width / region_height;
+        // Calculate zoom needed to fit the region. Taking the smaller of the two
+        // fits the whole region, which already accounts for its aspect ratio.
         let zoom_x = (img_width as f32 / region_width) * (base_display_size.x / viewport_width);
         let zoom_y = (img_height as f32 / region_height) * (base_display_size.y / viewport_height);
         let zoom = zoom_x.min(zoom_y).clamp(transform::MIN_ZOOM, transform::MAX_ZOOM);

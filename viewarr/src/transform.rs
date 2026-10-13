@@ -506,7 +506,9 @@ mod tests {
 
         // After zoom, the same relative position in image space should be under zoom_center
         // Using the formula: pan_new = d * (1 - zoom_ratio) + pan_old * zoom_ratio
-        let zoom_ratio = 2.0;
+        // Derived from the starting zoom rather than hard-coded, so the test
+        // still checks the right thing if the default zoom ever changes.
+        let zoom_ratio = 2.0 / old_zoom;
         let expected_offset = d * (1.0 - zoom_ratio) + old_offset * zoom_ratio;
 
         assert!((t.pan_offset.x - expected_offset.x).abs() < 0.01);

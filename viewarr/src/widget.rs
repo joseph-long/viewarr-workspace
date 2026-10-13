@@ -54,6 +54,9 @@ const COLORBAR_HISTOGRAM_W: f32 = 90.0;
 const COLORBAR_BOX_HEIGHT: f32 = 20.0;
 /// Width of a limit value box.
 const COLORBAR_BOX_WIDTH: f32 = 70.0;
+/// The box's full footprint including the text edit's own margins, used to
+/// decide when the pointer counts as being on the colorbar.
+const COLORBAR_BOX_OUTER_W: f32 = COLORBAR_BOX_WIDTH + 14.0;
 /// Duration to show zoom level overlay after zooming
 const ZOOM_OVERLAY_DURATION: f64 = 0.5;
 /// Default play interval in seconds (¼ s)
@@ -1884,6 +1887,27 @@ impl ArrayViewerWidget {
     /// nothing saturates and there is no band to show.
     fn colorbar_span(&self) -> (f64, f64) {
         let (vmin, vmax) = self.scaling_range();
+
+        // Symmetric mode ties vmin to -vmax, so the bar has to be symmetric
+        // about zero too. Spanning the raw data instead would put zero off
+        // centre, and then the two handles -- which are always mirror images --
+        // would reach the ends of the bar at different moments: the derived
+        // vmin bottoming out while vmax still had room, and dragging vmax
+        // further would go on moving vmin with nowhere left to show it. Half
+        // the bar per sign, scaled to whichever magnitude is larger, keeps the
+        // pair in step and makes the gradient, the bands and the histogram all
+        // agree about where zero is.
+        if self.symmetric_mode {
+            let extent = vmax
+                .abs()
+                .max(self.original_min_val.abs())
+                .max(self.original_max_val.abs());
+            if !extent.is_finite() || extent < f64::EPSILON {
+                return (-1.0, 1.0);
+            }
+            return (-extent, extent);
+        }
+
         let lo = vmin.min(self.original_min_val);
         let hi = vmax.max(self.original_max_val);
         if !lo.is_finite() || !hi.is_finite() {
@@ -2048,9 +2072,16 @@ impl ArrayViewerWidget {
         // and value boxes are separate Areas drawn after it, so it always
         // passes *under* the controls rather than scribbling over them.
         let pointer = ctx.input(|i| i.pointer.hover_pos());
+        // The whole group counts as "the colorbar", value boxes included: the
+        // boxes are what a limit is read off, so reaching for one is reaching
+        // for the limit. The boxes hang half a box above and below the bar's
+        // ends when a limit is parked there, hence the vertical slack.
         let hover_zone = egui::Rect::from_min_max(
-            bar_rect.min,
-            egui::pos2(bar_rect.max.x + COLORBAR_CONNECTOR_W, bar_rect.max.y),
+            egui::pos2(bar_rect.min.x, bar_rect.min.y - COLORBAR_BOX_HEIGHT * 0.5),
+            egui::pos2(
+                bar_rect.max.x + COLORBAR_CONNECTOR_W + COLORBAR_BOX_OUTER_W,
+                bar_rect.max.y + COLORBAR_BOX_HEIGHT * 0.5,
+            ),
         )
         .expand(4.0);
         // The same condition reveals the grips: the overlay stays quiet until
@@ -2067,16 +2098,15 @@ impl ArrayViewerWidget {
         self.paint_limit_connector(ctx, bar_rect, max_y, true, show_histogram);
         self.paint_limit_connector(ctx, bar_rect, min_y, !is_symmetric, show_histogram);
 
-        self.limit_grip(ctx, LimitHandle::Max, bar_rect, span, max_y, true, show_histogram);
-        self.limit_grip(
-            ctx,
-            LimitHandle::Min,
-            bar_rect,
-            span,
-            min_y,
-            !is_symmetric,
-            show_histogram,
-        );
+        self.limit_grip(ctx, LimitHandle::Max, bar_rect, span, max_y, show_histogram);
+        // No tab for a limit that is not the user's to set. Beyond being
+        // pointless, a disabled tab still swallows the pointer, and with vmin
+        // mirroring vmax the two sit on top of each other whenever vmax is
+        // small -- so the dead tab would cover the live one exactly when the
+        // user most needs to drag it.
+        if !is_symmetric {
+            self.limit_grip(ctx, LimitHandle::Min, bar_rect, span, min_y, show_histogram);
+        }
 
         self.limit_value_box(ctx, LimitHandle::Max, bar_rect, max_y, is_int, is_symmetric);
         self.limit_value_box(ctx, LimitHandle::Min, bar_rect, min_y, is_int, is_symmetric);
@@ -2148,14 +2178,15 @@ impl ArrayViewerWidget {
         engaged: bool,
     ) {
         let painter = Self::colorbar_painter(ctx);
-        let visuals = ctx.style().visuals.clone();
-        let color = if enabled {
-            visuals.widgets.active.fg_stroke.color
+        let (halo, core) = overlay_line_colors(ctx.style().visuals.dark_mode);
+        let core = if enabled {
+            core
         } else {
-            visuals.widgets.noninteractive.fg_stroke.color.gamma_multiply(0.5)
+            core.gamma_multiply(0.45)
         };
 
         // Arrow: tip on the bar's edge, pointing back at the value it marks.
+        // Outlined in the halo colour so it survives a bright image under it.
         let tip = egui::pos2(bar.max.x, y);
         let base_x = bar.max.x + COLORBAR_ARROW_W;
         painter.add(egui::Shape::convex_polygon(
@@ -2164,30 +2195,28 @@ impl ArrayViewerWidget {
                 egui::pos2(base_x, y - COLORBAR_ARROW_HALF_H),
                 egui::pos2(base_x, y + COLORBAR_ARROW_HALF_H),
             ],
-            color,
-            egui::Stroke::NONE,
+            core,
+            egui::Stroke::new(1.5, halo),
         ));
 
-        let stroke = egui::Stroke::new(1.5, color);
         let box_edge = bar.max.x + COLORBAR_CONNECTOR_W;
+        // Halo under core, same reason as the arrow's outline.
+        let mut run = |from: egui::Pos2, to: egui::Pos2| {
+            painter.line_segment([from, to], egui::Stroke::new(3.5, halo));
+            painter.line_segment([from, to], egui::Stroke::new(1.5, core));
+        };
         if engaged {
             // Stop either side of the tab rather than drawing through it.
-            painter.line_segment(
-                [
-                    egui::pos2(base_x, y),
-                    egui::pos2(base_x + COLORBAR_STEM_W, y),
-                ],
-                stroke,
+            run(
+                egui::pos2(base_x, y),
+                egui::pos2(base_x + COLORBAR_STEM_W, y),
             );
-            painter.line_segment(
-                [
-                    egui::pos2(base_x + COLORBAR_STEM_W + COLORBAR_GRIP_W, y),
-                    egui::pos2(box_edge, y),
-                ],
-                stroke,
+            run(
+                egui::pos2(base_x + COLORBAR_STEM_W + COLORBAR_GRIP_W, y),
+                egui::pos2(box_edge, y),
             );
         } else {
-            painter.line_segment([egui::pos2(base_x, y), egui::pos2(box_edge, y)], stroke);
+            run(egui::pos2(base_x, y), egui::pos2(box_edge, y));
         }
     }
 
@@ -2200,7 +2229,6 @@ impl ArrayViewerWidget {
         bar: egui::Rect,
         span: (f64, f64),
         y: f32,
-        enabled: bool,
         engaged: bool,
     ) {
         let grip_min = egui::pos2(
@@ -2221,35 +2249,21 @@ impl ArrayViewerWidget {
             .show(ctx, |ui| {
                 let (rect, response) = ui.allocate_exact_size(
                     egui::vec2(COLORBAR_GRIP_W, COLORBAR_GRIP_H),
-                    if enabled {
-                        egui::Sense::drag()
-                    } else {
-                        egui::Sense::hover()
-                    },
+                    egui::Sense::drag(),
                 );
 
-                let visuals = ui.visuals().clone();
-                let (fill, line) = if !enabled {
-                    (
-                        visuals.widgets.noninteractive.bg_fill,
-                        visuals.widgets.noninteractive.fg_stroke.color.gamma_multiply(0.5),
-                    )
-                } else if response.dragged() {
-                    (
-                        visuals.widgets.active.bg_fill,
-                        visuals.widgets.active.fg_stroke.color,
-                    )
-                } else if response.hovered() {
-                    (
-                        visuals.widgets.hovered.bg_fill,
-                        visuals.widgets.hovered.fg_stroke.color,
-                    )
+                // The widget palette is meant for chrome sitting on the UI's
+                // own background; over the image its fills are near-invisible
+                // (a pale grey tab on a bright frame). Use the overlay colours,
+                // which carry a backdrop of their own.
+                let backdrop = get_overlay_bg(ui);
+                let ink = get_overlay_text_color(ui);
+                let fill = if response.dragged() || response.hovered() {
+                    backdrop.to_opaque()
                 } else {
-                    (
-                        visuals.widgets.inactive.bg_fill,
-                        visuals.widgets.inactive.fg_stroke.color,
-                    )
+                    backdrop
                 };
+                let line = ink;
 
                 // The tab is drawn only once the user has reached for the
                 // colorbar. It still senses drags the rest of the time, but
@@ -2279,11 +2293,6 @@ impl ArrayViewerWidget {
                     }
                 }
 
-                if !enabled {
-                    response.on_hover_text("Symmetric mode: vmin is derived from -vmax");
-                    return;
-                }
-
                 if response.drag_started() {
                     self.colorbar_drag = Some(ColorbarDrag { handle, span });
                 }
@@ -2295,7 +2304,15 @@ impl ArrayViewerWidget {
                         let epsilon = (span.1 - span.0) * 1e-6;
                         match handle {
                             LimitHandle::Max => {
-                                self.set_max_val(value.max(self.min_val + epsilon))
+                                // With vmin derived as -vmax there is no lower
+                                // limit to stay clear of, only zero: dragging
+                                // past it would mirror the handle back up.
+                                let floor = if self.symmetric_mode {
+                                    epsilon
+                                } else {
+                                    self.min_val + epsilon
+                                };
+                                self.set_max_val(value.max(floor))
                             }
                             LimitHandle::Min => {
                                 self.set_min_val(value.min(self.max_val - epsilon))
@@ -2873,6 +2890,20 @@ fn colorbar_y_to_value(bar: egui::Rect, span: (f64, f64), y: f32) -> f64 {
         0.0
     };
     lo + t * (hi - lo)
+}
+
+/// Halo and core colours for the colorbar's arrows and leader lines.
+///
+/// This chrome floats on the image, not on the UI's own background, so a single
+/// theme colour disappears the moment the pixels beneath it match — pale arrows
+/// over a bright field. Every stroke is laid down twice, a contrasting halo
+/// first and the core on top, which reads against anything either way round.
+fn overlay_line_colors(dark_mode: bool) -> (Color32, Color32) {
+    if dark_mode {
+        (Color32::from_black_alpha(200), Color32::WHITE)
+    } else {
+        (Color32::from_white_alpha(230), Color32::from_gray(30))
+    }
 }
 
 /// Give a limit value box the translucent, theme-aware chrome the rest of the
@@ -3456,6 +3487,159 @@ mod colorbar_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn symmetric_mode_centres_the_bar_on_zero() {
+        // Data reaching much further below zero than above: the case that used
+        // to put zero off centre and desynchronise the two handles.
+        let mut w = widget_with(vec![-100.0, -40.0, 0.5, 1.0], 2, 2);
+        w.set_symmetric(true);
+        w.set_max_val(1.0);
+
+        let (lo, hi) = w.colorbar_span();
+        assert!((lo + hi).abs() < 1e-9, "bar must straddle zero: {lo}..{hi}");
+        assert!(
+            (hi - 100.0).abs() < 1e-9,
+            "bar should reach the larger magnitude in the data, got {hi}"
+        );
+
+        // Zero lands exactly on the bar's midpoint, so the diverging colormap's
+        // neutral colour sits where the data's zero is.
+        let bar = harness_bar();
+        assert!(
+            (colorbar_value_to_y(bar, (lo, hi), 0.0) - bar.center().y).abs() < 1e-3,
+            "zero is not at the centre of the bar"
+        );
+    }
+
+    #[test]
+    fn symmetric_handles_stay_mirrored_and_reach_the_ends_together() {
+        let mut w = widget_with(vec![-100.0, -40.0, 0.5, 1.0], 2, 2);
+        w.set_symmetric(true);
+        w.set_max_val(1.0);
+
+        let bar = harness_bar();
+        let span = w.colorbar_span();
+
+        // Whatever vmax is, the handles are equidistant from the centre.
+        for vmax in [1.0, 25.0, 60.0, 100.0] {
+            w.set_max_val(vmax);
+            let (vmin, vmax) = w.scaling_range();
+            let max_y = colorbar_value_to_y(bar, span, vmax);
+            let min_y = colorbar_value_to_y(bar, span, vmin);
+            let centre = bar.center().y;
+            assert!(
+                ((centre - max_y) - (min_y - centre)).abs() < 1e-3,
+                "handles not mirrored at vmax={vmax}: {max_y} / {min_y}"
+            );
+        }
+
+        // And they hit the ends at the same moment, rather than vmin bottoming
+        // out early while vmax still has room.
+        w.set_max_val(100.0);
+        let (vmin, vmax) = w.scaling_range();
+        assert!((colorbar_value_to_y(bar, span, vmax) - bar.min.y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, vmin) - bar.max.y).abs() < 1e-3);
+    }
+
+    #[test]
+    fn dragging_symmetric_max_to_the_top_takes_vmin_to_the_bottom() {
+        // The reported case: max 1.0, min -100. Dragging the max handle to the
+        // top of the bar should reach +100, putting the derived vmin at -100.
+        let mut w = widget_with(vec![-100.0, -40.0, 0.5, 1.0], 2, 2);
+        w.set_symmetric(true);
+        w.set_max_val(1.0);
+
+        let ctx = egui::Context::default();
+        let bar = harness_bar();
+        run_colorbar_frame(&mut w, &ctx, None);
+
+        let span = w.colorbar_span();
+        let start = colorbar_value_to_y(bar, span, 1.0);
+        let grip = harness_grip(start);
+
+        run_colorbar_frame(&mut w, &ctx, Some(grip));
+        run_colorbar_events(
+            &mut w,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: grip,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        // Drag above the bar's top; the handle pins to the end.
+        let target = egui::pos2(grip.x, bar.min.y - 20.0);
+        run_colorbar_events(&mut w, &ctx, vec![egui::Event::PointerMoved(target)]);
+        run_colorbar_events(&mut w, &ctx, vec![egui::Event::PointerMoved(target)]);
+
+        let (vmin, vmax) = w.scaling_range();
+        assert!(
+            (vmax - 100.0).abs() < 1.0,
+            "vmax should have reached the data's magnitude, got {vmax}"
+        );
+        assert!(
+            (vmin + 100.0).abs() < 1.0,
+            "vmin should mirror it, got {vmin}"
+        );
+    }
+
+    #[test]
+    fn symmetric_max_cannot_be_dragged_through_zero() {
+        let mut w = widget_with(vec![-10.0, -2.0, 3.0, 8.0], 2, 2);
+        w.set_symmetric(true);
+        w.set_max_val(8.0);
+
+        let ctx = egui::Context::default();
+        let bar = harness_bar();
+        run_colorbar_frame(&mut w, &ctx, None);
+
+        let span = w.colorbar_span();
+        let grip = harness_grip(colorbar_value_to_y(bar, span, 8.0));
+        run_colorbar_frame(&mut w, &ctx, Some(grip));
+        run_colorbar_events(
+            &mut w,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: grip,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        // Drag well below the centre, into negative values.
+        let target = egui::pos2(grip.x, bar.max.y - 5.0);
+        run_colorbar_events(&mut w, &ctx, vec![egui::Event::PointerMoved(target)]);
+        run_colorbar_events(&mut w, &ctx, vec![egui::Event::PointerMoved(target)]);
+
+        let (_, vmax) = w.scaling_range();
+        assert!(
+            vmax >= 0.0,
+            "vmax must not cross zero and mirror back up, got {vmax}"
+        );
+    }
+
+    #[test]
+    fn grips_appear_when_hovering_a_value_box_too() {
+        let mut w = widget_with((0..400).map(|i| i as f64).collect(), 20, 20);
+        let ctx = egui::Context::default();
+        let bar = harness_bar();
+        run_colorbar_frame(&mut w, &ctx, None);
+
+        // Over the middle of the max limit's box, well clear of the bar.
+        let box_x = bar.max.x + COLORBAR_CONNECTOR_W + COLORBAR_BOX_WIDTH * 0.5;
+        let shapes = run_colorbar_shapes(
+            &mut w,
+            &ctx,
+            vec![egui::Event::PointerMoved(egui::pos2(box_x, bar.min.y))],
+        );
+        assert_eq!(
+            grip_count(&shapes),
+            2,
+            "reaching for a value box should reveal the tabs"
+        );
     }
 
     #[test]

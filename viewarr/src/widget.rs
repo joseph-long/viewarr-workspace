@@ -21,11 +21,32 @@ const MIN_CONTRAST: f64 = 0.0;
 /// Log stretch exponent (DS9 default for optical images)
 const LOG_EXPONENT: f64 = 1000.0;
 /// Color bar width in pixels
-const COLORBAR_WIDTH: f32 = 32.0;
+const COLORBAR_BAR_WIDTH: f32 = 16.0;
 /// Maximum color bar height in pixels
 const COLORBAR_MAX_HEIGHT: f32 = 300.0;
 /// Color bar margin from edge
 const COLORBAR_MARGIN: f32 = 10.0;
+/// Length of the arrow that points from a limit handle at the bar.
+const COLORBAR_ARROW_W: f32 = 6.0;
+/// Half-height of that arrow, i.e. how blunt its base is.
+const COLORBAR_ARROW_HALF_H: f32 = 5.0;
+/// Gap between the arrow's base and the gripped tab.
+const COLORBAR_STEM_W: f32 = 5.0;
+/// Width of the gripped tab a limit is dragged by.
+const COLORBAR_GRIP_W: f32 = 12.0;
+/// Height of that tab.
+const COLORBAR_GRIP_H: f32 = 16.0;
+/// Horizontal distance from the bar's right edge to the value boxes, leaving
+/// room for the arrow, stem and grip in between.
+const COLORBAR_CONNECTOR_W: f32 =
+    COLORBAR_ARROW_W + COLORBAR_STEM_W + COLORBAR_GRIP_W + COLORBAR_STEM_W;
+/// How far the tallest histogram bin reaches out from the bar. Bins are
+/// normalised to this, so the shape stays readable whatever the pixel counts.
+const COLORBAR_HISTOGRAM_W: f32 = 90.0;
+/// Height of a limit value box.
+const COLORBAR_BOX_HEIGHT: f32 = 20.0;
+/// Width of a limit value box.
+const COLORBAR_BOX_WIDTH: f32 = 70.0;
 /// Duration to show zoom level overlay after zooming
 const ZOOM_OVERLAY_DURATION: f64 = 0.5;
 /// Default play interval in seconds (¼ s)
@@ -89,6 +110,39 @@ struct PendingSlice {
     height: u32,
     is_integer: bool,
     value_decimals: usize,
+}
+
+/// A value histogram binned to the colorbar's own extent, cached because it
+/// costs a full pass over the image and the bars do not change while the user
+/// is simply moving the pointer around.
+struct ColorbarHistogram {
+    /// The value span the bins were computed for; a different span needs a
+    /// different histogram.
+    span: (f64, f64),
+    /// Log-scaled bin heights normalised to the tallest bin, bottom bin first.
+    /// Normalising keeps the drawn width independent of how many pixels landed
+    /// in the mode; the log keeps the sparse tail visible, which for the images
+    /// this viewer is for is most of the interesting part.
+    bins: Vec<f32>,
+}
+
+/// Which of the two colorbar limits a handle drives.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LimitHandle {
+    Min,
+    Max,
+}
+
+/// An in-progress drag of a colorbar limit handle.
+///
+/// The value span is captured when the drag starts and held for its duration:
+/// the span is derived from the very limits being dragged, so recomputing it
+/// each frame would rescale the bar under the pointer and leave the value
+/// chasing itself.
+#[derive(Clone, Copy)]
+struct ColorbarDrag {
+    handle: LimitHandle,
+    span: (f64, f64),
 }
 
 /// Stretch function type
@@ -202,6 +256,10 @@ pub struct ArrayViewerWidget {
     texture: Option<TextureHandle>,
     /// Colorbar texture
     colorbar_texture: Option<TextureHandle>,
+    /// The colorbar limit handle currently being dragged, if any.
+    colorbar_drag: Option<ColorbarDrag>,
+    /// Cached value histogram drawn over the colorbar on hover/drag.
+    colorbar_histogram: Option<ColorbarHistogram>,
     /// Track if right mouse button started a drag (for contrast/bias adjustment)
     stretch_drag_active: bool,
     /// Track when zoom was last changed (for overlay display)
@@ -329,6 +387,8 @@ impl ArrayViewerWidget {
             hover_info: None,
             texture: None,
             colorbar_texture: None,
+            colorbar_drag: None,
+            colorbar_histogram: None,
             stretch_drag_active: false,
             zoom_changed_time: None,
             prev_zoom_level: 1.0,
@@ -371,6 +431,8 @@ impl ArrayViewerWidget {
         self.pixels = Some(pixels);
         self.width = width;
         self.height = height;
+        // New pixels, so the cached histogram describes the wrong image.
+        self.colorbar_histogram = None;
         if !self.colorbar_locked {
             self.apply_limits(computed_min_val, computed_max_val, true);
         }
@@ -1039,22 +1101,11 @@ impl ArrayViewerWidget {
         let height = 256;
         let width = 1;
 
-        let cb = self.current_contrast_bias();
-        let stretch_type = self.stretch_type;
-        let colormap = self.colormap();
-        let reversed = self.colormap_reversed;
-
+        // Shares ramp_color with the saturated end bands, so the bands and the
+        // gradient they abut are guaranteed to be the same colour.
         let pixels: Vec<Color32> = (0..height)
             .rev() // Reverse so high values are at top
-            .map(|y| {
-                let t = y as f64 / (height - 1) as f64;
-                let stretched = apply_stretch(t, stretch_type);
-                let mut adjusted = apply_contrast_bias(stretched, cb.contrast, cb.bias);
-                if reversed {
-                    adjusted = 1.0 - adjusted;
-                }
-                colormap.map(adjusted)
-            })
+            .map(|y| self.ramp_color(y as f64 / (height - 1) as f64))
             .collect();
 
         let color_image = ColorImage {
@@ -1817,154 +1868,521 @@ impl ArrayViewerWidget {
         self.apply_slice_action(action, now);
     }
 
-    /// Render colorbar overlay at top-left of widget with editable limit values
+    /// Data values the colorbar spans, bottom edge to top edge.
+    ///
+    /// The bar always covers the whole data range, so a limit pulled inside it
+    /// leaves a flat band at the end it moved away from. Those bands are not
+    /// decoration: every pixel out there really is drawn in that one colour.
+    /// A limit pushed *past* the data stretches the bar instead, because then
+    /// nothing saturates and there is no band to show.
+    fn colorbar_span(&self) -> (f64, f64) {
+        let (vmin, vmax) = self.scaling_range();
+        let lo = vmin.min(self.original_min_val);
+        let hi = vmax.max(self.original_max_val);
+        if !lo.is_finite() || !hi.is_finite() {
+            return (0.0, 1.0);
+        }
+        if hi - lo < f64::EPSILON {
+            return (lo, lo + 1.0);
+        }
+        (lo, hi)
+    }
+
+    /// Colour at `t` along the ramp with the current stretch, contrast/bias and
+    /// reversal applied — the same chain [`Self::rebuild_colorbar_texture`]
+    /// uses, so the saturated bands meet the gradient without a seam.
+    fn ramp_color(&self, t: f64) -> Color32 {
+        let cb = self.current_contrast_bias();
+        let stretched = apply_stretch(t, self.stretch_type);
+        let mut adjusted = apply_contrast_bias(stretched, cb.contrast, cb.bias);
+        if self.colormap_reversed {
+            adjusted = 1.0 - adjusted;
+        }
+        self.colormap().map(adjusted)
+    }
+
+    /// The painter every non-interactive part of the colorbar draws into. One
+    /// shared layer keeps the bar, arrows and leader lines in a known order.
+    fn colorbar_painter(ctx: &egui::Context) -> egui::Painter {
+        ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("colorbar_paint"),
+        ))
+    }
+
+    /// Bin the image's values to the colorbar's extent, reusing the cache when
+    /// the span and resolution are unchanged.
+    ///
+    /// Binning is a full pass over the pixels, so this must not run per frame;
+    /// the span is stable while the pointer merely hovers, and frozen outright
+    /// while a handle is dragged, so the cache holds for the whole interaction.
+    fn colorbar_histogram_bins(&mut self, span: (f64, f64), bin_count: usize) -> &[f32] {
+        let stale = match &self.colorbar_histogram {
+            Some(hist) => hist.bins.len() != bin_count || hist.span != span,
+            None => true,
+        };
+
+        if stale {
+            let mut bins = vec![0.0_f32; bin_count];
+            if let Some(pixels) = self.pixels.as_deref() {
+                let (lo, hi) = span;
+                let scale = if hi > lo {
+                    bin_count as f64 / (hi - lo)
+                } else {
+                    0.0
+                };
+                for &v in pixels {
+                    // NaN is "no value" here exactly as it is for auto-scaling,
+                    // so it belongs in no bin.
+                    if !v.is_finite() {
+                        continue;
+                    }
+                    let idx = (((v - lo) * scale) as isize).clamp(0, bin_count as isize - 1);
+                    bins[idx as usize] += 1.0;
+                }
+            }
+            // Sky frames put almost every pixel into a handful of bins near the
+            // background level, so on a linear scale everything else -- the
+            // sources, the tail the limits are usually set against -- collapses
+            // to an invisible sliver. log1p keeps that tail legible while still
+            // showing which bins dominate, and maps an empty bin to exactly
+            // zero so the outline sits flat on the bar where there is no data.
+            for bin in &mut bins {
+                *bin = bin.ln_1p();
+            }
+            let peak = bins.iter().copied().fold(0.0_f32, f32::max);
+            if peak > 0.0 {
+                for bin in &mut bins {
+                    *bin /= peak;
+                }
+            }
+            self.colorbar_histogram = Some(ColorbarHistogram { span, bins });
+        }
+
+        &self.colorbar_histogram.as_ref().expect("just populated").bins
+    }
+
+    /// Trace the histogram beside the bar as a stepped hairline.
+    ///
+    /// Only the outline is drawn — the top of each bin and the sides where
+    /// neighbouring bins differ — so the shape reads without hiding the ramp
+    /// or the image underneath. It is stroked twice, a dark halo under a light
+    /// hairline, which keeps it legible over both the colour ramp and whatever
+    /// part of the image lies beyond it. (egui has no inverting blend mode
+    /// short of a custom paint callback, so a halo stands in for one.)
+    fn paint_colorbar_histogram(&self, ctx: &egui::Context, bar: egui::Rect, bins: &[f32]) {
+        if bins.is_empty() || bar.height() <= 0.0 {
+            return;
+        }
+
+        let bin_height = bar.height() / bins.len() as f32;
+        let mut points = Vec::with_capacity(bins.len() * 2 + 2);
+        // Start and finish on the bar's edge so the outline closes against it
+        // rather than floating.
+        points.push(egui::pos2(bar.max.x, bar.max.y));
+        for (i, &value) in bins.iter().enumerate() {
+            // Bin 0 holds the lowest values, which sit at the bottom of the bar.
+            let top = bar.max.y - (i + 1) as f32 * bin_height;
+            let bottom = bar.max.y - i as f32 * bin_height;
+            let x = bar.max.x + value * COLORBAR_HISTOGRAM_W;
+            points.push(egui::pos2(x, bottom));
+            points.push(egui::pos2(x, top));
+        }
+        points.push(egui::pos2(bar.max.x, bar.min.y));
+
+        let painter = Self::colorbar_painter(ctx);
+        painter.add(egui::Shape::line(
+            points.clone(),
+            egui::Stroke::new(3.0, Color32::from_black_alpha(160)),
+        ));
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(1.0, Color32::WHITE),
+        ));
+    }
+
+    /// Render colorbar overlay at top-left of widget with draggable limits.
     fn render_colorbar(&mut self, ctx: &egui::Context, widget_rect: egui::Rect) {
         if !self.has_image() {
             return;
         }
 
         let is_int = self.is_integer;
+        let is_symmetric = self.is_symmetric();
         let bar_height = COLORBAR_MAX_HEIGHT.min(widget_rect.height() * 0.5);
-        let bar_width = 16.0_f32;
-        let bar_stroke_width = 1.0_f32;
-        let bar_stroke_offset = 1.0_f32;
-        let text_input_width = 70.0_f32;
-        let spacing = 4.0_f32;
-        let text_input_height = 20.0_f32;
-        
-        // Calculate positions
-        let bar_pos = egui::pos2(widget_rect.min.x + COLORBAR_MARGIN, widget_rect.min.y + COLORBAR_MARGIN);
-        let bar_rect = egui::Rect::from_min_size(bar_pos, egui::vec2(bar_width, bar_height));
-        
-        // Paint colorbar directly to the screen (no interaction, no Area)
-        if let Some(texture) = &self.colorbar_texture {
-            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("colorbar_paint")));
-            painter.rect_stroke(
-                bar_rect.expand(bar_stroke_offset),
+        let bar_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                widget_rect.min.x + COLORBAR_MARGIN,
+                widget_rect.min.y + COLORBAR_MARGIN,
+            ),
+            egui::vec2(COLORBAR_BAR_WIDTH, bar_height),
+        );
+
+        // Hold the span still for the length of a drag; see ColorbarDrag.
+        let span = match self.colorbar_drag {
+            Some(drag) => drag.span,
+            None => self.colorbar_span(),
+        };
+        let (vmin, vmax) = self.scaling_range();
+        let max_y = colorbar_value_to_y(bar_rect, span, vmax);
+        let min_y = colorbar_value_to_y(bar_rect, span, vmin);
+        let (max_box_y, min_box_y) =
+            separate_limit_boxes(bar_rect, max_y, min_y, COLORBAR_BOX_HEIGHT);
+
+        // Everything painted into the shared layer goes down first, so the
+        // interactive grips and the value boxes land on top of it.
+        self.paint_colorbar_ramp(ctx, bar_rect, max_y, min_y);
+
+        // The histogram is a hint about where the data actually lives, so it
+        // appears only while the user is working the colorbar -- hovering it or
+        // dragging a limit -- and stays out of the way otherwise.
+        //
+        // It goes into the shared layer before the connectors, and the grips
+        // and value boxes are separate Areas drawn after it, so it always
+        // passes *under* the controls rather than scribbling over them.
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let hover_zone = egui::Rect::from_min_max(
+            bar_rect.min,
+            egui::pos2(bar_rect.max.x + COLORBAR_CONNECTOR_W, bar_rect.max.y),
+        )
+        .expand(4.0);
+        let show_histogram = self.colorbar_drag.is_some()
+            || pointer.is_some_and(|p| hover_zone.contains(p));
+        if show_histogram {
+            let bin_count = (bar_rect.height().round() as usize).clamp(16, 512);
+            // Borrow ends before painting, which needs &self.
+            let bins = self.colorbar_histogram_bins(span, bin_count).to_vec();
+            self.paint_colorbar_histogram(ctx, bar_rect, &bins);
+        }
+
+        self.paint_limit_connector(ctx, bar_rect, max_y, max_box_y, true);
+        self.paint_limit_connector(ctx, bar_rect, min_y, min_box_y, !is_symmetric);
+
+        self.limit_grip(ctx, LimitHandle::Max, bar_rect, span, max_y, true);
+        self.limit_grip(ctx, LimitHandle::Min, bar_rect, span, min_y, !is_symmetric);
+
+        self.limit_value_box(ctx, LimitHandle::Max, bar_rect, max_box_y, is_int, is_symmetric);
+        self.limit_value_box(ctx, LimitHandle::Min, bar_rect, min_box_y, is_int, is_symmetric);
+
+        self.render_colorbar_buttons(ctx, bar_rect);
+    }
+
+    /// Paint the bar: the gradient between the limits, and a flat band of the
+    /// end colour beyond each one.
+    fn paint_colorbar_ramp(
+        &self,
+        ctx: &egui::Context,
+        bar: egui::Rect,
+        max_y: f32,
+        min_y: f32,
+    ) {
+        let painter = Self::colorbar_painter(ctx);
+
+        // Order the two so an inverted pair of limits still paints forwards.
+        let upper = max_y.min(min_y).clamp(bar.min.y, bar.max.y);
+        let lower = max_y.max(min_y).clamp(bar.min.y, bar.max.y);
+
+        if upper > bar.min.y {
+            painter.rect_filled(
+                egui::Rect::from_min_max(bar.min, egui::pos2(bar.max.x, upper)),
                 0.0,
-                egui::Stroke::new(bar_stroke_width, Color32::GRAY),
-                egui::StrokeKind::Outside,
-            );
-            painter.image(
-                texture.id(),
-                bar_rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
+                self.ramp_color(1.0),
             );
         }
-        
-        // Max value text input - separate Area just for this widget
-        let max_input_pos = egui::pos2(bar_rect.max.x + spacing, bar_rect.min.y);
-        egui::Area::new(egui::Id::new("colorbar_max_input"))
-            .fixed_pos(max_input_pos)
-            .order(egui::Order::Middle)
+        if lower < bar.max.y {
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(bar.min.x, lower), bar.max),
+                0.0,
+                self.ramp_color(0.0),
+            );
+        }
+        if let Some(texture) = &self.colorbar_texture {
+            if lower > upper {
+                painter.image(
+                    texture.id(),
+                    egui::Rect::from_min_max(
+                        egui::pos2(bar.min.x, upper),
+                        egui::pos2(bar.max.x, lower),
+                    ),
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+        }
+
+        painter.rect_stroke(
+            bar.expand(1.0),
+            0.0,
+            egui::Stroke::new(1.0, Color32::GRAY),
+            egui::StrokeKind::Outside,
+        );
+    }
+
+    /// Paint one handle's arrow, stem and the leader line out to its box.
+    ///
+    /// The arrow stays at the limit's true position on the bar; only the
+    /// leader line stretches when the box has been nudged aside to avoid its
+    /// neighbour.
+    fn paint_limit_connector(
+        &self,
+        ctx: &egui::Context,
+        bar: egui::Rect,
+        y: f32,
+        box_y: f32,
+        enabled: bool,
+    ) {
+        let painter = Self::colorbar_painter(ctx);
+        let visuals = ctx.style().visuals.clone();
+        let color = if enabled {
+            visuals.widgets.active.fg_stroke.color
+        } else {
+            visuals.widgets.noninteractive.fg_stroke.color.gamma_multiply(0.5)
+        };
+
+        // Arrow: tip on the bar's edge, pointing back at the value it marks.
+        let tip = egui::pos2(bar.max.x, y);
+        let base_x = bar.max.x + COLORBAR_ARROW_W;
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                tip,
+                egui::pos2(base_x, y - COLORBAR_ARROW_HALF_H),
+                egui::pos2(base_x, y + COLORBAR_ARROW_HALF_H),
+            ],
+            color,
+            egui::Stroke::NONE,
+        ));
+
+        let stroke = egui::Stroke::new(1.5, color);
+        // Stem from the arrow's base to the grip.
+        painter.line_segment(
+            [
+                egui::pos2(base_x, y),
+                egui::pos2(base_x + COLORBAR_STEM_W, y),
+            ],
+            stroke,
+        );
+        // Leader from the grip out to the box, sloping if the box was moved.
+        painter.line_segment(
+            [
+                egui::pos2(base_x + COLORBAR_STEM_W + COLORBAR_GRIP_W, y),
+                egui::pos2(bar.max.x + COLORBAR_CONNECTOR_W, box_y),
+            ],
+            stroke,
+        );
+    }
+
+    /// The gripped tab a limit is dragged by: parallel lines to say "grab me",
+    /// and the drag handling that moves the limit with the pointer.
+    fn limit_grip(
+        &mut self,
+        ctx: &egui::Context,
+        handle: LimitHandle,
+        bar: egui::Rect,
+        span: (f64, f64),
+        y: f32,
+        enabled: bool,
+    ) {
+        let grip_min = egui::pos2(
+            bar.max.x + COLORBAR_ARROW_W + COLORBAR_STEM_W,
+            y - COLORBAR_GRIP_H * 0.5,
+        );
+        let area_id = egui::Id::new(match handle {
+            LimitHandle::Max => "colorbar_max_grip",
+            LimitHandle::Min => "colorbar_min_grip",
+        });
+
+        // Foreground, not Middle: egui draws every Area in an order before the
+        // plain layers in that same order, so a Middle grip would end up
+        // *under* the histogram that is painted into the shared Middle layer.
+        egui::Area::new(area_id)
+            .fixed_pos(grip_min)
+            .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                let text_color = get_overlay_text_color(ui);
-                let is_dark = ui.visuals().dark_mode;
-                let is_symmetric = self.is_symmetric();
-                
-                let edit_bg = if is_dark {
-                    egui::Color32::from_black_alpha(180)
-                } else {
-                    egui::Color32::from_white_alpha(220)
-                };
-                let edit_bg_hover = if is_dark {
-                    egui::Color32::from_black_alpha(200)
-                } else {
-                    egui::Color32::from_white_alpha(240)
-                };
-                let edit_bg_active = if is_dark {
-                    egui::Color32::from_black_alpha(220)
-                } else {
-                    egui::Color32::from_white_alpha(255)
-                };
-                ui.style_mut().visuals.extreme_bg_color = edit_bg;
-                ui.style_mut().visuals.widgets.inactive.bg_fill = edit_bg;
-                ui.style_mut().visuals.widgets.hovered.bg_fill = edit_bg_hover;
-                ui.style_mut().visuals.widgets.active.bg_fill = edit_bg_active;
-                
-                let max_edit = egui::TextEdit::singleline(&mut self.max_limit_input_text)
-                    .desired_width(text_input_width)
-                    .horizontal_align(egui::Align::Center)
-                    .text_color(text_color)
-                    .font(egui::FontId::proportional(13.0));
-                let max_response = ui.add(max_edit);
-                
-                if max_response.lost_focus() || (max_response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
-                    if let Ok(new_val) = self.max_limit_input_text.trim().parse::<f64>() {
-                        let parsed = if is_symmetric { new_val.abs() } else { new_val };
-                        self.set_max_val(parsed);
-                        self.max_limit_input_text = Self::format_limit_value(parsed, is_int);
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(COLORBAR_GRIP_W, COLORBAR_GRIP_H),
+                    if enabled {
+                        egui::Sense::drag()
                     } else {
-                        self.max_limit_input_text = if is_symmetric {
-                            Self::format_limit_value(self.max_val.abs(), is_int)
-                        } else {
-                            Self::format_limit_value(self.max_val, is_int)
-                        };
+                        egui::Sense::hover()
+                    },
+                );
+
+                let visuals = ui.visuals().clone();
+                let (fill, line) = if !enabled {
+                    (
+                        visuals.widgets.noninteractive.bg_fill,
+                        visuals.widgets.noninteractive.fg_stroke.color.gamma_multiply(0.5),
+                    )
+                } else if response.dragged() {
+                    (
+                        visuals.widgets.active.bg_fill,
+                        visuals.widgets.active.fg_stroke.color,
+                    )
+                } else if response.hovered() {
+                    (
+                        visuals.widgets.hovered.bg_fill,
+                        visuals.widgets.hovered.fg_stroke.color,
+                    )
+                } else {
+                    (
+                        visuals.widgets.inactive.bg_fill,
+                        visuals.widgets.inactive.fg_stroke.color,
+                    )
+                };
+
+                let painter = ui.painter();
+                painter.rect_filled(rect, 2.0, fill);
+                painter.rect_stroke(
+                    rect,
+                    2.0,
+                    egui::Stroke::new(1.0, line),
+                    egui::StrokeKind::Inside,
+                );
+                // Parallel lines across the tab: the conventional "drag me"
+                // texture, horizontal because the tab travels vertically.
+                let inset = 3.0;
+                for i in 0..3 {
+                    let ly = rect.center().y + (i as f32 - 1.0) * 4.0;
+                    painter.line_segment(
+                        [
+                            egui::pos2(rect.min.x + inset, ly),
+                            egui::pos2(rect.max.x - inset, ly),
+                        ],
+                        egui::Stroke::new(1.0, line),
+                    );
+                }
+
+                if !enabled {
+                    response.on_hover_text("Symmetric mode: vmin is derived from -vmax");
+                    return;
+                }
+
+                if response.drag_started() {
+                    self.colorbar_drag = Some(ColorbarDrag { handle, span });
+                }
+                if response.dragged() {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        let value = colorbar_y_to_value(bar, span, pos.y);
+                        // Keep a sliver between the limits so they cannot cross
+                        // and invert the ramp.
+                        let epsilon = (span.1 - span.0) * 1e-6;
+                        match handle {
+                            LimitHandle::Max => {
+                                self.set_max_val(value.max(self.min_val + epsilon))
+                            }
+                            LimitHandle::Min => {
+                                self.set_min_val(value.min(self.max_val - epsilon))
+                            }
+                        }
                     }
                 }
-                max_response.on_hover_text("Maximum display value");
+                if response.drag_stopped() {
+                    self.colorbar_drag = None;
+                }
+
+                response
+                    .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+                    .on_hover_text(match handle {
+                        LimitHandle::Max => "Drag to set the maximum display value",
+                        LimitHandle::Min => "Drag to set the minimum display value",
+                    });
             });
-        
-        // Min value text input - separate Area just for this widget
-        let min_input_pos = egui::pos2(bar_rect.max.x + spacing, bar_rect.max.y - text_input_height);
-        egui::Area::new(egui::Id::new("colorbar_min_input"))
-            .fixed_pos(min_input_pos)
-            .order(egui::Order::Middle)
+    }
+
+    /// One editable limit box, parked beside its handle.
+    fn limit_value_box(
+        &mut self,
+        ctx: &egui::Context,
+        handle: LimitHandle,
+        bar: egui::Rect,
+        box_y: f32,
+        is_int: bool,
+        is_symmetric: bool,
+    ) {
+        let pos = egui::pos2(
+            bar.max.x + COLORBAR_CONNECTOR_W,
+            box_y - COLORBAR_BOX_HEIGHT * 0.5,
+        );
+        let area_id = egui::Id::new(match handle {
+            LimitHandle::Max => "colorbar_max_input",
+            LimitHandle::Min => "colorbar_min_input",
+        });
+
+        // Foreground for the same reason as the grips: the histogram sweeps
+        // across this box's x range and must pass beneath it.
+        egui::Area::new(area_id)
+            .fixed_pos(pos)
+            .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 let text_color = get_overlay_text_color(ui);
-                let is_dark = ui.visuals().dark_mode;
-                let is_symmetric = self.is_symmetric();
-                if is_symmetric {
+                style_limit_edit(ui);
+
+                // In symmetric mode vmin is not the user's to set; keep it
+                // showing the value actually in force.
+                if handle == LimitHandle::Min && is_symmetric {
                     self.min_limit_input_text =
                         Self::format_limit_value(-self.max_val.abs(), is_int);
                 }
-                
-                let edit_bg = if is_dark {
-                    egui::Color32::from_black_alpha(180)
-                } else {
-                    egui::Color32::from_white_alpha(220)
+
+                let buffer = match handle {
+                    LimitHandle::Max => &mut self.max_limit_input_text,
+                    LimitHandle::Min => &mut self.min_limit_input_text,
                 };
-                let edit_bg_hover = if is_dark {
-                    egui::Color32::from_black_alpha(200)
-                } else {
-                    egui::Color32::from_white_alpha(240)
-                };
-                let edit_bg_active = if is_dark {
-                    egui::Color32::from_black_alpha(220)
-                } else {
-                    egui::Color32::from_white_alpha(255)
-                };
-                ui.style_mut().visuals.extreme_bg_color = edit_bg;
-                ui.style_mut().visuals.widgets.inactive.bg_fill = edit_bg;
-                ui.style_mut().visuals.widgets.hovered.bg_fill = edit_bg_hover;
-                ui.style_mut().visuals.widgets.active.bg_fill = edit_bg_active;
-                
-                let min_edit = egui::TextEdit::singleline(&mut self.min_limit_input_text)
-                    .desired_width(text_input_width)
+                let edit = egui::TextEdit::singleline(buffer)
+                    .desired_width(COLORBAR_BOX_WIDTH)
                     .horizontal_align(egui::Align::Center)
                     .text_color(text_color)
                     .font(egui::FontId::proportional(13.0));
-                let min_response = ui.add_enabled(!is_symmetric, min_edit);
-                
-                if !is_symmetric
-                    && (min_response.lost_focus()
-                        || (min_response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter))))
-                {
-                    if let Ok(new_val) = self.min_limit_input_text.trim().parse::<f64>() {
-                        self.set_min_val(new_val);
-                    } else {
-                        self.min_limit_input_text = Self::format_limit_value(self.min_val, is_int);
+
+                let editable = handle == LimitHandle::Max || !is_symmetric;
+                let response = ui.add_enabled(editable, edit);
+                let committed = response.lost_focus()
+                    || (response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter)));
+
+                if editable && committed {
+                    match handle {
+                        LimitHandle::Max => {
+                            if let Ok(parsed) = self.max_limit_input_text.trim().parse::<f64>() {
+                                let parsed = if is_symmetric { parsed.abs() } else { parsed };
+                                self.set_max_val(parsed);
+                                self.max_limit_input_text =
+                                    Self::format_limit_value(parsed, is_int);
+                            } else {
+                                let shown = if is_symmetric {
+                                    self.max_val.abs()
+                                } else {
+                                    self.max_val
+                                };
+                                self.max_limit_input_text =
+                                    Self::format_limit_value(shown, is_int);
+                            }
+                        }
+                        LimitHandle::Min => {
+                            if let Ok(parsed) = self.min_limit_input_text.trim().parse::<f64>() {
+                                self.set_min_val(parsed);
+                            } else {
+                                self.min_limit_input_text =
+                                    Self::format_limit_value(self.min_val, is_int);
+                            }
+                        }
                     }
                 }
-                min_response.on_hover_text(if is_symmetric {
-                    "Symmetric mode: vmin is derived from -vmax"
-                } else {
-                    "Minimum display value"
+
+                response.on_hover_text(match handle {
+                    LimitHandle::Max => "Maximum display value",
+                    LimitHandle::Min if is_symmetric => {
+                        "Symmetric mode: vmin is derived from -vmax"
+                    }
+                    LimitHandle::Min => "Minimum display value",
                 });
             });
-        
-        // Lock button below the colorbar - compact with theme background
+    }
+
+    /// Lock and reset buttons, stacked under the bar.
+    fn render_colorbar_buttons(&mut self, ctx: &egui::Context, bar_rect: egui::Rect) {
+        let spacing = 4.0_f32;
+        let button_size = COLORBAR_BAR_WIDTH;
+
         let lock_button_pos = egui::pos2(bar_rect.min.x, bar_rect.max.y + spacing);
         egui::Area::new(egui::Id::new("colorbar_lock_button"))
             .fixed_pos(lock_button_pos)
@@ -1972,40 +2390,36 @@ impl ArrayViewerWidget {
             .show(ctx, |ui| {
                 let text_color = get_overlay_text_color(ui);
                 let bg_color = get_overlay_bg(ui);
-
-                ui.style_mut().spacing.button_padding =
-                    egui::vec2(bar_stroke_offset + bar_stroke_width, bar_stroke_offset + bar_stroke_width);
-
                 let is_locked = self.is_colorbar_locked();
-                let icon = if is_locked {
+
+                ui.style_mut().spacing.button_padding = egui::vec2(2.0, 2.0);
+                let btn_icon = egui::RichText::new(if is_locked {
                     phosphor::LOCK
                 } else {
                     phosphor::LOCK_OPEN
-                };
-                let btn_icon = egui::RichText::new(icon).color(text_color).size(12.0);
-                let active_stroke = ui.visuals().widgets.active.bg_stroke;
-                let locked_stroke = egui::Stroke::new(active_stroke.width, active_stroke.color);
+                })
+                .color(if is_locked {
+                    text_color
+                } else {
+                    text_color.gamma_multiply(0.4)
+                })
+                .size(12.0);
                 let btn = egui::Button::new(btn_icon)
                     .fill(bg_color)
-                    .min_size(egui::vec2(bar_width, bar_width))
-                    .stroke(if is_locked {
-                        locked_stroke
-                    } else {
-                        egui::Stroke::NONE
-                    });
+                    .min_size(egui::vec2(button_size, button_size));
                 let response = ui.add(btn);
                 if response.clicked() {
                     self.toggle_colorbar_lock();
                 }
                 response.on_hover_text(if is_locked {
-                    "Colorbar locked (new arrays keep current limits)"
+                    "Limits stay put when a new array is loaded"
                 } else {
-                    "Colorbar unlocked (new arrays auto-reset limits)"
+                    "Limits are recomputed when a new array is loaded"
                 });
             });
 
-        // Reset button below lock button - compact with theme background
-        let reset_button_pos = egui::pos2(bar_rect.min.x, bar_rect.max.y + spacing + bar_width + spacing);
+        let reset_button_pos =
+            egui::pos2(bar_rect.min.x, bar_rect.max.y + spacing + button_size + spacing);
         egui::Area::new(egui::Id::new("colorbar_reset_button"))
             .fixed_pos(reset_button_pos)
             .order(egui::Order::Middle)
@@ -2013,21 +2427,25 @@ impl ArrayViewerWidget {
                 let text_color = get_overlay_text_color(ui);
                 let bg_color = get_overlay_bg(ui);
                 let is_modified = self.is_display_modified() || self.is_colorbar_locked();
-                
-                // Minimal styling with no padding to keep width tight
-                ui.style_mut().spacing.button_padding = egui::vec2(bar_stroke_offset + bar_stroke_width, bar_stroke_offset + bar_stroke_width);
-                
+
+                ui.style_mut().spacing.button_padding = egui::vec2(2.0, 2.0);
                 let btn_icon = egui::RichText::new(phosphor::ARROW_COUNTER_CLOCKWISE)
-                    .color(if is_modified { text_color } else { text_color.gamma_multiply(0.4) })
+                    .color(if is_modified {
+                        text_color
+                    } else {
+                        text_color.gamma_multiply(0.4)
+                    })
                     .size(12.0);
                 let btn = egui::Button::new(btn_icon)
                     .fill(bg_color)
-                    .min_size(egui::vec2(bar_width , bar_width));
+                    .min_size(egui::vec2(button_size, button_size));
                 let response = ui.add_enabled(is_modified, btn);
                 if response.clicked() {
+                    // Puts both limits back on the ends of the bar, which is
+                    // the only way out of a stretch dragged somewhere useless.
                     self.reset_display();
                 }
-                response.on_hover_text("Reset contrast/bias and limits");
+                response.on_hover_text("Reset contrast/bias and restore min/max limits");
             });
     }
 
@@ -2396,6 +2814,111 @@ impl ArrayViewerWidget {
 }
 
 /// Apply stretch function to a normalized value (0-1)
+// =============================================================================
+// Colorbar geometry
+//
+// Free functions so the mapping between data values and bar positions can be
+// tested without standing up a widget or a window.
+// =============================================================================
+
+/// Map a data value to its y on the bar, clamped to the bar's extent.
+/// `span` is (value at the bottom edge, value at the top edge).
+fn colorbar_value_to_y(bar: egui::Rect, span: (f64, f64), value: f64) -> f32 {
+    let (lo, hi) = span;
+    let t = if hi > lo {
+        ((value - lo) / (hi - lo)).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
+    bar.max.y - t * bar.height()
+}
+
+/// Inverse of [`colorbar_value_to_y`]: where on the bar the pointer is, as a
+/// data value. Positions outside the bar clamp to its ends.
+fn colorbar_y_to_value(bar: egui::Rect, span: (f64, f64), y: f32) -> f64 {
+    let (lo, hi) = span;
+    let t = if bar.height() > 0.0 {
+        ((bar.max.y - y) / bar.height()).clamp(0.0, 1.0) as f64
+    } else {
+        0.0
+    };
+    lo + t * (hi - lo)
+}
+
+/// Decide where the two value boxes sit vertically.
+///
+/// Each follows its own handle, but limits close together would stack the
+/// boxes on top of one another, so they are pushed apart around their midpoint
+/// and then held inside the bar. The handles themselves never move — the
+/// leader lines stretch instead, so each arrow keeps pointing at the true
+/// value even when its box has been nudged aside.
+///
+/// Returns the box centres in (max limit, min limit) order — the same order
+/// the handles are given in, not top-to-bottom, so an inverted pair of limits
+/// still routes each box to its own handle.
+fn separate_limit_boxes(bar: egui::Rect, max_y: f32, min_y: f32, box_height: f32) -> (f32, f32) {
+    let gap = box_height + 2.0;
+    // The max limit is the upper of the two whenever the limits are sane; take
+    // the min/max so inverted limits still produce an ordered pair.
+    let mut upper = max_y.min(min_y);
+    let mut lower = max_y.max(min_y);
+
+    if lower - upper < gap {
+        let mid = 0.5 * (upper + lower);
+        upper = mid - gap * 0.5;
+        lower = mid + gap * 0.5;
+    }
+
+    // Slide the pair — not just the offender — so their separation survives.
+    let half = box_height * 0.5;
+    let top_limit = bar.min.y + half;
+    let bottom_limit = bar.max.y - half;
+    if upper < top_limit {
+        let shift = top_limit - upper;
+        upper += shift;
+        lower += shift;
+    }
+    if lower > bottom_limit {
+        let shift = lower - bottom_limit;
+        upper -= shift;
+        lower -= shift;
+    }
+
+    // A bar too short to hold both can't satisfy everything; keep them ordered
+    // and inside rather than letting them flip.
+    upper = upper.max(top_limit);
+    lower = lower.max(upper);
+
+    if max_y <= min_y {
+        (upper, lower)
+    } else {
+        (lower, upper)
+    }
+}
+
+/// Give a limit value box the translucent, theme-aware chrome the rest of the
+/// overlay uses.
+fn style_limit_edit(ui: &mut Ui) {
+    let is_dark = ui.visuals().dark_mode;
+    let (bg, hover, active) = if is_dark {
+        (
+            egui::Color32::from_black_alpha(180),
+            egui::Color32::from_black_alpha(200),
+            egui::Color32::from_black_alpha(220),
+        )
+    } else {
+        (
+            egui::Color32::from_white_alpha(220),
+            egui::Color32::from_white_alpha(240),
+            egui::Color32::from_white_alpha(255),
+        )
+    };
+    ui.style_mut().visuals.extreme_bg_color = bg;
+    ui.style_mut().visuals.widgets.inactive.bg_fill = bg;
+    ui.style_mut().visuals.widgets.hovered.bg_fill = hover;
+    ui.style_mut().visuals.widgets.active.bg_fill = active;
+}
+
 fn apply_stretch(x: f64, stretch_type: StretchType) -> f64 {
     match stretch_type {
         StretchType::Linear => x,
@@ -2661,5 +3184,581 @@ mod slice_tests {
         assert_eq!(w.active_axis, 0);
         assert_eq!(w.playing_axis, None);
         assert_eq!(w.requested_indices, None);
+    }
+}
+
+#[cfg(test)]
+mod colorbar_tests {
+    use super::*;
+
+    fn bar() -> egui::Rect {
+        // 100pt tall, top at y=50 so "bar-relative" bugs cannot hide behind a
+        // zero origin.
+        egui::Rect::from_min_size(egui::pos2(10.0, 50.0), egui::vec2(16.0, 100.0))
+    }
+
+    fn widget_with(pixels: Vec<f64>, width: u32, height: u32) -> ArrayViewerWidget {
+        let mut w = ArrayViewerWidget::new();
+        w.set_image(pixels, width, height, false, 6);
+        w
+    }
+
+    /// Run one frame of the colorbar with the pointer at `pointer`, returning
+    /// every path egui emitted. Lets the overlay be exercised without a window.
+    fn run_colorbar_frame(
+        w: &mut ArrayViewerWidget,
+        ctx: &egui::Context,
+        pointer: Option<egui::Pos2>,
+    ) -> Vec<egui::epaint::PathShape> {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut events = Vec::new();
+        if let Some(pos) = pointer {
+            events.push(egui::Event::PointerMoved(pos));
+        }
+        return run_colorbar_events(w, ctx, events);
+    }
+
+    /// The colorbar's rect for the 800x600 screen the harness uses.
+    fn harness_bar() -> egui::Rect {
+        egui::Rect::from_min_size(
+            egui::pos2(COLORBAR_MARGIN, COLORBAR_MARGIN),
+            egui::vec2(COLORBAR_BAR_WIDTH, COLORBAR_MAX_HEIGHT.min(600.0 * 0.5)),
+        )
+    }
+
+    /// Centre of a limit handle's grip at bar position `y`.
+    fn harness_grip(y: f32) -> egui::Pos2 {
+        let bar = harness_bar();
+        egui::pos2(
+            bar.max.x + COLORBAR_ARROW_W + COLORBAR_STEM_W + COLORBAR_GRIP_W * 0.5,
+            y,
+        )
+    }
+
+    /// Run one frame of the colorbar with arbitrary input events.
+    fn run_colorbar_events(
+        w: &mut ArrayViewerWidget,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::epaint::PathShape> {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            w.render_colorbar(ctx, screen);
+        });
+
+        collect_paths(&output.shapes)
+    }
+
+    /// Every shape egui emitted this frame, flattened but still in paint order.
+    fn run_colorbar_shapes(
+        w: &mut ArrayViewerWidget,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::Shape> {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            w.render_colorbar(ctx, screen);
+        });
+
+        fn flatten(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
+            match shape {
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        flatten(s, out);
+                    }
+                }
+                other => out.push(other.clone()),
+            }
+        }
+        let mut shapes = Vec::new();
+        for clipped in &output.shapes {
+            flatten(&clipped.shape, &mut shapes);
+        }
+        shapes
+    }
+
+    fn collect_paths(clipped: &[egui::epaint::ClippedShape]) -> Vec<egui::epaint::PathShape> {
+        fn collect(shape: &egui::Shape, out: &mut Vec<egui::epaint::PathShape>) {
+            match shape {
+                egui::Shape::Path(p) => out.push(p.clone()),
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        collect(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut paths = Vec::new();
+        for c in clipped {
+            collect(&c.shape, &mut paths);
+        }
+        paths
+    }
+
+    /// The histogram outline: the white hairline, which no other part of the
+    /// overlay draws as a long open path.
+    fn histogram_paths(paths: &[egui::epaint::PathShape]) -> Vec<&egui::epaint::PathShape> {
+        paths
+            .iter()
+            .filter(|p| {
+                p.stroke.width == 1.0
+                    && p.stroke.color == egui::epaint::ColorMode::Solid(Color32::WHITE)
+                    && p.points.len() > 8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dragging_the_max_handle_lowers_the_limit_and_follows_with_the_box() {
+        let mut w = widget_with((0..400).map(|i| i as f64).collect(), 20, 20);
+        let ctx = egui::Context::default();
+        let bar = harness_bar();
+
+        // Limits start on the data, so the max handle sits at the bar's top.
+        run_colorbar_frame(&mut w, &ctx, None);
+        let (vmin_before, vmax_before) = w.value_range();
+        let grip = harness_grip(bar.min.y);
+
+        // Press on the grip, then drag down to the middle of the bar.
+        run_colorbar_frame(&mut w, &ctx, Some(grip));
+        run_colorbar_events(
+            &mut w,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: grip,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let target = egui::pos2(grip.x, bar.center().y);
+        run_colorbar_events(&mut w, &ctx, vec![egui::Event::PointerMoved(target)]);
+        run_colorbar_events(&mut w, &ctx, vec![egui::Event::PointerMoved(target)]);
+
+        let (vmin_after, vmax_after) = w.value_range();
+        assert!(
+            vmax_after < vmax_before,
+            "dragging the max handle down should lower vmax: {vmax_before} -> {vmax_after}"
+        );
+        assert_eq!(vmin_before, vmin_after, "the other limit must not move");
+
+        // Halfway down the bar is halfway through the span.
+        let (lo, hi) = w.colorbar_span();
+        let expected = lo + 0.5 * (hi - lo);
+        assert!(
+            (vmax_after - expected).abs() < 0.05 * (hi - lo),
+            "vmax {vmax_after} should be near the bar's midpoint {expected}"
+        );
+
+        // The box shows the dragged value, not a stale one.
+        assert_eq!(
+            w.max_limit_input_text,
+            ArrayViewerWidget::format_limit_value(vmax_after, false)
+        );
+
+        // And releasing ends the drag, so the span is free to move again.
+        run_colorbar_events(
+            &mut w,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        assert!(w.colorbar_drag.is_none(), "drag state should be cleared");
+    }
+
+    #[test]
+    fn the_min_handle_is_inert_in_symmetric_mode() {
+        let mut w = widget_with(vec![-8.0, -2.0, 4.0, 10.0], 2, 2);
+        w.set_symmetric(true);
+        let ctx = egui::Context::default();
+        let bar = harness_bar();
+
+        run_colorbar_frame(&mut w, &ctx, None);
+        let before = w.value_range();
+
+        // vmin is derived from vmax here, so its handle must not accept a drag.
+        let grip = harness_grip(bar.max.y);
+        run_colorbar_frame(&mut w, &ctx, Some(grip));
+        run_colorbar_events(
+            &mut w,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: grip,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let target = egui::pos2(grip.x, bar.center().y);
+        run_colorbar_events(&mut w, &ctx, vec![egui::Event::PointerMoved(target)]);
+        run_colorbar_events(&mut w, &ctx, vec![egui::Event::PointerMoved(target)]);
+
+        assert_eq!(w.value_range(), before, "symmetric vmin must stay derived");
+        assert!(w.colorbar_drag.is_none(), "no drag should have started");
+    }
+
+    #[test]
+    fn histogram_bins_are_log_scaled_so_sparse_bins_stay_visible() {
+        // One lonely pixel against a thousand in the background bin -- the
+        // shape of every image this viewer is actually pointed at.
+        let mut pixels = vec![0.0; 1000];
+        pixels.push(9.0);
+        let count = pixels.len() as u32;
+        let mut w = widget_with(pixels, count, 1);
+
+        let span = w.colorbar_span();
+        let bins = w.colorbar_histogram_bins(span, 10).to_vec();
+
+        let crowded = bins[0];
+        let lonely = bins[9];
+        assert!((crowded - 1.0).abs() < 1e-6, "the mode normalises to 1.0");
+
+        // Linear scaling would put the lone pixel at 1/1000 of the width: a
+        // tenth of a pixel, i.e. invisible. The log has to do far better.
+        let linear_would_be = 1.0 / 1000.0;
+        assert!(
+            lonely > 20.0 * linear_would_be,
+            "sparse bin at {lonely} is barely better than linear ({linear_would_be})"
+        );
+        // ln(2)/ln(1001), give or take.
+        assert!(
+            (lonely - 0.1003).abs() < 0.01,
+            "expected the log1p ratio, got {lonely}"
+        );
+
+        // Bins with nothing in them still sit flat on the bar.
+        assert_eq!(bins[5], 0.0, "an empty bin must have no width");
+    }
+
+    #[test]
+    fn histogram_is_drawn_under_the_handles_and_boxes() {
+        let mut w = widget_with((0..400).map(|i| i as f64).collect(), 20, 20);
+        let ctx = egui::Context::default();
+        run_colorbar_frame(&mut w, &ctx, None);
+
+        // Hover the bar so the histogram is up, then look at paint order.
+        let shapes = run_colorbar_shapes(&mut w, &ctx, vec![egui::Event::PointerMoved(
+            egui::pos2(COLORBAR_MARGIN + 2.0, COLORBAR_MARGIN + 20.0),
+        )]);
+
+        let histogram_at = shapes
+            .iter()
+            .position(|s| {
+                matches!(s, egui::Shape::Path(p)
+                    if p.stroke.width == 1.0
+                        && p.stroke.color == egui::epaint::ColorMode::Solid(Color32::WHITE)
+                        && p.points.len() > 8)
+            })
+            .expect("histogram should be drawn while hovering");
+
+        // The grips are the only rounded rects out at the connector's x.
+        let bar = harness_bar();
+        let grip_x = bar.max.x + COLORBAR_ARROW_W + COLORBAR_STEM_W;
+        let grip_at = shapes
+            .iter()
+            .position(|s| {
+                matches!(s, egui::Shape::Rect(r)
+                    if (r.rect.min.x - grip_x).abs() < 1.0
+                        && (r.rect.width() - COLORBAR_GRIP_W).abs() < 1.0)
+            })
+            .expect("a grip should have been drawn");
+
+        assert!(
+            histogram_at < grip_at,
+            "histogram (at {histogram_at}) must be painted before the grips (at {grip_at}) \
+             so it passes under them"
+        );
+    }
+
+    #[test]
+    fn histogram_shows_only_while_the_colorbar_is_engaged() {
+        let mut w = widget_with((0..400).map(|i| i as f64).collect(), 20, 20);
+        let ctx = egui::Context::default();
+
+        // Warm-up frame: egui needs one pass to lay the overlay out.
+        run_colorbar_frame(&mut w, &ctx, None);
+
+        // Pointer parked far from the colorbar: no histogram.
+        let away = run_colorbar_frame(&mut w, &ctx, Some(egui::pos2(700.0, 500.0)));
+        assert!(
+            histogram_paths(&away).is_empty(),
+            "histogram drawn while the pointer was nowhere near the colorbar"
+        );
+
+        // Pointer over the bar itself: histogram appears.
+        let over = run_colorbar_frame(&mut w, &ctx, Some(egui::pos2(16.0, 60.0)));
+        let drawn = histogram_paths(&over);
+        assert_eq!(
+            drawn.len(),
+            1,
+            "expected exactly one histogram hairline, got {}",
+            drawn.len()
+        );
+
+        // It starts and ends on the bar's edge and never reaches past its
+        // maximum width.
+        let path = drawn[0];
+        let bar_right = 10.0 + COLORBAR_BAR_WIDTH;
+        for p in &path.points {
+            assert!(
+                p.x >= bar_right - 0.01 && p.x <= bar_right + COLORBAR_HISTOGRAM_W + 0.01,
+                "histogram point {p:?} outside its allotted width"
+            );
+        }
+        assert!(
+            path.points.iter().any(|p| p.x > bar_right + 1.0),
+            "histogram never left the bar edge, so nothing was actually drawn"
+        );
+    }
+
+    #[test]
+    fn histogram_stays_up_while_a_handle_is_dragged_away_from_the_pointer() {
+        let mut w = widget_with((0..400).map(|i| i as f64).collect(), 20, 20);
+        let ctx = egui::Context::default();
+        run_colorbar_frame(&mut w, &ctx, None);
+
+        // Pretend a drag is in flight, pointer well away from the bar.
+        w.colorbar_drag = Some(ColorbarDrag {
+            handle: LimitHandle::Max,
+            span: w.colorbar_span(),
+        });
+        let during = run_colorbar_frame(&mut w, &ctx, Some(egui::pos2(700.0, 500.0)));
+        assert_eq!(
+            histogram_paths(&during).len(),
+            1,
+            "histogram should stay visible for the whole drag"
+        );
+    }
+
+    #[test]
+    fn the_overlay_renders_without_panicking_in_awkward_states() {
+        let ctx = egui::Context::default();
+
+        // Flat image, inverted limits, symmetric mode, and a limit pushed well
+        // past the data -- each has its own branch in the paint code.
+        let mut flat = widget_with(vec![3.0; 16], 4, 4);
+        run_colorbar_frame(&mut flat, &ctx, Some(egui::pos2(16.0, 60.0)));
+
+        let mut inverted = widget_with(vec![0.0, 1.0, 2.0, 3.0], 2, 2);
+        inverted.set_max_val(0.5);
+        inverted.set_min_val(2.5);
+        run_colorbar_frame(&mut inverted, &ctx, Some(egui::pos2(16.0, 60.0)));
+
+        let mut symmetric = widget_with(vec![-5.0, 0.0, 5.0, 10.0], 2, 2);
+        symmetric.set_symmetric(true);
+        run_colorbar_frame(&mut symmetric, &ctx, Some(egui::pos2(16.0, 60.0)));
+
+        let mut wide = widget_with(vec![0.0, 1.0, 2.0, 3.0], 2, 2);
+        wide.set_value_range(-1e6, 1e6);
+        run_colorbar_frame(&mut wide, &ctx, Some(egui::pos2(16.0, 60.0)));
+
+        let mut empty = ArrayViewerWidget::new();
+        run_colorbar_frame(&mut empty, &ctx, Some(egui::pos2(16.0, 60.0)));
+    }
+
+    #[test]
+    fn value_and_position_round_trip() {
+        let bar = bar();
+        let span = (-10.0, 30.0);
+
+        // The span's ends land on the bar's ends, low at the bottom.
+        assert!((colorbar_value_to_y(bar, span, -10.0) - bar.max.y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, 30.0) - bar.min.y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, 10.0) - bar.center().y).abs() < 1e-3);
+
+        for value in [-10.0, -3.5, 0.0, 12.25, 30.0] {
+            let y = colorbar_value_to_y(bar, span, value);
+            let back = colorbar_y_to_value(bar, span, y);
+            assert!((back - value).abs() < 1e-6, "{value} -> {y} -> {back}");
+        }
+    }
+
+    #[test]
+    fn positions_clamp_to_the_bar() {
+        let bar = bar();
+        let span = (0.0, 1.0);
+        assert!((colorbar_value_to_y(bar, span, 99.0) - bar.min.y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, -99.0) - bar.max.y).abs() < 1e-3);
+        // Dragging past either end of the bar pins to that end's value.
+        assert!((colorbar_y_to_value(bar, span, bar.min.y - 40.0) - 1.0).abs() < 1e-9);
+        assert!((colorbar_y_to_value(bar, span, bar.max.y + 40.0) - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn degenerate_span_does_not_divide_by_zero() {
+        let bar = bar();
+        let y = colorbar_value_to_y(bar, (5.0, 5.0), 5.0);
+        assert!(y.is_finite());
+        assert!(colorbar_y_to_value(bar, (5.0, 5.0), y).is_finite());
+    }
+
+    #[test]
+    fn the_bar_spans_the_data_so_pulled_in_limits_leave_a_band() {
+        let mut w = widget_with(vec![0.0, 10.0, 20.0, 30.0], 2, 2);
+        assert_eq!(w.colorbar_span(), (0.0, 30.0));
+
+        // Pulling a limit inside the data leaves the span alone, which is what
+        // creates the saturated band.
+        w.set_value_range(10.0, 20.0);
+        assert_eq!(w.colorbar_span(), (0.0, 30.0));
+
+        // Pushing one past the data stretches the bar instead: nothing
+        // saturates out there, so there is no band to show.
+        w.set_value_range(-5.0, 100.0);
+        assert_eq!(w.colorbar_span(), (-5.0, 100.0));
+    }
+
+    #[test]
+    fn a_flat_image_still_gives_a_usable_span() {
+        let w = widget_with(vec![7.0; 4], 2, 2);
+        let (lo, hi) = w.colorbar_span();
+        assert!(hi > lo, "span must have width: {lo}..{hi}");
+    }
+
+    #[test]
+    fn boxes_never_overlap_and_stay_on_the_bar() {
+        let bar = bar();
+        let box_h = 20.0;
+
+        // Limits almost on top of each other: the boxes get pushed apart.
+        let (max_box, min_box) = separate_limit_boxes(bar, 100.0, 102.0, box_h);
+        assert!(
+            min_box - max_box >= box_h,
+            "boxes overlap: {max_box} vs {min_box}"
+        );
+
+        // Both ends: boxes stay inside the bar's vertical extent.
+        for (max_y, min_y) in [(bar.min.y, bar.min.y + 1.0), (bar.max.y - 1.0, bar.max.y)] {
+            let (a, b) = separate_limit_boxes(bar, max_y, min_y, box_h);
+            for centre in [a, b] {
+                assert!(
+                    centre - box_h / 2.0 >= bar.min.y - 0.01
+                        && centre + box_h / 2.0 <= bar.max.y + 0.01,
+                    "box at {centre} escapes the bar {bar:?}"
+                );
+            }
+            assert!(b - a >= box_h - 0.01, "boxes overlap at the end: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn well_separated_limits_leave_their_boxes_on_their_handles() {
+        let bar = bar();
+        // 60pt apart, far more than a 20pt box needs, and clear of both ends.
+        let (max_box, min_box) = separate_limit_boxes(bar, 70.0, 130.0, 20.0);
+        assert!((max_box - 70.0).abs() < 1e-3);
+        assert!((min_box - 130.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn histogram_is_normalised_to_its_tallest_bin() {
+        // Ten 5s and one each of 0 and 10, so the middle bin dominates.
+        let mut pixels = vec![5.0; 10];
+        pixels.push(0.0);
+        pixels.push(10.0);
+        let mut w = widget_with(pixels, 4, 3);
+
+        let span = w.colorbar_span();
+        let bins = w.colorbar_histogram_bins(span, 11).to_vec();
+
+        assert_eq!(bins.len(), 11);
+        let peak = bins.iter().copied().fold(0.0_f32, f32::max);
+        assert!(
+            (peak - 1.0).abs() < 1e-6,
+            "tallest bin should be exactly 1.0, got {peak}"
+        );
+        // Bin 0 is the low end, and the counts land where the values are.
+        assert!(bins[0] > 0.0, "the single 0.0 should be in the first bin");
+        assert!(bins[10] > 0.0, "the single 10.0 should be in the last bin");
+        assert!((bins[5] - 1.0).abs() < 1e-6, "the ten 5.0s are the mode");
+    }
+
+    #[test]
+    fn histogram_ignores_nan() {
+        let mut w = widget_with(vec![0.0, 1.0, f64::NAN, f64::NAN], 2, 2);
+        let span = w.colorbar_span();
+        let bins = w.colorbar_histogram_bins(span, 4).to_vec();
+        let total: f32 = bins.iter().sum();
+        // Two finite pixels, each alone in its bin, so both normalise to 1.0.
+        assert!((total - 2.0).abs() < 1e-6, "NaN leaked into the bins: {bins:?}");
+    }
+
+    #[test]
+    fn histogram_is_recomputed_when_the_span_or_resolution_changes() {
+        let mut w = widget_with(vec![0.0, 1.0, 2.0, 3.0], 2, 2);
+        let span = w.colorbar_span();
+
+        assert_eq!(w.colorbar_histogram_bins(span, 8).len(), 8);
+        // A different bin count must not hand back the old vector.
+        assert_eq!(w.colorbar_histogram_bins(span, 16).len(), 16);
+
+        // A span change invalidates too, even at the same resolution.
+        w.set_value_range(-10.0, 10.0);
+        let wider = w.colorbar_span();
+        assert_ne!(wider, span);
+        w.colorbar_histogram_bins(wider, 16);
+        assert_eq!(
+            w.colorbar_histogram.as_ref().map(|h| h.span),
+            Some(wider),
+            "cache should now describe the new span"
+        );
+    }
+
+    #[test]
+    fn a_new_image_drops_the_cached_histogram() {
+        let mut w = widget_with(vec![0.0, 1.0, 2.0, 3.0], 2, 2);
+        let span = w.colorbar_span();
+        w.colorbar_histogram_bins(span, 8);
+        assert!(w.colorbar_histogram.is_some());
+
+        w.set_image(vec![10.0, 20.0, 30.0, 40.0], 2, 2, false, 6);
+        assert!(
+            w.colorbar_histogram.is_none(),
+            "stale histogram would describe the previous image"
+        );
+    }
+
+    #[test]
+    fn reversing_the_colormap_swaps_the_ramp_ends() {
+        let mut w = widget_with(vec![0.0, 1.0, 2.0, 3.0], 2, 2);
+        let (bottom, top) = (w.ramp_color(0.0), w.ramp_color(1.0));
+        w.set_reversed(true);
+        // The end colours are what the saturated bands are painted with, so
+        // they have to follow the ramp when it flips.
+        assert_eq!(w.ramp_color(0.0), top);
+        assert_eq!(w.ramp_color(1.0), bottom);
+    }
+
+    #[test]
+    fn reset_restores_limits_dragged_away() {
+        let mut w = widget_with(vec![0.0, 10.0, 20.0, 30.0], 2, 2);
+        let (orig_min, orig_max) = w.value_range();
+
+        // Stand in for a drag: the handles do nothing the setters do not.
+        w.set_max_val(12.0);
+        w.set_min_val(4.0);
+        assert!(w.is_limits_modified());
+
+        w.reset_display();
+        assert_eq!(w.value_range(), (orig_min, orig_max));
+        assert!(!w.is_limits_modified());
+        // The boxes follow the limits, not the other way round.
+        assert_eq!(w.max_limit_input_text, ArrayViewerWidget::format_limit_value(orig_max, false));
+        assert_eq!(w.min_limit_input_text, ArrayViewerWidget::format_limit_value(orig_min, false));
     }
 }

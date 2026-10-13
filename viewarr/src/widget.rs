@@ -2806,22 +2806,29 @@ impl ArrayViewerWidget {
     }
 
     /// Render compact hover info overlay at bottom-left with fixed-width fields.
-    fn render_hover_overlay(&self, ctx: &egui::Context, _widget_rect: egui::Rect) -> egui::Rect {
+    ///
+    /// Returns the rect it occupies so the message bar can keep clear of it;
+    /// with nothing to report that is an empty rect on the widget's own bottom
+    ///-left corner, which leaves the message the whole width. Deliberately not
+    /// `Rect::NOTHING` -- its infinite edges would poison that arithmetic.
+    fn render_hover_overlay(&self, ctx: &egui::Context, widget_rect: egui::Rect) -> egui::Rect {
         let margin = 10.0;
-        let value_chars = self.overlay_value_char_width();
-        let (x_value, y_value, z_value) = match self.hover_info() {
-            Some((x, y, value)) => {
-                let x_txt = format!("{:>width$.2}", x as f64, width = value_chars);
-                let y_txt = format!("{:>width$.2}", y as f64, width = value_chars);
-                let z_txt = format!("{:>width$}", self.format_hover_value(value), width = value_chars);
-                (x_txt, y_txt, z_txt)
-            }
-            None => (
-                format!("{:>width$}", "--.--", width = value_chars),
-                format!("{:>width$}", "--.--", width = value_chars),
-                format!("{:>width$}", "--", width = value_chars),
-            ),
+
+        // With the pointer off the image there is nothing to say, and three
+        // rows of dashes say it louder than showing nothing at all.
+        let Some((x, y, value)) = self.hover_info() else {
+            let corner = egui::pos2(widget_rect.left(), widget_rect.bottom());
+            return egui::Rect::from_min_max(corner, corner);
         };
+
+        let value_chars = self.overlay_value_char_width();
+        let x_value = format!("{:>width$.2}", x, width = value_chars);
+        let y_value = format!("{:>width$.2}", y, width = value_chars);
+        let z_value = format!(
+            "{:>width$}",
+            self.format_hover_value(value),
+            width = value_chars
+        );
 
         let area_response = egui::Area::new(egui::Id::new("hover_overlay_compact"))
             .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(margin, -margin))
@@ -2888,7 +2895,9 @@ impl ArrayViewerWidget {
         let v0 = self.format_hover_value(self.min_val).len();
         let v1 = self.format_hover_value(self.max_val).len();
         let v2 = self.format_hover_value(0.0).len();
-        let v_chars = v0.max(v1).max(v2).max(2); // "--" fallback
+        // A floor of two keeps a degenerate value range from collapsing the
+        // column to nothing.
+        let v_chars = v0.max(v1).max(v2).max(2);
 
         x_chars.max(y_chars).max(v_chars)
     }
@@ -4176,5 +4185,104 @@ mod colorbar_tests {
         // The boxes follow the limits, not the other way round.
         assert_eq!(w.max_limit_input_text, ArrayViewerWidget::format_limit_value(orig_max, false));
         assert_eq!(w.min_limit_input_text, ArrayViewerWidget::format_limit_value(orig_min, false));
+    }
+}
+
+#[cfg(test)]
+mod hover_overlay_tests {
+    use super::*;
+
+    fn widget_with_image() -> ArrayViewerWidget {
+        let mut w = ArrayViewerWidget::new();
+        w.set_image(vec![0.0, 1.0, 2.0, 3.0], 2, 2, false, 6);
+        w
+    }
+
+    /// Run one frame of just the hover overlay, returning its reported rect and
+    /// every text the overlay drew.
+    fn run_overlay(w: &ArrayViewerWidget) -> (egui::Rect, Vec<String>) {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut rect = egui::Rect::NOTHING;
+        let mut run_once = || {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    rect = w.render_hover_overlay(ctx, screen);
+                },
+            )
+        };
+        // egui sizes an Area on its first pass and paints it on the next, so
+        // read the second frame.
+        run_once();
+        let output = run_once();
+
+        fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        collect(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut texts);
+        }
+        (rect, texts)
+    }
+
+    #[test]
+    fn nothing_is_drawn_with_the_pointer_off_the_image() {
+        let w = widget_with_image();
+        assert!(w.hover_info().is_none());
+
+        let (rect, texts) = run_overlay(&w);
+
+        assert!(
+            texts.is_empty(),
+            "the overlay should be absent, not full of dashes: {texts:?}"
+        );
+        // An empty rect, but a finite one: the message bar does arithmetic on
+        // its right edge and Rect::NOTHING would hand it an infinity.
+        assert!(rect.right().is_finite(), "rect must stay usable: {rect:?}");
+        assert!(rect.width() <= 0.01, "nothing is drawn, so it takes no width");
+    }
+
+    #[test]
+    fn the_message_bar_gets_the_whole_width_back() {
+        // render_overlay_message derives its left edge from this rect, so an
+        // absent overlay has to free the space rather than reserve it.
+        let w = widget_with_image();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let (rect, _) = run_overlay(&w);
+        assert!(
+            (rect.right() - screen.left()).abs() < 0.01,
+            "an absent overlay should leave the left edge free, got {rect:?}"
+        );
+    }
+
+    #[test]
+    fn coordinates_are_shown_once_there_is_something_under_the_pointer() {
+        let mut w = widget_with_image();
+        w.hover_info = Some((1.0, 0.0, 2.0));
+
+        let (rect, texts) = run_overlay(&w);
+
+        assert!(rect.width() > 0.0, "the overlay should occupy space now");
+        let joined = texts.join(" ");
+        for label in ["x:", "y:", "z:"] {
+            assert!(joined.contains(label), "missing {label} in {texts:?}");
+        }
+        assert!(
+            !joined.contains("--"),
+            "placeholders should be gone entirely: {texts:?}"
+        );
     }
 }

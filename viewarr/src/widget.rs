@@ -2469,16 +2469,16 @@ impl ArrayViewerWidget {
 
         // Its own control rather than a second job for the arrow above: the
         // stretch and the limits are set independently, so resetting one
-        // should not undo the other. The histogram glyph points at what the
-        // contrast/bias actually act on -- the same distribution the hover
-        // overlay draws -- which keeps it from reading as another limits reset.
+        // should not undo the other. A half-filled circle is the conventional
+        // contrast glyph, which says what this one resets without reading as
+        // another limits reset the way a second arrow would.
         let stretch_changed = self.is_stretch_modified();
         if Self::colorbar_button(
             ctx,
             "colorbar_stretch_reset_button",
             slot(2.0),
             size,
-            phosphor::CHART_BAR,
+            phosphor::CIRCLE_HALF,
             stretch_changed,
             stretch_changed,
             "Reset contrast and bias",
@@ -3965,6 +3965,42 @@ mod colorbar_tests {
         assert!(bins[0] > 0.0, "the single 0.0 should be in the first bin");
         assert!(bins[10] > 0.0, "the single 10.0 should be in the last bin");
         assert!((bins[5] - 1.0).abs() < 1e-6, "the ten 5.0s are the mode");
+    }
+
+    #[test]
+    fn the_histogram_does_not_move_when_contrast_or_bias_change() {
+        // The histogram describes the pixels as they are on disk; contrast and
+        // bias only decide how values are painted, so neither may disturb it.
+        // Checked at both levels, since the bins and the path drawn from them
+        // could drift apart independently.
+        let mut w = widget_with((0..400).map(|i| (i * i) as f64).collect(), 20, 20);
+        let ctx = egui::Context::default();
+        let hover = egui::pos2(COLORBAR_MARGIN + 2.0, COLORBAR_VERTICAL_MARGIN + 20.0);
+        run_colorbar_frame(&mut w, &ctx, None);
+
+        let span_before = w.colorbar_span();
+        let bins_before = w.colorbar_histogram_bins(span_before, 32).to_vec();
+        let drawn_before = histogram_paths(&run_colorbar_frame(&mut w, &ctx, Some(hover)))
+            .first()
+            .map(|p| p.points.clone())
+            .expect("histogram should be drawn while hovering");
+
+        w.set_contrast(8.0);
+        w.set_bias(0.1);
+        run_colorbar_frame(&mut w, &ctx, Some(hover));
+
+        let span_after = w.colorbar_span();
+        assert_eq!(span_after, span_before, "the bar's value span moved");
+        assert_eq!(
+            w.colorbar_histogram_bins(span_after, 32).to_vec(),
+            bins_before,
+            "bins were rebuilt differently"
+        );
+        let drawn_after = histogram_paths(&run_colorbar_frame(&mut w, &ctx, Some(hover)))
+            .first()
+            .map(|p| p.points.clone())
+            .expect("histogram should still be drawn");
+        assert_eq!(drawn_after, drawn_before, "the drawn outline moved");
     }
 
     #[test]

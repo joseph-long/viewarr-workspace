@@ -93,7 +93,6 @@ enum StretchAction {
     SetDiverging,
     SetColormap(Colormap),
     ToggleReverse,
-    ResetStretch,
 }
 
 /// Actions returned from the slice / play controls overlay
@@ -1454,7 +1453,6 @@ impl ArrayViewerWidget {
             }
             StretchAction::SetColormap(cmap) => self.set_colormap(cmap),
             StretchAction::ToggleReverse => self.toggle_reverse(),
-            StretchAction::ResetStretch => self.reset_current_stretch(),
         }
 
         response

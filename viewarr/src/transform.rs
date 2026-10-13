@@ -112,6 +112,36 @@ impl ViewTransform {
         self.pivot_point = (x, y);
     }
 
+    /// Move the rotation pivot to `new_pivot` (image coordinates) without the
+    /// picture appearing to move.
+    ///
+    /// The pivot is the rotation's fixed point and is drawn where it would sit
+    /// with no rotation at all, so moving it swings the whole rotated image
+    /// somewhere else. Panning by exactly the displacement that swing
+    /// introduces cancels it out.
+    ///
+    /// That cancellation is what lets the pivot be the pixel the user actually
+    /// clicked. Without it the only pivot that leaves the picture still is
+    /// whichever pixel happens to sit at that screen position in the unrotated
+    /// layout -- a different pixel entirely once the view is turned.
+    pub fn set_pivot_preserving_view(
+        &mut self,
+        new_pivot: (f32, f32),
+        image_rect: Rect,
+        image_size: (u32, u32),
+    ) {
+        let before = self.pivot_to_screen(image_rect, image_size);
+        self.set_pivot_point(new_pivot.0, new_pivot.1);
+        let after = self.pivot_to_screen(image_rect, image_size);
+
+        // Both are measured in the unrotated layout, so their difference is
+        // what the new centre of rotation displaces the image by; the part of
+        // that the rendering keeps is the difference minus its own rotation.
+        let delta = before - after;
+        let rotated = Self::rotate_point(Pos2::ZERO + delta, Pos2::ZERO, self.rotation_degrees);
+        self.pan_offset += delta - rotated.to_vec2();
+    }
+
     /// Initialize pivot point to image center
     pub fn set_pivot_to_center(&mut self, image_width: u32, image_height: u32) {
         self.pivot_point = (
@@ -257,34 +287,26 @@ impl ViewTransform {
     /// exactly where the user clicked, regardless of current rotation state.
     /// 
     /// The key difference from screen_to_image_rotated: we don't unrotate the
-    /// screen position before converting.
+    /// Convert a screen position to the continuous image coordinates to use as
+    /// a rotation pivot, or `None` if the click missed the image.
+    ///
+    /// Shares its inverse with [`Self::screen_to_image_continuous_rotated`], so
+    /// the point lands on the pixel that was actually under the cursor: the
+    /// rotation has to be undone before the position means anything in image
+    /// space, and the bounds have to be judged there too. Testing the raw
+    /// screen position against the unrotated `image_rect` would both accept
+    /// clicks on the background beside a rotated image and reject parts of the
+    /// image that have swung outside that rect.
+    ///
+    /// Continuous rather than a pixel index so the pivot lands exactly where
+    /// the cursor was; [`Self::pivot_to_screen`] is its exact inverse.
     pub fn screen_to_image_for_pivot(
         &self,
         screen_pos: Pos2,
         image_rect: Rect,
         image_size: (u32, u32),
-    ) -> Option<(u32, u32)> {
-        // Check bounds against the unrotated image rect
-        if !image_rect.contains(screen_pos) {
-            return None;
-        }
-
-        let rel_x = (screen_pos.x - image_rect.min.x) / image_rect.width();
-        // Flip Y: screen Y increases downward, but image Y=0 is at bottom
-        let rel_y = 1.0 - (screen_pos.y - image_rect.min.y) / image_rect.height();
-
-        // Clamp to [0, 1) to handle boundary conditions
-        let rel_x = rel_x.clamp(0.0, 0.9999999);
-        let rel_y = rel_y.clamp(0.0, 0.9999999);
-
-        let img_x = (rel_x * image_size.0 as f32).floor() as i32;
-        let img_y = (rel_y * image_size.1 as f32).floor() as i32;
-
-        if img_x >= 0 && img_x < image_size.0 as i32 && img_y >= 0 && img_y < image_size.1 as i32 {
-            Some((img_x as u32, img_y as u32))
-        } else {
-            None
-        }
+    ) -> Option<(f32, f32)> {
+        self.screen_to_image_continuous_rotated(screen_pos, image_rect, image_size)
     }
 
     /// Clamp pan offset to keep at least part of the image visible
@@ -678,44 +700,104 @@ mod tests {
     /// Test pivot round-trip when there IS an existing rotation.
     /// When setting a new pivot via alt-click, we should use the DIRECT
     /// screen-to-image conversion (not rotation-aware), so the marker
-    /// appears where the user clicked.
+    /// The viewport and base size the pivot tests lay the image out in: a
+    /// 100x100 image drawn at 2 screen points per pixel, centred.
+    fn pivot_test_layout() -> (Rect, Vec2, (u32, u32)) {
+        (
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 400.0)),
+            Vec2::new(200.0, 200.0),
+            (100u32, 100u32),
+        )
+    }
+
+    /// Setting the pivot from a click must land it on the pixel that was under
+    /// the cursor, and leave the marker -- and so the picture -- where it was.
+    ///
+    /// The rect has to be recomputed afterwards: the compensation works by
+    /// panning, so a rect captured before the click cannot show the result.
     #[test]
     fn test_pivot_point_round_trip_with_rotation() {
-        let mut t = ViewTransform::new();
-        t.rotation_degrees = 45.0; // 45 degree rotation
-        // Initial pivot at image center
-        t.pivot_point = (49.5, 49.5);
-        
-        let image_rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(200.0, 200.0));
-        let image_size = (100u32, 100u32);
+        let (viewport, base, image_size) = pivot_test_layout();
 
-        // User clicks at a specific screen position (upper-right area)
-        let click_pos = Pos2::new(250.0, 150.0);
-        
-        // For setting a new pivot, we want the marker to appear WHERE the user clicked,
-        // not where that point maps to in the rotated image coordinate system.
-        // So we should use direct (non-rotated) screen-to-image conversion.
-        let img_coords = t.screen_to_image_for_pivot(click_pos, image_rect, image_size);
-        assert!(img_coords.is_some(), "Click should be within image bounds");
-        let (img_x, img_y) = img_coords.unwrap();
-        
-        // Set as new pivot point
-        t.set_pivot_point(img_x as f32, img_y as f32);
-        
-        // Convert pivot back to screen coordinates
-        let marker_pos = t.pivot_to_screen(image_rect, image_size);
-        
-        // Marker should be at the click location
-        let tolerance = image_rect.width() / image_size.0 as f32;
+        for rotation in [0.0_f32, 15.0, 45.0, 90.0, -30.0, 180.0] {
+            let mut t = ViewTransform::new();
+            t.rotation_degrees = rotation;
+            t.pivot_point = (49.5, 49.5);
+
+            let rect_before = t.calculate_image_rect(viewport, base);
+            let click_pos = Pos2::new(250.0, 150.0);
+
+            let pivot = t
+                .screen_to_image_for_pivot(click_pos, rect_before, image_size)
+                .unwrap_or_else(|| panic!("click should be on the image at {rotation} degrees"));
+            t.set_pivot_preserving_view(pivot, rect_before, image_size);
+
+            let rect_after = t.calculate_image_rect(viewport, base);
+            let marker = t.pivot_to_screen(rect_after, image_size);
+
+            assert!(
+                (marker - click_pos).length() < 0.01,
+                "at {rotation} degrees the marker landed at {marker:?}, not {click_pos:?}"
+            );
+        }
+    }
+
+    /// Moving the pivot must not shift the picture: the whole point of
+    /// compensating the pan is that only future rotation behaviour changes.
+    #[test]
+    fn test_setting_pivot_leaves_the_image_where_it_was() {
+        let (viewport, base, image_size) = pivot_test_layout();
+        let mut t = ViewTransform::new();
+        t.rotation_degrees = 37.0;
+        t.pivot_point = (49.5, 49.5);
+
+        let rect_before = t.calculate_image_rect(viewport, base);
+        let probes = [(0.0, 0.0), (99.0, 0.0), (0.0, 99.0), (99.0, 99.0), (12.0, 73.0)];
+        let was: Vec<Pos2> = probes
+            .iter()
+            .map(|&p| t.image_to_screen_continuous_rotated(p, rect_before, image_size))
+            .collect();
+
+        let click_pos = Pos2::new(230.0, 170.0);
+        let pivot = t
+            .screen_to_image_for_pivot(click_pos, rect_before, image_size)
+            .expect("click should be on the image");
+        t.set_pivot_preserving_view(pivot, rect_before, image_size);
+
+        let rect_after = t.calculate_image_rect(viewport, base);
+        for (&p, &before) in probes.iter().zip(&was) {
+            let now = t.image_to_screen_continuous_rotated(p, rect_after, image_size);
+            assert!(
+                (now - before).length() < 0.01,
+                "pixel {p:?} moved from {before:?} to {now:?}"
+            );
+        }
+    }
+
+    /// A click on the background beside a rotated image is out of bounds, even
+    /// though it falls inside the image's unrotated rect.
+    #[test]
+    fn test_pivot_click_outside_a_rotated_image_is_rejected() {
+        let (viewport, base, image_size) = pivot_test_layout();
+        let mut t = ViewTransform::new();
+        t.rotation_degrees = 45.0;
+        t.pivot_point = (49.5, 49.5);
+
+        let rect = t.calculate_image_rect(viewport, base);
+        // A corner of the unrotated rect: at 45 degrees the image has swung
+        // away from it, so there are no pixels there to pick.
+        let corner = Pos2::new(rect.min.x + 2.0, rect.min.y + 2.0);
+        assert!(rect.contains(corner), "the probe must be inside the plain rect");
         assert!(
-            (marker_pos.x - click_pos.x).abs() < tolerance,
-            "Marker X ({}) should be near click X ({}), diff={}",
-            marker_pos.x, click_pos.x, (marker_pos.x - click_pos.x).abs()
+            t.screen_to_image_for_pivot(corner, rect, image_size).is_none(),
+            "a click on the background must not land a pivot inside the image"
         );
+
+        // The centre is on the image at any rotation.
         assert!(
-            (marker_pos.y - click_pos.y).abs() < tolerance,
-            "Marker Y ({}) should be near click Y ({}), diff={}",
-            marker_pos.y, click_pos.y, (marker_pos.y - click_pos.y).abs()
+            t.screen_to_image_for_pivot(rect.center(), rect, image_size)
+                .is_some(),
+            "the centre is always on the image"
         );
     }
 
@@ -838,14 +920,27 @@ mod tests {
         let image_rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(200.0, 200.0));
         let image_size = (100u32, 100u32);
 
-        // Click exactly at top-left corner
+        // The pivot shares its inverse with the hover readout, so it inherits
+        // that half-open range: the image's outer edge is the exclusive bound.
         let corner = Pos2::new(100.0, 100.0);
-        let result = t.screen_to_image_for_pivot(corner, image_rect, image_size);
-        
-        assert!(result.is_some(), "Top-left corner should be valid for pivot");
-        let (x, y) = result.unwrap();
-        assert_eq!(x, 0, "X should be 0");
-        assert_eq!(y, 99, "Y should be 99 (FITS convention)");
+        assert!(
+            t.screen_to_image_for_pivot(corner, image_rect, image_size).is_none(),
+            "the top edge is the exclusive bound, as it is for hover"
+        );
+
+        // A click just inside lands in the top-left pixel.
+        let inside = Pos2::new(101.0, 101.0);
+        let (x, y) = t
+            .screen_to_image_for_pivot(inside, image_rect, image_size)
+            .expect("just inside the corner should be valid");
+        assert!(
+            (-0.5..0.5).contains(&x),
+            "X should land in the leftmost pixel, got {x}"
+        );
+        assert!(
+            (98.5..99.5).contains(&y),
+            "Y should land in the top row (FITS convention), got {y}"
+        );
     }
 
     /// Test is_default correctly considers rotation

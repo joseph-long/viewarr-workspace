@@ -1348,7 +1348,13 @@ impl ArrayViewerWidget {
                         image_rect,
                         (img_width, img_height),
                     ) {
-                        self.transform.set_pivot_point(img_x as f32, img_y as f32);
+                        // Pan is compensated so the picture does not swing
+                        // when the centre of rotation moves.
+                        self.transform.set_pivot_preserving_view(
+                            (img_x, img_y),
+                            image_rect,
+                            (img_width, img_height),
+                        );
                         // Pivot has been set; exit pivot-placement mode.
                         self.transform.show_pivot_marker = false;
                     }

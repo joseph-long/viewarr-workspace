@@ -2053,6 +2053,8 @@ impl ArrayViewerWidget {
             egui::pos2(bar_rect.max.x + COLORBAR_CONNECTOR_W, bar_rect.max.y),
         )
         .expand(4.0);
+        // The same condition reveals the grips: the overlay stays quiet until
+        // the user actually reaches for it.
         let show_histogram = self.colorbar_drag.is_some()
             || pointer.is_some_and(|p| hover_zone.contains(p));
         if show_histogram {
@@ -2062,11 +2064,19 @@ impl ArrayViewerWidget {
             self.paint_colorbar_histogram(ctx, bar_rect, &bins);
         }
 
-        self.paint_limit_connector(ctx, bar_rect, max_y, true);
-        self.paint_limit_connector(ctx, bar_rect, min_y, !is_symmetric);
+        self.paint_limit_connector(ctx, bar_rect, max_y, true, show_histogram);
+        self.paint_limit_connector(ctx, bar_rect, min_y, !is_symmetric, show_histogram);
 
-        self.limit_grip(ctx, LimitHandle::Max, bar_rect, span, max_y, true);
-        self.limit_grip(ctx, LimitHandle::Min, bar_rect, span, min_y, !is_symmetric);
+        self.limit_grip(ctx, LimitHandle::Max, bar_rect, span, max_y, true, show_histogram);
+        self.limit_grip(
+            ctx,
+            LimitHandle::Min,
+            bar_rect,
+            span,
+            min_y,
+            !is_symmetric,
+            show_histogram,
+        );
 
         self.limit_value_box(ctx, LimitHandle::Max, bar_rect, max_y, is_int, is_symmetric);
         self.limit_value_box(ctx, LimitHandle::Min, bar_rect, min_y, is_int, is_symmetric);
@@ -2126,7 +2136,17 @@ impl ArrayViewerWidget {
     }
 
     /// Paint one handle's arrow and the straight run out to its value box.
-    fn paint_limit_connector(&self, ctx: &egui::Context, bar: egui::Rect, y: f32, enabled: bool) {
+    ///
+    /// With the grip hidden the run is a single unbroken line; with it showing,
+    /// the line stops either side so the tab is not struck through.
+    fn paint_limit_connector(
+        &self,
+        ctx: &egui::Context,
+        bar: egui::Rect,
+        y: f32,
+        enabled: bool,
+        engaged: bool,
+    ) {
         let painter = Self::colorbar_painter(ctx);
         let visuals = ctx.style().visuals.clone();
         let color = if enabled {
@@ -2149,23 +2169,26 @@ impl ArrayViewerWidget {
         ));
 
         let stroke = egui::Stroke::new(1.5, color);
-        // Stem from the arrow's base to the grip, and on from the grip to the
-        // box. One straight line through the lot, because the box shares the
-        // arrow's y.
-        painter.line_segment(
-            [
-                egui::pos2(base_x, y),
-                egui::pos2(base_x + COLORBAR_STEM_W, y),
-            ],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                egui::pos2(base_x + COLORBAR_STEM_W + COLORBAR_GRIP_W, y),
-                egui::pos2(bar.max.x + COLORBAR_CONNECTOR_W, y),
-            ],
-            stroke,
-        );
+        let box_edge = bar.max.x + COLORBAR_CONNECTOR_W;
+        if engaged {
+            // Stop either side of the tab rather than drawing through it.
+            painter.line_segment(
+                [
+                    egui::pos2(base_x, y),
+                    egui::pos2(base_x + COLORBAR_STEM_W, y),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(base_x + COLORBAR_STEM_W + COLORBAR_GRIP_W, y),
+                    egui::pos2(box_edge, y),
+                ],
+                stroke,
+            );
+        } else {
+            painter.line_segment([egui::pos2(base_x, y), egui::pos2(box_edge, y)], stroke);
+        }
     }
 
     /// The gripped tab a limit is dragged by: parallel lines to say "grab me",
@@ -2178,6 +2201,7 @@ impl ArrayViewerWidget {
         span: (f64, f64),
         y: f32,
         enabled: bool,
+        engaged: bool,
     ) {
         let grip_min = egui::pos2(
             bar.max.x + COLORBAR_ARROW_W + COLORBAR_STEM_W,
@@ -2227,26 +2251,32 @@ impl ArrayViewerWidget {
                     )
                 };
 
-                let painter = ui.painter();
-                painter.rect_filled(rect, 2.0, fill);
-                painter.rect_stroke(
-                    rect,
-                    2.0,
-                    egui::Stroke::new(1.0, line),
-                    egui::StrokeKind::Inside,
-                );
-                // Parallel lines across the tab: the conventional "drag me"
-                // texture, horizontal because the tab travels vertically.
-                let inset = 3.0;
-                for i in 0..3 {
-                    let ly = rect.center().y + (i as f32 - 1.0) * 4.0;
-                    painter.line_segment(
-                        [
-                            egui::pos2(rect.min.x + inset, ly),
-                            egui::pos2(rect.max.x - inset, ly),
-                        ],
+                // The tab is drawn only once the user has reached for the
+                // colorbar. It still senses drags the rest of the time, but
+                // reaching it means entering the hover zone, which shows it --
+                // so there is never an invisible thing to grab.
+                if engaged {
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 2.0, fill);
+                    painter.rect_stroke(
+                        rect,
+                        2.0,
                         egui::Stroke::new(1.0, line),
+                        egui::StrokeKind::Inside,
                     );
+                    // Parallel lines across the tab: the conventional "drag me"
+                    // texture, horizontal because the tab travels vertically.
+                    let inset = 3.0;
+                    for i in 0..3 {
+                        let ly = rect.center().y + (i as f32 - 1.0) * 4.0;
+                        painter.line_segment(
+                            [
+                                egui::pos2(rect.min.x + inset, ly),
+                                egui::pos2(rect.max.x - inset, ly),
+                            ],
+                            egui::Stroke::new(1.0, line),
+                        );
+                    }
                 }
 
                 if !enabled {
@@ -2325,9 +2355,12 @@ impl ArrayViewerWidget {
                     LimitHandle::Max => &mut self.max_limit_input_text,
                     LimitHandle::Min => &mut self.min_limit_input_text,
                 };
+                // Left-aligned so the digits start the same distance from the
+                // arrow whatever the value's length; centring made a short
+                // value drift away from the mark it belongs to.
                 let edit = egui::TextEdit::singleline(buffer)
                     .desired_width(COLORBAR_BOX_WIDTH)
-                    .horizontal_align(egui::Align::Center)
+                    .horizontal_align(egui::Align::Min)
                     .text_color(text_color)
                     .font(egui::FontId::proportional(13.0));
 
@@ -3358,6 +3391,73 @@ mod colorbar_tests {
         assert!(w.colorbar_drag.is_none(), "no drag should have started");
     }
 
+    /// Locate the drag tabs in a frame's shapes: the only rounded rects out at
+    /// the connector's x, the width of a grip.
+    fn grip_count(shapes: &[egui::Shape]) -> usize {
+        let bar = harness_bar();
+        let grip_x = bar.max.x + COLORBAR_ARROW_W + COLORBAR_STEM_W;
+        // A tab is drawn as a fill plus a stroke, so count distinct positions
+        // rather than shapes.
+        let mut centres: Vec<f32> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r)
+                    if (r.rect.min.x - grip_x).abs() < 1.0
+                        && (r.rect.width() - COLORBAR_GRIP_W).abs() < 1.0 =>
+                {
+                    Some(r.rect.center().y)
+                }
+                _ => None,
+            })
+            .collect();
+        centres.sort_by(f32::total_cmp);
+        centres.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        centres.len()
+    }
+
+    #[test]
+    fn grips_appear_only_once_the_colorbar_is_reached_for() {
+        let mut w = widget_with((0..400).map(|i| i as f64).collect(), 20, 20);
+        let ctx = egui::Context::default();
+        run_colorbar_frame(&mut w, &ctx, None);
+
+        // Pointer elsewhere: the overlay stays quiet, just the bar, the arrows
+        // and the value boxes.
+        let away = run_colorbar_shapes(
+            &mut w,
+            &ctx,
+            vec![egui::Event::PointerMoved(egui::pos2(700.0, 500.0))],
+        );
+        assert_eq!(grip_count(&away), 0, "tabs drawn without being reached for");
+
+        // Pointer on the bar: both tabs show, alongside the histogram.
+        let over = run_colorbar_shapes(
+            &mut w,
+            &ctx,
+            vec![egui::Event::PointerMoved(egui::pos2(
+                COLORBAR_MARGIN + 2.0,
+                COLORBAR_VERTICAL_MARGIN + 20.0,
+            ))],
+        );
+        assert_eq!(grip_count(&over), 2, "both tabs should show on hover");
+        assert_eq!(
+            histogram_paths(&collect_paths_from(&over)).len(),
+            1,
+            "the tabs and the histogram share one condition, so both or neither"
+        );
+    }
+
+    /// Re-wrap flattened shapes so the histogram filter can be reused.
+    fn collect_paths_from(shapes: &[egui::Shape]) -> Vec<egui::epaint::PathShape> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Path(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn a_box_at_either_end_of_the_bar_still_fits_in_the_widget() {
         // The bar is inset by half a box so that a limit parked at the very top
@@ -3476,7 +3576,7 @@ mod colorbar_tests {
                     if (r.rect.min.x - grip_x).abs() < 1.0
                         && (r.rect.width() - COLORBAR_GRIP_W).abs() < 1.0)
             })
-            .expect("a grip should have been drawn");
+            .expect("hovering should have drawn a grip");
 
         assert!(
             histogram_at < grip_at,

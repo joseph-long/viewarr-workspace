@@ -26,6 +26,13 @@ const COLORBAR_BAR_WIDTH: f32 = 16.0;
 const COLORBAR_MAX_HEIGHT: f32 = 300.0;
 /// Color bar margin from edge
 const COLORBAR_MARGIN: f32 = 10.0;
+/// Vertical inset of the bar from the widget's top.
+///
+/// Deeper than the side margin by half a value box: a limit sitting at the very
+/// top of the bar centres its box on the bar's top edge, so half of it hangs
+/// above. Buying that room here is what lets every box stay centred on its own
+/// arrow instead of being nudged back inside and trailing a sloped leader.
+const COLORBAR_VERTICAL_MARGIN: f32 = COLORBAR_MARGIN + COLORBAR_BOX_HEIGHT * 0.5;
 /// Length of the arrow that points from a limit handle at the bar.
 const COLORBAR_ARROW_W: f32 = 6.0;
 /// Half-height of that arrow, i.e. how blunt its base is.
@@ -2013,7 +2020,7 @@ impl ArrayViewerWidget {
         let bar_rect = egui::Rect::from_min_size(
             egui::pos2(
                 widget_rect.min.x + COLORBAR_MARGIN,
-                widget_rect.min.y + COLORBAR_MARGIN,
+                widget_rect.min.y + COLORBAR_VERTICAL_MARGIN,
             ),
             egui::vec2(COLORBAR_BAR_WIDTH, bar_height),
         );
@@ -2024,10 +2031,10 @@ impl ArrayViewerWidget {
             None => self.colorbar_span(),
         };
         let (vmin, vmax) = self.scaling_range();
+        // Each box is centred on its own handle, so an arrow and its value are
+        // always on the same line.
         let max_y = colorbar_value_to_y(bar_rect, span, vmax);
         let min_y = colorbar_value_to_y(bar_rect, span, vmin);
-        let (max_box_y, min_box_y) =
-            separate_limit_boxes(bar_rect, max_y, min_y, COLORBAR_BOX_HEIGHT);
 
         // Everything painted into the shared layer goes down first, so the
         // interactive grips and the value boxes land on top of it.
@@ -2055,14 +2062,14 @@ impl ArrayViewerWidget {
             self.paint_colorbar_histogram(ctx, bar_rect, &bins);
         }
 
-        self.paint_limit_connector(ctx, bar_rect, max_y, max_box_y, true);
-        self.paint_limit_connector(ctx, bar_rect, min_y, min_box_y, !is_symmetric);
+        self.paint_limit_connector(ctx, bar_rect, max_y, true);
+        self.paint_limit_connector(ctx, bar_rect, min_y, !is_symmetric);
 
         self.limit_grip(ctx, LimitHandle::Max, bar_rect, span, max_y, true);
         self.limit_grip(ctx, LimitHandle::Min, bar_rect, span, min_y, !is_symmetric);
 
-        self.limit_value_box(ctx, LimitHandle::Max, bar_rect, max_box_y, is_int, is_symmetric);
-        self.limit_value_box(ctx, LimitHandle::Min, bar_rect, min_box_y, is_int, is_symmetric);
+        self.limit_value_box(ctx, LimitHandle::Max, bar_rect, max_y, is_int, is_symmetric);
+        self.limit_value_box(ctx, LimitHandle::Min, bar_rect, min_y, is_int, is_symmetric);
 
         self.render_colorbar_buttons(ctx, bar_rect);
     }
@@ -2118,19 +2125,8 @@ impl ArrayViewerWidget {
         );
     }
 
-    /// Paint one handle's arrow, stem and the leader line out to its box.
-    ///
-    /// The arrow stays at the limit's true position on the bar; only the
-    /// leader line stretches when the box has been nudged aside to avoid its
-    /// neighbour.
-    fn paint_limit_connector(
-        &self,
-        ctx: &egui::Context,
-        bar: egui::Rect,
-        y: f32,
-        box_y: f32,
-        enabled: bool,
-    ) {
+    /// Paint one handle's arrow and the straight run out to its value box.
+    fn paint_limit_connector(&self, ctx: &egui::Context, bar: egui::Rect, y: f32, enabled: bool) {
         let painter = Self::colorbar_painter(ctx);
         let visuals = ctx.style().visuals.clone();
         let color = if enabled {
@@ -2153,7 +2149,9 @@ impl ArrayViewerWidget {
         ));
 
         let stroke = egui::Stroke::new(1.5, color);
-        // Stem from the arrow's base to the grip.
+        // Stem from the arrow's base to the grip, and on from the grip to the
+        // box. One straight line through the lot, because the box shares the
+        // arrow's y.
         painter.line_segment(
             [
                 egui::pos2(base_x, y),
@@ -2161,11 +2159,10 @@ impl ArrayViewerWidget {
             ],
             stroke,
         );
-        // Leader from the grip out to the box, sloping if the box was moved.
         painter.line_segment(
             [
                 egui::pos2(base_x + COLORBAR_STEM_W + COLORBAR_GRIP_W, y),
-                egui::pos2(bar.max.x + COLORBAR_CONNECTOR_W, box_y),
+                egui::pos2(bar.max.x + COLORBAR_CONNECTOR_W, y),
             ],
             stroke,
         );
@@ -2295,13 +2292,13 @@ impl ArrayViewerWidget {
         ctx: &egui::Context,
         handle: LimitHandle,
         bar: egui::Rect,
-        box_y: f32,
+        y: f32,
         is_int: bool,
         is_symmetric: bool,
     ) {
         let pos = egui::pos2(
             bar.max.x + COLORBAR_CONNECTOR_W,
-            box_y - COLORBAR_BOX_HEIGHT * 0.5,
+            y - COLORBAR_BOX_HEIGHT * 0.5,
         );
         let area_id = egui::Id::new(match handle {
             LimitHandle::Max => "colorbar_max_input",
@@ -2845,57 +2842,6 @@ fn colorbar_y_to_value(bar: egui::Rect, span: (f64, f64), y: f32) -> f64 {
     lo + t * (hi - lo)
 }
 
-/// Decide where the two value boxes sit vertically.
-///
-/// Each follows its own handle, but limits close together would stack the
-/// boxes on top of one another, so they are pushed apart around their midpoint
-/// and then held inside the bar. The handles themselves never move — the
-/// leader lines stretch instead, so each arrow keeps pointing at the true
-/// value even when its box has been nudged aside.
-///
-/// Returns the box centres in (max limit, min limit) order — the same order
-/// the handles are given in, not top-to-bottom, so an inverted pair of limits
-/// still routes each box to its own handle.
-fn separate_limit_boxes(bar: egui::Rect, max_y: f32, min_y: f32, box_height: f32) -> (f32, f32) {
-    let gap = box_height + 2.0;
-    // The max limit is the upper of the two whenever the limits are sane; take
-    // the min/max so inverted limits still produce an ordered pair.
-    let mut upper = max_y.min(min_y);
-    let mut lower = max_y.max(min_y);
-
-    if lower - upper < gap {
-        let mid = 0.5 * (upper + lower);
-        upper = mid - gap * 0.5;
-        lower = mid + gap * 0.5;
-    }
-
-    // Slide the pair — not just the offender — so their separation survives.
-    let half = box_height * 0.5;
-    let top_limit = bar.min.y + half;
-    let bottom_limit = bar.max.y - half;
-    if upper < top_limit {
-        let shift = top_limit - upper;
-        upper += shift;
-        lower += shift;
-    }
-    if lower > bottom_limit {
-        let shift = lower - bottom_limit;
-        upper -= shift;
-        lower -= shift;
-    }
-
-    // A bar too short to hold both can't satisfy everything; keep them ordered
-    // and inside rather than letting them flip.
-    upper = upper.max(top_limit);
-    lower = lower.max(upper);
-
-    if max_y <= min_y {
-        (upper, lower)
-    } else {
-        (lower, upper)
-    }
-}
-
 /// Give a limit value box the translucent, theme-aware chrome the rest of the
 /// overlay uses.
 fn style_limit_edit(ui: &mut Ui) {
@@ -3221,7 +3167,7 @@ mod colorbar_tests {
     /// The colorbar's rect for the 800x600 screen the harness uses.
     fn harness_bar() -> egui::Rect {
         egui::Rect::from_min_size(
-            egui::pos2(COLORBAR_MARGIN, COLORBAR_MARGIN),
+            egui::pos2(COLORBAR_MARGIN, COLORBAR_VERTICAL_MARGIN),
             egui::vec2(COLORBAR_BAR_WIDTH, COLORBAR_MAX_HEIGHT.min(600.0 * 0.5)),
         )
     }
@@ -3410,6 +3356,60 @@ mod colorbar_tests {
 
         assert_eq!(w.value_range(), before, "symmetric vmin must stay derived");
         assert!(w.colorbar_drag.is_none(), "no drag should have started");
+    }
+
+    #[test]
+    fn a_box_at_either_end_of_the_bar_still_fits_in_the_widget() {
+        // The bar is inset by half a box so that a limit parked at the very top
+        // can keep its box centred on its arrow without hanging off the widget.
+        // If the box ever grows past the margin this has to be revisited.
+        assert!(
+            COLORBAR_VERTICAL_MARGIN - COLORBAR_BOX_HEIGHT * 0.5 >= 0.0,
+            "a box at the top of the bar would be clipped by the widget edge"
+        );
+        assert!(
+            COLORBAR_VERTICAL_MARGIN >= COLORBAR_BOX_HEIGHT * 0.5,
+            "not enough room above the bar for half a value box"
+        );
+    }
+
+    #[test]
+    fn each_value_box_is_centred_on_its_own_arrow() {
+        let mut w = widget_with((0..400).map(|i| i as f64).collect(), 20, 20);
+        let ctx = egui::Context::default();
+        let bar = harness_bar();
+
+        run_colorbar_frame(&mut w, &ctx, None);
+        // Put the limits somewhere asymmetric so a box that silently tracked
+        // the wrong handle, or got nudged, would show up.
+        w.set_value_range(100.0, 300.0);
+        run_colorbar_frame(&mut w, &ctx, None);
+        let shapes = run_colorbar_shapes(&mut w, &ctx, Vec::new());
+
+        let span = w.colorbar_span();
+        let box_x = bar.max.x + COLORBAR_CONNECTOR_W;
+        let mut centres: Vec<f32> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r)
+                    if (r.rect.min.x - box_x).abs() < 2.0 && r.rect.width() > 40.0 =>
+                {
+                    Some(r.rect.center().y)
+                }
+                _ => None,
+            })
+            .collect();
+        centres.sort_by(f32::total_cmp);
+        centres.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        assert_eq!(centres.len(), 2, "expected one box per limit: {centres:?}");
+
+        for (value, centre) in [(300.0, centres[0]), (100.0, centres[1])] {
+            let arrow_y = colorbar_value_to_y(bar, span, value);
+            assert!(
+                (centre - arrow_y).abs() < 1.5,
+                "box for {value} centred at {centre}, arrow at {arrow_y}"
+            );
+        }
     }
 
     #[test]
@@ -3628,41 +3628,6 @@ mod colorbar_tests {
         let w = widget_with(vec![7.0; 4], 2, 2);
         let (lo, hi) = w.colorbar_span();
         assert!(hi > lo, "span must have width: {lo}..{hi}");
-    }
-
-    #[test]
-    fn boxes_never_overlap_and_stay_on_the_bar() {
-        let bar = bar();
-        let box_h = 20.0;
-
-        // Limits almost on top of each other: the boxes get pushed apart.
-        let (max_box, min_box) = separate_limit_boxes(bar, 100.0, 102.0, box_h);
-        assert!(
-            min_box - max_box >= box_h,
-            "boxes overlap: {max_box} vs {min_box}"
-        );
-
-        // Both ends: boxes stay inside the bar's vertical extent.
-        for (max_y, min_y) in [(bar.min.y, bar.min.y + 1.0), (bar.max.y - 1.0, bar.max.y)] {
-            let (a, b) = separate_limit_boxes(bar, max_y, min_y, box_h);
-            for centre in [a, b] {
-                assert!(
-                    centre - box_h / 2.0 >= bar.min.y - 0.01
-                        && centre + box_h / 2.0 <= bar.max.y + 0.01,
-                    "box at {centre} escapes the bar {bar:?}"
-                );
-            }
-            assert!(b - a >= box_h - 0.01, "boxes overlap at the end: {a} vs {b}");
-        }
-    }
-
-    #[test]
-    fn well_separated_limits_leave_their_boxes_on_their_handles() {
-        let bar = bar();
-        // 60pt apart, far more than a 20pt box needs, and clear of both ends.
-        let (max_box, min_box) = separate_limit_boxes(bar, 70.0, 130.0, 20.0);
-        assert!((max_box - 70.0).abs() < 1e-3);
-        assert!((min_box - 130.0).abs() < 1e-3);
     }
 
     #[test]

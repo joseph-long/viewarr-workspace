@@ -7,14 +7,27 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 use viewarr::widget::ArrayViewerWidget;
 
 use crate::fits::{Card, FitsFile};
+use crate::header::HeaderWindow;
 use crate::source::{ArrayId, ArrayMeta, Node, Tree};
 
+/// Source of the per-tab identity below. Position cannot serve: tabs close,
+/// and a window must not start showing a different file because the tab to
+/// its left went away.
+static NEXT_UID: AtomicU64 = AtomicU64::new(0);
+
 pub struct Tab {
+    /// Stable identity, so this tab's header window keeps the same viewport
+    /// as other tabs come and go.
+    uid: u64,
+    /// This tab's own header window. One per tab rather than one that follows
+    /// the selection, so two files' headers can sit side by side.
+    header: HeaderWindow,
     fits: FitsFile,
     hdu_index: usize,
     widget: ArrayViewerWidget,
@@ -44,6 +57,8 @@ impl Tab {
             .unwrap_or_else(|| path.display().to_string());
 
         Ok(Self {
+            uid: NEXT_UID.fetch_add(1, Ordering::Relaxed),
+            header: HeaderWindow::default(),
             fits,
             hdu_index,
             widget,
@@ -93,11 +108,39 @@ impl Tab {
         &self.fits.hdus[self.hdu_index].name
     }
 
-    /// The active array's metadata, for the header viewer. A borrow, not a
+    /// The active array's metadata, for the header window. A borrow, not a
     /// copy: the header is parsed once when the file is opened and kept, so
-    /// the window can render straight from it every frame.
-    pub fn header(&self) -> &[Card] {
-        &self.fits.hdus[self.hdu_index].header.cards
+    /// the window renders straight from it every frame.
+    ///
+    /// `None` means this source has no metadata to show at all, as opposed to
+    /// an empty header. FITS never returns it — every HDU has a header — but
+    /// the window has to be able to say so for sources that do not, and that
+    /// is cheaper to carry now than to thread through later.
+    pub fn metadata(&self) -> Option<&[Card]> {
+        Some(&self.fits.hdus[self.hdu_index].header.cards)
+    }
+
+    pub fn header_is_open(&self) -> bool {
+        self.header.is_open()
+    }
+
+    pub fn toggle_header(&mut self) {
+        self.header.toggle();
+    }
+
+    /// Draw this tab's header window if it is open. Called for every tab, not
+    /// just the active one, so a background tab's window stays up.
+    pub fn show_header_window(&mut self, ctx: &egui::Context) {
+        if !self.header.is_open() {
+            return;
+        }
+        // Built before the borrows below so they do not overlap the mutable
+        // borrow of `header`.
+        let hdu = &self.fits.hdus[self.hdu_index];
+        let title = format!("{} — {}", self.title, hdu.name);
+        let id = egui::ViewportId::from_hash_of(("viewarr-header", self.uid));
+        let cards = Some(hdu.header.cards.as_slice());
+        self.header.show(ctx, id, &title, cards);
     }
 
     /// Which array of the source this tab is showing.
@@ -296,6 +339,47 @@ mod tests {
         let tab = mef();
         assert_eq!(tab.array_id(), hdu(1));
         assert_eq!(tab.hdu_name(), "SCI");
+    }
+
+    #[test]
+    fn each_tab_gets_its_own_identity_for_its_header_window() {
+        let a = mef();
+        let b = mef();
+        assert_ne!(
+            a.uid, b.uid,
+            "two tabs sharing a uid would share one header window"
+        );
+
+        // Dropping one leaves the other's identity alone, which is the whole
+        // reason this is a counter rather than the tab's position: closing a
+        // tab must not make another tab's window start showing a new file.
+        let b_uid = b.uid;
+        drop(a);
+        assert_eq!(b.uid, b_uid);
+    }
+
+    #[test]
+    fn a_header_window_starts_closed_and_follows_the_selected_hdu() {
+        let mut tab = mef();
+        assert!(!tab.header_is_open());
+        tab.toggle_header();
+        assert!(tab.header_is_open());
+
+        // SCI's header, then ERR's: the window belongs to the tab, but shows
+        // whichever HDU the picker has selected within it.
+        let sci = tab.metadata().expect("FITS always has a header").to_vec();
+        tab.set_array(&hdu(2));
+        let err = tab.metadata().expect("FITS always has a header");
+        assert_ne!(sci, err);
+        assert!(err.iter().any(|c| {
+            c.key == "EXTNAME"
+                && c.value
+                    .as_ref()
+                    .is_some_and(|v| v.display().contains("ERR"))
+        }));
+
+        // Switching HDU does not close the window out from under the user.
+        assert!(tab.header_is_open());
     }
 
     #[test]

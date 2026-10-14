@@ -6,5 +6,6 @@
 
 pub mod app;
 pub mod fits;
+pub mod header;
 pub mod source;
 pub mod tab;

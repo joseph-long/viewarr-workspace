@@ -43,11 +43,12 @@ stays pure image. Each bar is subordinate to the one above:
   than one HDU. It lists every HDU with its shape and type; ones this build
   cannot display are greyed out with the reason on hover, so a file whose image
   sits in a compressed extension explains itself rather than looking empty.
-- **ⓘ** opens the header of whatever HDU is showing, in a floating window
-  rather than another bar, so a long header does not squeeze the image. Cards
-  appear in file order with their comments beside them, and the filter box
-  matches keyword, value or comment. Values are selectable, since copying one
-  out is most of why anyone opens a header.
+- **ⓘ** opens the header of whatever HDU is showing, in a window of its own —
+  a real OS window, so it can go on a second monitor and two files' headers
+  can sit side by side. Each tab has its own, and it closes with its tab.
+  Cards appear in file order with their comments beside them, and the filter
+  box matches keyword, value or comment. Values are selectable, since copying
+  one out is most of why anyone opens a header.
 
 Every tab holds its own viewer state, so zoom, stretch, colormap and slice
 position are per-file and survive switching away and back. Within a tab the

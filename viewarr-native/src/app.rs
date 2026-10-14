@@ -245,6 +245,13 @@ impl NativeViewerApp {
                     Some(choices) => {
                         egui::ComboBox::from_id_salt("hdu_picker")
                             .selected_text(hdu.as_str())
+                            // egui otherwise caps a combo menu at
+                            // `spacing.combo_height` (200pt) and scrolls the
+                            // rest, which an HDU list hits while there is still
+                            // plenty of window to grow into. Allow the whole
+                            // window height; egui clamps the popup to what
+                            // actually fits on screen.
+                            .height(ui.ctx().content_rect().height())
                             .show_ui(ui, |ui| {
                                 for choice in choices {
                                     match choice.unviewable_reason {

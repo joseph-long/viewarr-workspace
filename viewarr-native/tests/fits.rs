@@ -333,3 +333,41 @@ fn filtering_a_header_looks_at_keys_values_and_comments() {
     );
     assert!(matching("nothinghere").is_empty());
 }
+
+/// A HIERARCH card carries a multi-word keyword where a standard card has its
+/// value indicator, so the `=` sits further along. It is a real keyword with a
+/// real value, not free text.
+#[test]
+fn reads_a_hierarch_keyword_and_its_value() {
+    let fits = open("header.fits");
+    let card = fits.hdus[0]
+        .header
+        .cards
+        .iter()
+        .find(|c| c.key.starts_with("HIERARCH"))
+        .expect("the fixture has a HIERARCH card");
+
+    assert_eq!(card.key, "HIERARCH long keyword here");
+    assert_eq!(card.value, Some(Value::Int(7)));
+    assert_eq!(card.comment, None);
+
+    // The keyword is searchable by any of its words, which is the point of
+    // keeping it whole rather than stopping at the first eight characters.
+    assert!(card.matches("long keyword"));
+    assert!(card.matches("here"));
+}
+
+/// Prose with an `=` in it stays prose: only HIERARCH gets the extended hunt
+/// for a value indicator.
+#[test]
+fn an_equals_sign_in_comment_text_is_not_a_value_indicator() {
+    let fits = open("eqcomment.fits");
+    let cards = &fits.hdus[0].header.cards;
+    let comment = cards
+        .iter()
+        .find(|c| c.key == "COMMENT")
+        .expect("the fixture has a COMMENT card");
+
+    assert_eq!(comment.value, None, "a comment has no value, = or not");
+    assert_eq!(comment.comment.as_deref(), Some("ratio = 3 to 1"));
+}

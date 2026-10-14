@@ -329,6 +329,24 @@ fn parse_header(buf: &[u8], offset: usize) -> Result<(Header, usize)> {
                 });
                 continue;
             }
+            // The HIERARCH convention puts a multi-word keyword where a
+            // standard card has its value indicator, so the `= ` is further
+            // along and everything left of it is the keyword. Restricted to
+            // HIERARCH on purpose: COMMENT and HISTORY text routinely
+            // contains `=`, and hunting for one there would turn prose into
+            // a bogus keyword/value pair.
+            if keyword == "HIERARCH" {
+                if let Some(eq) = text.find('=') {
+                    let (value_field, comment) = split_value_and_comment(&text[eq + 1..]);
+                    cards.push(Card {
+                        key: text[..eq].trim().to_string(),
+                        value: parse_value(value_field),
+                        comment: comment.map(str::to_string),
+                    });
+                    continue;
+                }
+            }
+
             let free_text = text[8..].trim_end();
             if keyword.is_empty() && free_text.trim().is_empty() {
                 // Padding between the last card and END.

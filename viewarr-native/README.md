@@ -27,7 +27,7 @@ stays pure image. Each bar is subordinate to the one above:
 ```
 ┌ button bar ───────── Open… / Open in Tab — act on whichever tab is active
 ├ tab bar ──────────── which files are open
-├ file info ────────── name · HDU picker · shape · type, for the active tab
+├ file info ────────── name · HDU picker · shape · type · header, for the active tab
 ├ slice controls ───── only for files with sliceable axes
 └ viewer canvas
 ```
@@ -41,6 +41,11 @@ stays pure image. Each bar is subordinate to the one above:
   than one HDU. It lists every HDU with its shape and type; ones this build
   cannot display are greyed out with the reason on hover, so a file whose image
   sits in a compressed extension explains itself rather than looking empty.
+- **ⓘ** opens the header of whatever HDU is showing, in a floating window
+  rather than another bar, so a long header does not squeeze the image. Cards
+  appear in file order with their comments beside them, and the filter box
+  matches keyword, value or comment. Values are selectable, since copying one
+  out is most of why anyone opens a header.
 
 Every tab holds its own viewer state, so zoom, stretch, colormap and slice
 position are per-file and survive switching away and back. Within a tab the
@@ -81,6 +86,10 @@ system-library dependency:
 - `BZERO`/`BSCALE` linear scaling, including the `BZERO = 32768` convention for
   unsigned 16-bit data.
 - `BLANK` undefined-pixel values, mapped to NaN so they drop out of auto-scaling.
+- Whole headers, kept as the file has them — comments, the valueless `COMMENT`
+  and `HISTORY` cards, and the order and duplication of both — for the header
+  window. A card whose keyword takes no `=` value (`HIERARCH`, `CONTINUE`) is
+  shown as the free text it is rather than being interpreted.
 - Any number of axes. `NAXIS1`/`NAXIS2` are the image; anything beyond becomes a
   slice axis.
 
@@ -114,8 +123,10 @@ switching, wrapping, closing, and the difference between Open and Open in Tab �
 since none of that is visible to the FITS tests and all of it is easy to get
 subtly wrong. `src/tab.rs` does the same for HDU switching, including that each
 HDU keeps its own view state and that an unviewable one is refused without
-disturbing the tab. `src/source.rs` holds the format-agnostic model the picker
-reads — a tree of groups and arrays, of which a FITS file is the flat case —
+disturbing the tab. `tests/data/header.fits` carries the cards a pixel-only reader would
+drop — comments, duplicate `HISTORY`, a `HIERARCH` keyword — so the header
+window has something to be tested against. `src/source.rs` holds the
+format-agnostic model the picker reads — a tree of groups and arrays, of which a FITS file is the flat case —
 and is tested against synthetic nested trees, since no source produces one yet.
 What the tests cannot cover is the drawing itself or the native file dialog;
 those need a human looking at the window.

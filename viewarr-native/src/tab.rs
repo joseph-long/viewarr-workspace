@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::Result;
 use viewarr::widget::ArrayViewerWidget;
 
-use crate::fits::FitsFile;
+use crate::fits::{Card, FitsFile};
 use crate::source::{ArrayId, ArrayMeta, Node, Tree};
 
 pub struct Tab {
@@ -91,6 +91,13 @@ impl Tab {
     /// The HDU's name, as `EXTNAME` gives it (or `PRIMARY`).
     pub fn hdu_name(&self) -> &str {
         &self.fits.hdus[self.hdu_index].name
+    }
+
+    /// The active array's metadata, for the header viewer. A borrow, not a
+    /// copy: the header is parsed once when the file is opened and kept, so
+    /// the window can render straight from it every frame.
+    pub fn header(&self) -> &[Card] {
+        &self.fits.hdus[self.hdu_index].header.cards
     }
 
     /// Which array of the source this tab is showing.

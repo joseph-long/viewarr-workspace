@@ -16,8 +16,72 @@ use std::path::{Path, PathBuf};
 
 use egui_phosphor::regular as phosphor;
 
+use crate::fits::Card;
 use crate::source::{ArrayId, Children, Node};
 use crate::tab::Tab;
+
+/// Render a header as the file has it: one row per card, in file order, with
+/// nothing merged, sorted or hidden. A FITS header is as much a document as it
+/// is data -- the order of the cards and the comments beside them are how it
+/// explains itself -- so the only thing the viewer does to it is filter.
+fn show_header_cards(ui: &mut egui::Ui, cards: &[Card], filter: &str) {
+    let needle = filter.trim().to_ascii_lowercase();
+    let matching: Vec<&Card> = cards.iter().filter(|c| c.matches(&needle)).collect();
+
+    ui.horizontal(|ui| {
+        ui.label(if needle.is_empty() {
+            format!("{} cards", cards.len())
+        } else {
+            format!("{} of {} cards", matching.len(), cards.len())
+        });
+    });
+    ui.separator();
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if matching.is_empty() {
+                ui.weak("No card matches that.");
+                return;
+            }
+            egui::Grid::new("header_cards")
+                .num_columns(3)
+                .striped(true)
+                .spacing([12.0, 2.0])
+                .show(ui, |ui| {
+                    for card in matching {
+                        // Selectable so values can be copied out, which is
+                        // most of what anyone opens a header to do.
+                        let cell = |ui: &mut egui::Ui, text: egui::RichText| {
+                            ui.add(
+                                egui::Label::new(text)
+                                    .selectable(true)
+                                    .wrap_mode(egui::TextWrapMode::Extend),
+                            );
+                        };
+                        cell(ui, egui::RichText::new(&card.key).monospace().strong());
+                        match &card.value {
+                            Some(value) => {
+                                cell(ui, egui::RichText::new(value.display()).monospace())
+                            }
+                            // COMMENT/HISTORY carry no value; their text goes
+                            // in the comment column, so leave this blank
+                            // rather than filling it with a placeholder.
+                            None => {
+                                ui.label("");
+                            }
+                        }
+                        match &card.comment {
+                            Some(comment) => cell(ui, egui::RichText::new(comment).weak()),
+                            None => {
+                                ui.label("");
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+}
 
 /// Render one level of the picker's tree, recursing into groups.
 ///
@@ -74,6 +138,11 @@ enum OpenMode {
 pub struct NativeViewerApp {
     tabs: Vec<Tab>,
     active: usize,
+    /// Whether the header window is up. It always shows the active tab's
+    /// current array, so it follows the picker without any state of its own.
+    header_open: bool,
+    /// Filter text for that window, kept across opens.
+    header_filter: String,
     /// Why the last open attempt failed. Shown in the button bar, since at that
     /// point there may be no tab to attach it to.
     open_error: Option<String>,
@@ -98,6 +167,8 @@ impl NativeViewerApp {
         Self {
             tabs,
             active: 0,
+            header_open: false,
+            header_filter: String::new(),
             open_error: None,
         }
     }
@@ -315,6 +386,15 @@ impl NativeViewerApp {
                 ui.separator();
                 ui.label(dtype);
 
+                ui.separator();
+                if ui
+                    .selectable_label(self.header_open, phosphor::INFO)
+                    .on_hover_text("Show this HDU's header")
+                    .clicked()
+                {
+                    self.header_open = !self.header_open;
+                }
+
                 if let Some(error) = error {
                     ui.separator();
                     ui.colored_label(ui.visuals().error_fg_color, error);
@@ -327,6 +407,45 @@ impl NativeViewerApp {
                 tab.set_array(&id);
             }
         }
+    }
+}
+
+impl NativeViewerApp {
+    /// The header window: a free-floating panel rather than another bar, so a
+    /// header long enough to be worth reading does not squeeze the image.
+    fn show_header_window(&mut self, ctx: &egui::Context) {
+        if !self.header_open {
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active) else {
+            // Nothing open to have a header; don't leave an empty window up.
+            self.header_open = false;
+            return;
+        };
+        let title = format!("{} — {}", tab.title(), tab.hdu_name());
+        let cards = tab.header();
+
+        let mut open = true;
+        egui::Window::new(title)
+            // Pinned, because the title changes with the tab and the picker
+            // and the window should stay the same window.
+            .id(egui::Id::new("header_window"))
+            .default_width(560.0)
+            .default_height(420.0)
+            .vscroll(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Filter");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.header_filter)
+                            .hint_text("keyword, value or comment")
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+                show_header_cards(ui, cards, &self.header_filter);
+            });
+        self.header_open = open;
     }
 }
 
@@ -356,6 +475,8 @@ impl eframe::App for NativeViewerApp {
                     }
                 });
         }
+
+        self.show_header_window(ctx);
 
         let frame = egui::Frame::central_panel(&ctx.style()).inner_margin(0.0);
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {

@@ -108,23 +108,15 @@ fn window_title(tabs: &[Tab]) -> String {
 fn print_hdu_list(fits: &FitsFile) {
     println!("{}", fits.path.display());
     for hdu in &fits.hdus {
-        let shape = if hdu.axes.is_empty() {
-            "no data".to_string()
-        } else {
-            hdu.shape_string()
-        };
-        let note = if hdu.compressed {
-            "  (tile-compressed, not yet supported)"
-        } else if hdu.is_viewable_image() {
-            ""
-        } else {
-            "  (not a viewable image)"
+        let note = match hdu.unviewable_reason() {
+            Some(reason) => format!("  ({reason})"),
+            None => String::new(),
         };
         println!(
             "  [{}] {:<20} {:<20} {}{note}",
             hdu.index,
             hdu.name,
-            shape,
+            hdu.shape_label(),
             hdu.bitpix.name()
         );
     }

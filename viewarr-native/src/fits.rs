@@ -301,6 +301,28 @@ impl Hdu {
         self.axes.len() >= 2 && !self.compressed && self.data_bytes > 0
     }
 
+    /// Why this HDU cannot be displayed, or `None` if it can. Phrased to read
+    /// after the HDU's name, in a listing or a tooltip.
+    pub fn unviewable_reason(&self) -> Option<&'static str> {
+        if self.compressed {
+            Some("tile-compressed, not yet supported")
+        } else if !self.is_viewable_image() {
+            Some("no 2-D-or-larger image data")
+        } else {
+            None
+        }
+    }
+
+    /// Shape for display, which unlike [`shape_string`](Self::shape_string)
+    /// has something to say about a dataless HDU.
+    pub fn shape_label(&self) -> String {
+        if self.axes.is_empty() {
+            "no data".to_string()
+        } else {
+            self.shape_string()
+        }
+    }
+
     pub fn width(&self) -> usize {
         self.axes.first().copied().unwrap_or(0)
     }

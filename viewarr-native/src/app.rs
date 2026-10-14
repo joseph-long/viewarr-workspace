@@ -229,13 +229,59 @@ impl NativeViewerApp {
             tab.dtype_name(),
         );
         let error = tab.error().map(str::to_string);
+        let hdu_index = tab.hdu_index();
+        // Only built for a file that has a choice to offer; `None` keeps the
+        // plain label a single-HDU file had before.
+        let choices = tab.has_hdu_choice().then(|| tab.hdu_choices());
+
+        let mut chosen = None;
 
         egui::TopBottomPanel::top("file_info").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(title).strong())
                     .on_hover_text(path);
                 ui.separator();
-                ui.label(hdu);
+                match &choices {
+                    Some(choices) => {
+                        egui::ComboBox::from_id_salt("hdu_picker")
+                            .selected_text(hdu.as_str())
+                            .show_ui(ui, |ui| {
+                                for choice in choices {
+                                    match choice.unviewable_reason {
+                                        None => {
+                                            if ui
+                                                .selectable_label(
+                                                    choice.index == hdu_index,
+                                                    choice.label.as_str(),
+                                                )
+                                                .clicked()
+                                            {
+                                                chosen = Some(choice.index);
+                                            }
+                                        }
+                                        // Shown but unselectable, so the file's
+                                        // full contents stay visible and the
+                                        // reason is one hover away.
+                                        Some(reason) => {
+                                            ui.add_enabled(
+                                                false,
+                                                egui::Button::selectable(
+                                                    false,
+                                                    choice.label.as_str(),
+                                                ),
+                                            )
+                                            .on_hover_text(reason);
+                                        }
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text("Which HDU of this file to display");
+                    }
+                    None => {
+                        ui.label(hdu.as_str());
+                    }
+                }
                 ui.separator();
                 ui.label(shape);
                 ui.separator();
@@ -247,6 +293,12 @@ impl NativeViewerApp {
                 }
             });
         });
+
+        if let Some(index) = chosen {
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.set_hdu(index);
+            }
+        }
     }
 }
 

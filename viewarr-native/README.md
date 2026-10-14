@@ -27,7 +27,7 @@ stays pure image. Each bar is subordinate to the one above:
 ```
 ┌ button bar ───────── Open… / Open in Tab — act on whichever tab is active
 ├ tab bar ──────────── which files are open
-├ file info ────────── name · HDU · shape · type, for the active tab
+├ file info ────────── name · HDU picker · shape · type, for the active tab
 ├ slice controls ───── only for files with sliceable axes
 └ viewer canvas
 ```
@@ -37,9 +37,14 @@ stays pure image. Each bar is subordinate to the one above:
 - **Open in Tab** adds a tab and switches to it.
 - **Cmd+Shift+←/→** (Ctrl+Shift+←/→ off macOS) moves between tabs, wrapping at
   both ends. **✕** on a tab closes it.
+- The **HDU** in the file-info bar is a picker whenever the file holds more
+  than one HDU. It lists every HDU with its shape and type; ones this build
+  cannot display are greyed out with the reason on hover, so a file whose image
+  sits in a compressed extension explains itself rather than looking empty.
 
 Every tab holds its own viewer state, so zoom, stretch, colormap and slice
-position are per-file and survive switching away and back.
+position are per-file and survive switching away and back. Within a tab the
+same is true per HDU: each one keeps the view you left it at.
 
 ## What it shows
 
@@ -62,7 +67,8 @@ viewarr [--hdu <INDEX|EXTNAME>] [--list] [PATHS]...
   (`--hdu SCI`); it applies to every file named on the command line. The default
   is the first HDU holding a displayable image, which skips the dataless primary
   HDU that multi-extension files usually start with. Files opened from the
-  toolbar always use that default — there is no HDU picker in the window yet.
+  toolbar start on that default; the file-info bar's HDU picker reaches the
+  rest without reopening the file.
 - A file that will not open is reported on stderr and skipped; the rest still
   open. If every named file fails, no window opens and the exit status is 1.
 
@@ -97,5 +103,7 @@ value, so a transposed, flipped, or mis-strided read fails loudly.
 The tab bookkeeping in `src/app.rs` is unit-tested against those same fixtures —
 switching, wrapping, closing, and the difference between Open and Open in Tab —
 since none of that is visible to the FITS tests and all of it is easy to get
-subtly wrong. What the tests cannot cover is the drawing itself or the native
-file dialog; those need a human looking at the window.
+subtly wrong. `src/tab.rs` does the same for HDU switching, including that each
+HDU keeps its own view state and that an unviewable one is refused without
+disturbing the tab. What the tests cannot cover is the drawing itself or the
+native file dialog; those need a human looking at the window.

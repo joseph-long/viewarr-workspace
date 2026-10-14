@@ -36,7 +36,9 @@ stays pure image. Each bar is subordinate to the one above:
   opens the first one.
 - **Open in Tab** adds a tab and switches to it.
 - **Cmd+Shift+←/→** (Ctrl+Shift+←/→ off macOS) moves between tabs, wrapping at
-  both ends. **✕** on a tab closes it.
+  both ends, and **Cmd+1…9** jumps straight to one. Nine is the limit: the
+  viewer uses a bare `0` to reset zoom, and a tenth tab is reachable by
+  stepping or clicking. **✕** on a tab closes it.
 - The **HDU** in the file-info bar is a picker whenever the file holds more
   than one HDU. It lists every HDU with its shape and type; ones this build
   cannot display are greyed out with the reason on hover, so a file whose image

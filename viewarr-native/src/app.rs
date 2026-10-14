@@ -127,6 +127,22 @@ fn show_array_nodes(
     }
 }
 
+/// Cmd/Ctrl+1…9 jumps straight to a tab. It stops at nine because the viewer
+/// already uses a bare `0` to reset zoom, and because borrowing the browsers'
+/// habit of making the last key mean "last tab" would leave one key meaning
+/// something different from its eight neighbours.
+const TAB_KEYS: [egui::Key; 9] = [
+    egui::Key::Num1,
+    egui::Key::Num2,
+    egui::Key::Num3,
+    egui::Key::Num4,
+    egui::Key::Num5,
+    egui::Key::Num6,
+    egui::Key::Num7,
+    egui::Key::Num8,
+    egui::Key::Num9,
+];
+
 /// What a file-picking button asked for.
 enum OpenMode {
     /// Replace the active tab's contents, as a plain "Open" does.
@@ -227,6 +243,14 @@ impl NativeViewerApp {
         self.active = self.active.min(self.tabs.len().saturating_sub(1));
     }
 
+    /// Jump to a tab by position. Out of range does nothing, so Cmd+7 in a
+    /// three-tab window is inert rather than landing somewhere arbitrary.
+    fn select_tab(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.active = index;
+        }
+    }
+
     /// Step the active tab, wrapping around at both ends.
     fn switch_tab(&mut self, forward: bool) {
         let count = self.tabs.len();
@@ -240,22 +264,33 @@ impl NativeViewerApp {
         };
     }
 
-    /// Cmd+Shift+Arrow on macOS, Ctrl+Shift+Arrow elsewhere — `COMMAND` is
-    /// egui's per-platform spelling of exactly that. Consumed so the keystroke
-    /// does not also reach the viewer widget.
+    /// Cmd+Shift+Arrow to step tabs and Cmd+N to jump to one, on macOS;
+    /// Ctrl+ the same elsewhere — `COMMAND` is egui's per-platform spelling of
+    /// exactly that. All consumed so the keystrokes do not also reach the
+    /// viewer widget.
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let shortcut = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
-        let (prev, next) = ctx.input_mut(|i| {
-            (
-                i.consume_key(shortcut, egui::Key::ArrowLeft),
-                i.consume_key(shortcut, egui::Key::ArrowRight),
-            )
+        let step = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        let (prev, next, jump) = ctx.input_mut(|i| {
+            let prev = i.consume_key(step, egui::Key::ArrowLeft);
+            let next = i.consume_key(step, egui::Key::ArrowRight);
+            // Every pressed digit is consumed, not just the first, so a second
+            // one cannot leak through to the viewer; the first still wins.
+            let mut jump = None;
+            for (index, key) in TAB_KEYS.iter().enumerate() {
+                if i.consume_key(egui::Modifiers::COMMAND, *key) && jump.is_none() {
+                    jump = Some(index);
+                }
+            }
+            (prev, next, jump)
         });
         if prev {
             self.switch_tab(false);
         }
         if next {
             self.switch_tab(true);
+        }
+        if let Some(index) = jump {
+            self.select_tab(index);
         }
     }
 
@@ -549,6 +584,34 @@ mod tests {
 
         app.switch_tab(false);
         assert_eq!(app.active, 2, "back from the first tab wraps to the last");
+    }
+
+    #[test]
+    fn jumping_selects_by_position_and_ignores_what_is_not_there() {
+        let mut app = app_with(&["image2d.fits", "cube3d.fits", "cube4d.fits"]);
+
+        app.select_tab(2);
+        assert_eq!(app.active, 2, "Cmd+3 lands on the third tab");
+        app.select_tab(0);
+        assert_eq!(app.active, 0);
+
+        // Cmd+7 with three tabs open: nothing to go to, so nothing moves.
+        app.select_tab(6);
+        assert_eq!(app.active, 0);
+        app.select_tab(TAB_KEYS.len() - 1);
+        assert_eq!(app.active, 0);
+
+        // The keys only ever reach the first nine, so a tenth tab is only
+        // reachable by stepping or clicking.
+        assert_eq!(TAB_KEYS.len(), 9);
+    }
+
+    #[test]
+    fn jumping_is_a_no_op_with_no_tabs_open() {
+        let mut app = app_with(&[]);
+        app.select_tab(0);
+        assert_eq!(app.active, 0, "an empty app still has a valid index");
+        assert!(app.tabs.is_empty());
     }
 
     #[test]

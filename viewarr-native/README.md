@@ -84,6 +84,15 @@ system-library dependency:
 - Any number of axes. `NAXIS1`/`NAXIS2` are the image; anything beyond becomes a
   slice axis.
 
+**Precision is capped at float64.** Pixels are carried to the viewer as `f64`,
+which is what the viewer's pixel pipe takes everywhere — it matches JavaScript's
+native number type, so the WASM front-ends hand egui a `Float64Array` with no
+per-pixel conversion. That is exact for `BITPIX` 8, 16 and 32 (and for the
+`BZERO = 32768` unsigned-16 convention), since a 53-bit mantissa holds all of
+them with room to spare. Only `BITPIX = 64` can lose anything, and only past
+±2^53; values that large are vanishingly rare in image data, and matching the
+browser front-ends is worth more than the corner case.
+
 **Not yet supported:** tile-compressed images (`ZIMAGE = T` in a `BINTABLE`,
 i.e. RICE/GZIP-compressed HDUs, which many archives ship). These are detected
 and reported rather than misread — adding them means pulling in a decompressor

@@ -118,7 +118,7 @@ impl BitPix {
 
 /// The subset of FITS value types this reader cares about.
 #[derive(Debug, Clone, PartialEq)]
-enum Value {
+pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -126,6 +126,17 @@ enum Value {
 }
 
 impl Value {
+    /// How the header viewer shows it: strings quoted the way the file has
+    /// them, so a numeric-looking string is not mistaken for a number.
+    pub fn display(&self) -> String {
+        match self {
+            Value::Int(v) => v.to_string(),
+            Value::Float(v) => v.to_string(),
+            Value::Bool(v) => if *v { "T" } else { "F" }.to_string(),
+            Value::Str(v) => format!("'{v}'"),
+        }
+    }
+
     fn as_int(&self) -> Option<i64> {
         match self {
             Value::Int(v) => Some(*v),
@@ -144,14 +155,51 @@ impl Value {
     }
 }
 
+/// One header card, kept whole.
+///
+/// Everything here is what a reader would otherwise throw away: the comment,
+/// the valueless `COMMENT`/`HISTORY` cards, and the order and duplication of
+/// both. The viewer exists to show a header as the file actually has it, so
+/// none of that can be normalised away.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Card {
+    /// Keyword, or empty for a card that has only free text.
+    pub key: String,
+    /// `None` for `COMMENT`, `HISTORY`, and other cards carrying no value.
+    pub value: Option<Value>,
+    /// The `/ ...` comment, or for a valueless card, its free text.
+    pub comment: Option<String>,
+}
+
+impl Card {
+    /// Whether this card matches a filter box's text. The needle must already
+    /// be lowercased -- the caller does it once rather than this doing it per
+    /// card, per frame.
+    pub fn matches(&self, lowercase_needle: &str) -> bool {
+        if lowercase_needle.is_empty() {
+            return true;
+        }
+        let hit = |text: &str| text.to_ascii_lowercase().contains(lowercase_needle);
+        hit(&self.key)
+            || self.value.as_ref().is_some_and(|v| hit(&v.display()))
+            || self.comment.as_deref().is_some_and(hit)
+    }
+}
+
 /// One parsed FITS header, in card order.
-struct Header {
-    cards: Vec<(String, Value)>,
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Header {
+    pub cards: Vec<Card>,
 }
 
 impl Header {
+    /// The first value for `key`. Duplicates are kept in `cards` but the
+    /// keywords this reader interprets are all single-valued.
     fn get(&self, key: &str) -> Option<&Value> {
-        self.cards.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.cards
+            .iter()
+            .find(|card| card.key == key)
+            .and_then(|card| card.value.as_ref())
     }
 
     fn int(&self, key: &str) -> Option<i64> {
@@ -178,7 +226,18 @@ impl Header {
 }
 
 /// Split a card's value field from its trailing comment, respecting quoted
-/// strings (a `/` inside `'...'` is data, not a comment marker).
+/// strings (a `/` inside `'...'` is data, not a comment marker). The comment
+/// is kept rather than dropped — it is often the only thing explaining what a
+/// keyword means.
+fn split_value_and_comment(field: &str) -> (&str, Option<&str>) {
+    let value = split_comment(field);
+    let comment = field[value.len()..]
+        .strip_prefix('/')
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    (value, comment)
+}
+
 fn split_comment(field: &str) -> &str {
     let bytes = field.as_bytes();
     let mut in_string = false;
@@ -258,16 +317,28 @@ fn parse_header(buf: &[u8], offset: usize) -> Result<(Header, usize)> {
             if keyword == "END" {
                 return Ok((Header { cards }, pos));
             }
-            if keyword.is_empty() || keyword == "COMMENT" || keyword == "HISTORY" {
-                continue;
-            }
             // A value is only present when columns 9-10 are exactly "= ".
-            if &text[8..10] != "= " {
+            // Anything else -- COMMENT, HISTORY, a bare keyword -- is free
+            // text, which the viewer still shows.
+            if &text[8..10] == "= " {
+                let (value_field, comment) = split_value_and_comment(&text[10..]);
+                cards.push(Card {
+                    key: keyword.to_string(),
+                    value: parse_value(value_field),
+                    comment: comment.map(str::to_string),
+                });
                 continue;
             }
-            if let Some(value) = parse_value(&text[10..]) {
-                cards.push((keyword.to_string(), value));
+            let free_text = text[8..].trim_end();
+            if keyword.is_empty() && free_text.trim().is_empty() {
+                // Padding between the last card and END.
+                continue;
             }
+            cards.push(Card {
+                key: keyword.to_string(),
+                value: None,
+                comment: Some(free_text.trim_start().to_string()).filter(|t| !t.is_empty()),
+            });
         }
     }
 }
@@ -293,6 +364,10 @@ pub struct Hdu {
     data_bytes: usize,
     /// A tile-compressed image masquerading as a binary table.
     pub compressed: bool,
+    /// The HDU's header, whole, for the header viewer. A few keywords are
+    /// read out of it above; the rest is kept because showing it is the
+    /// point.
+    pub header: Header,
 }
 
 impl Hdu {
@@ -619,6 +694,7 @@ fn scan_hdus(buf: &[u8]) -> Result<Vec<Hdu>> {
             data_offset,
             data_bytes,
             compressed,
+            header,
         });
 
         // Data units are padded out to a whole number of blocks.

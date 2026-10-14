@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use viewarr_native::fits::FitsFile;
+use viewarr_native::fits::{FitsFile, Value};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -219,4 +219,117 @@ fn rejects_files_that_are_not_fits() {
         "unexpected message: {err:#}"
     );
     std::fs::remove_file(&path).ok();
+}
+
+/// The header viewer shows a header as the file actually has it, so the reader
+/// has to keep what a reader interested only in pixels would drop: comments,
+/// the valueless COMMENT/HISTORY cards, and the order and duplication of both.
+#[test]
+fn keeps_whole_header_cards_in_file_order() {
+    let fits = open("header.fits");
+    let cards = &fits.hdus[0].header.cards;
+
+    let find = |key: &str| cards.iter().find(|c| c.key == key).expect(key);
+
+    // A value and its comment both survive.
+    let exptime = find("EXPTIME");
+    assert_eq!(exptime.value, Some(Value::Float(1.5)));
+    assert_eq!(exptime.comment.as_deref(), Some("seconds"));
+
+    // A string keeps its quotes when displayed, so it cannot be mistaken for
+    // a number, and is trimmed of the padding FITS writes.
+    assert_eq!(find("OBSERVER").value, Some(Value::Str("J. Long".into())));
+    assert_eq!(
+        find("OBSERVER").value.as_ref().unwrap().display(),
+        "'J. Long'"
+    );
+    assert_eq!(find("QUALITY").value, Some(Value::Bool(true)));
+
+    // A card with no comment has none invented for it.
+    assert_eq!(find("BARE").value, Some(Value::Int(42)));
+    assert_eq!(find("BARE").comment, None);
+
+    // COMMENT and HISTORY carry free text and no value.
+    let free: Vec<(&str, &str)> = cards
+        .iter()
+        .filter(|c| c.key == "COMMENT" || c.key == "HISTORY")
+        .map(|c| (c.key.as_str(), c.comment.as_deref().unwrap_or("")))
+        .collect();
+    assert_eq!(
+        free,
+        vec![
+            ("COMMENT", "first comment"),
+            ("COMMENT", "second comment"),
+            ("HISTORY", "step one"),
+            ("HISTORY", "step two"),
+        ],
+        "duplicate keywords and their order both survive"
+    );
+    assert!(cards
+        .iter()
+        .all(|c| c.key != "COMMENT" || c.value.is_none()));
+
+    // Order is the file's, not sorted or grouped.
+    let keys: Vec<&str> = cards.iter().map(|c| c.key.as_str()).collect();
+    let simple = keys.iter().position(|k| *k == "SIMPLE").unwrap();
+    let observer = keys.iter().position(|k| *k == "OBSERVER").unwrap();
+    let history = keys.iter().position(|k| *k == "HISTORY").unwrap();
+    assert!(simple < observer && observer < history, "{keys:?}");
+
+    // END is a terminator, not a card, and the blank padding after it is not
+    // shown as a row of empty keys.
+    assert!(!keys.contains(&"END"));
+    assert!(
+        cards
+            .iter()
+            .all(|c| !c.key.is_empty() || c.comment.is_some()),
+        "no blank padding cards"
+    );
+}
+
+/// The keywords the reader itself needs still resolve out of the fuller
+/// header, which is the part that could silently regress.
+#[test]
+fn still_reads_the_keywords_it_interprets() {
+    let fits = open("header.fits");
+    let hdu = &fits.hdus[0];
+    assert_eq!(hdu.axes, vec![4, 3]);
+    assert_eq!(hdu.bitpix.name(), "i16");
+    assert_eq!(hdu.name, "PRIMARY");
+    assert_pixels(
+        &fits.read_plane(hdu, &[]).unwrap(),
+        &(0..12).map(f64::from).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn filtering_a_header_looks_at_keys_values_and_comments() {
+    let fits = open("header.fits");
+    let cards = &fits.hdus[0].header.cards;
+    let matching = |needle: &str| {
+        cards
+            .iter()
+            .filter(|c| c.matches(needle))
+            .map(|c| c.key.as_str())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        matching("observer"),
+        vec!["OBSERVER"],
+        "key, case-insensitive"
+    );
+    assert_eq!(matching("camsci"), vec!["INSTRUME"], "value");
+    assert_eq!(matching("passed qa"), vec!["QUALITY"], "comment");
+    assert_eq!(
+        matching("step").len(),
+        2,
+        "free text of valueless cards is searchable too"
+    );
+    assert_eq!(
+        matching("").len(),
+        cards.len(),
+        "an empty filter hides nothing"
+    );
+    assert!(matching("nothinghere").is_empty());
 }

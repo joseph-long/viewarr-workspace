@@ -168,7 +168,14 @@ impl Tab {
                 Node::Array(ArrayMeta {
                     id: ArrayId::for_hdu(hdu.index),
                     name: format!("[{}] {}", hdu.index, hdu.name),
-                    detail: format!("{}  {}", hdu.shape_label(), hdu.bitpix.name()),
+                    // A storage type means something for an image and
+                    // nothing for a table, whose BITPIX is 8 because its
+                    // rows are bytes.
+                    detail: if hdu.is_viewable_image() {
+                        format!("{}  {}", hdu.shape_label(), hdu.bitpix.name())
+                    } else {
+                        hdu.shape_label()
+                    },
                     unviewable_reason: hdu.unviewable_reason(),
                 })
             })
@@ -511,6 +518,44 @@ mod tests {
         // Identity round-trips through the tree, which is what the picker
         // hands back to `set_array`.
         assert_eq!(tree.find(&hdu(2)).unwrap().name, "[2] ERR");
+    }
+
+    /// Tables reach the picker, but greyed out and named for what they are:
+    /// hiding them would make a file full of them look empty.
+    #[test]
+    fn the_picker_offers_tables_but_will_not_select_them() {
+        let tab = Tab::open(&fixture("table.fits"), None).unwrap();
+        let tree = tab.arrays();
+        let arrays = tree.arrays();
+
+        assert_eq!(arrays.len(), 4, "every HDU is listed");
+        assert_eq!(tree.selectable_count(), 2, "only the two images");
+
+        let find = |name: &str| {
+            arrays
+                .iter()
+                .find(|a| a.name.contains(name))
+                .unwrap_or_else(|| panic!("no entry for {name}"))
+        };
+        assert_eq!(
+            find("EVENTS").unviewable_reason,
+            Some("a binary table, not an image")
+        );
+        assert_eq!(
+            find("EVENTS").detail,
+            "binary table",
+            "no bogus shape or dtype"
+        );
+        assert_eq!(find("CATALOG").detail, "ASCII table");
+        assert!(find("SCI").is_selectable());
+        assert_eq!(find("SCI").detail, "3x2  f32");
+
+        // And a table cannot be selected even by asking directly.
+        let mut tab = tab;
+        let events = find("EVENTS").id.clone();
+        tab.set_array(&events);
+        assert_eq!(tab.array_id(), hdu(0), "the tab stays on the image");
+        assert!(tab.error().unwrap().contains("binary table"));
     }
 
     #[test]

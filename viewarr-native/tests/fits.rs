@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use viewarr_native::fits::{FitsFile, Value};
+use viewarr_native::fits::{FitsFile, HduKind, Value};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -461,4 +461,75 @@ fn an_orphan_continue_is_shown_rather_than_rejected() {
     // The integer card before it is untouched.
     let int_card = cards.iter().find(|c| c.key == "INTVAL").unwrap();
     assert_eq!(int_card.value, Some(Value::Int(42)));
+}
+
+/// A table declares NAXIS=2 with NAXIS1 the row length in bytes and NAXIS2
+/// the row count, so by shape alone it is indistinguishable from an image —
+/// and was being drawn as one. Only XTENSION tells them apart.
+#[test]
+fn tables_are_not_images_however_much_their_shape_looks_like_one() {
+    let fits = open("table.fits");
+
+    let kinds: Vec<(&str, &HduKind)> = fits
+        .hdus
+        .iter()
+        .map(|h| (h.name.as_str(), &h.kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("PRIMARY", &HduKind::Image),
+            ("EVENTS", &HduKind::BinTable),
+            ("CATALOG", &HduKind::AsciiTable),
+            ("SCI", &HduKind::Image),
+        ]
+    );
+
+    let hdu = |name: &str| fits.hdus.iter().find(|h| h.name == name).unwrap();
+
+    // Both tables have two axes and real data, which is exactly why shape
+    // alone let them through before.
+    for name in ["EVENTS", "CATALOG"] {
+        let table = hdu(name);
+        assert_eq!(table.axes.len(), 2, "{name} looks 2-D by shape");
+        assert!(!table.is_viewable_image(), "{name} must not be drawable");
+    }
+    assert_eq!(
+        hdu("EVENTS").unviewable_reason(),
+        Some("a binary table, not an image")
+    );
+    assert_eq!(
+        hdu("CATALOG").unviewable_reason(),
+        Some("an ASCII table, not an image")
+    );
+
+    // The shape column would otherwise report bytes-per-row by rows.
+    assert_eq!(hdu("EVENTS").shape_label(), "binary table");
+    assert_eq!(hdu("CATALOG").shape_label(), "ASCII table");
+
+    // The real images are untouched.
+    assert!(hdu("PRIMARY").is_viewable_image());
+    assert!(hdu("SCI").is_viewable_image());
+    assert_eq!(hdu("SCI").shape_label(), "3x2");
+    assert_eq!(hdu("SCI").unviewable_reason(), None);
+}
+
+/// Opening the file must land on an image, and asking for a table by name
+/// must say what it is rather than claiming there is no data.
+#[test]
+fn hdu_selection_skips_tables_and_explains_them_when_asked_for() {
+    let fits = open("table.fits");
+
+    assert_eq!(
+        fits.resolve_hdu(None).unwrap(),
+        0,
+        "the primary image, not the first thing with two axes"
+    );
+    assert_eq!(fits.resolve_hdu(Some("SCI")).unwrap(), 3);
+
+    let err = format!("{:#}", fits.resolve_hdu(Some("EVENTS")).unwrap_err());
+    assert!(err.contains("binary table"), "{err}");
+
+    let err = format!("{:#}", fits.resolve_hdu(Some("CATALOG")).unwrap_err());
+    assert!(err.contains("ASCII table"), "{err}");
 }

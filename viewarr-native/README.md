@@ -104,6 +104,12 @@ system-library dependency:
   than rejected.
 - Any number of axes. `NAXIS1`/`NAXIS2` are the image; anything beyond becomes a
   slice axis.
+- Image HDUs only — the primary HDU and `XTENSION = 'IMAGE'`. Tables declare
+  `NAXIS = 2` as well (`NAXIS1` is the row length in bytes, `NAXIS2` the row
+  count), so shape alone cannot tell them apart from an image; `XTENSION` is
+  what does. Tables are listed in the HDU picker, greyed out and named for
+  what they are, rather than hidden — a file whose data is all tables should
+  say so rather than look empty.
 
 **Precision is capped at float64.** Pixels are carried to the viewer as `f64`,
 which is what the viewer's pixel pipe takes everywhere — it matches JavaScript's

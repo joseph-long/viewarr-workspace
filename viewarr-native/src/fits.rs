@@ -422,6 +422,54 @@ fn parse_header(buf: &[u8], offset: usize) -> Result<(Header, usize)> {
 // =============================================================================
 
 /// One header-data unit, described well enough to read planes out of it.
+/// What kind of HDU this is, from `XTENSION` — the primary HDU has none.
+///
+/// This cannot be inferred from `NAXIS`: a table declares `NAXIS = 2` with
+/// `NAXIS1` the row length in bytes and `NAXIS2` the row count, so by shape
+/// alone it is indistinguishable from an image and gets drawn as one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HduKind {
+    /// The primary HDU, or `XTENSION = 'IMAGE'`. The only kind holding an
+    /// array this viewer can draw.
+    Image,
+    /// `XTENSION = 'BINTABLE'` with `ZIMAGE = T`: an image in a table's
+    /// clothing, which this build cannot decompress.
+    CompressedImage,
+    /// `XTENSION = 'BINTABLE'`.
+    BinTable,
+    /// `XTENSION = 'TABLE'`, the ASCII kind.
+    AsciiTable,
+    /// Anything else, kept by name rather than guessed at.
+    Other(String),
+}
+
+impl HduKind {
+    fn from_header(index: usize, xtension: &str, zimage: bool) -> Self {
+        match xtension {
+            // Only the primary HDU may omit XTENSION; an extension that does
+            // is malformed, not an image.
+            "" if index == 0 => Self::Image,
+            "IMAGE" => Self::Image,
+            "BINTABLE" if zimage => Self::CompressedImage,
+            "BINTABLE" => Self::BinTable,
+            "TABLE" => Self::AsciiTable,
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    /// What to call it in a listing, where the shape of a table would only
+    /// mislead.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Image | Self::CompressedImage => "image",
+            Self::BinTable => "binary table",
+            Self::AsciiTable => "ASCII table",
+            Self::Other(name) if name.is_empty() => "not an extension",
+            Self::Other(name) => name,
+        }
+    }
+}
+
 pub struct Hdu {
     /// Position in the file's HDU chain, 0 being the primary HDU.
     pub index: usize,
@@ -438,6 +486,9 @@ pub struct Hdu {
     data_bytes: usize,
     /// A tile-compressed image masquerading as a binary table.
     pub compressed: bool,
+    /// What this HDU actually holds. Tables look like 2-D images by shape, so
+    /// this is the only thing that tells them apart.
+    pub kind: HduKind,
     /// The HDU's header, whole, for the header viewer. A few keywords are
     /// read out of it above; the rest is kept because showing it is the
     /// point.
@@ -447,24 +498,35 @@ pub struct Hdu {
 impl Hdu {
     /// Whether this HDU holds a 2-D-or-higher image this reader can display.
     pub fn is_viewable_image(&self) -> bool {
-        self.axes.len() >= 2 && !self.compressed && self.data_bytes > 0
+        matches!(self.kind, HduKind::Image)
+            && self.axes.len() >= 2
+            // A zero-length axis has no pixels to draw; random-groups data
+            // reaches here with NAXIS1 = 0.
+            && self.axes.iter().all(|&length| length > 0)
+            && self.data_bytes > 0
     }
 
     /// Why this HDU cannot be displayed, or `None` if it can. Phrased to read
     /// after the HDU's name, in a listing or a tooltip.
     pub fn unviewable_reason(&self) -> Option<&'static str> {
-        if self.compressed {
-            Some("tile-compressed, not yet supported")
-        } else if !self.is_viewable_image() {
-            Some("no 2-D-or-larger image data")
-        } else {
-            None
+        match self.kind {
+            HduKind::CompressedImage => Some("tile-compressed, not yet supported"),
+            HduKind::BinTable => Some("a binary table, not an image"),
+            HduKind::AsciiTable => Some("an ASCII table, not an image"),
+            HduKind::Other(_) => Some("not an image extension"),
+            HduKind::Image if !self.is_viewable_image() => Some("no 2-D-or-larger image data"),
+            HduKind::Image => None,
         }
     }
 
     /// Shape for display, which unlike [`shape_string`](Self::shape_string)
     /// has something to say about a dataless HDU.
     pub fn shape_label(&self) -> String {
+        if !matches!(self.kind, HduKind::Image | HduKind::CompressedImage) {
+            // A table's NAXIS1 x NAXIS2 is bytes-per-row by rows, which read
+            // as an image's dimensions would be a lie.
+            return self.kind.label().to_string();
+        }
         if self.axes.is_empty() {
             "no data".to_string()
         } else {
@@ -599,9 +661,12 @@ impl FitsFile {
                 hdu.shape_string()
             );
         }
-        if !hdu.is_viewable_image() {
+        if let Some(reason) = hdu.unviewable_reason() {
+            // Name what the HDU actually is. "no image data" would be
+            // mystifying for a table, which has plenty of data, just not of
+            // a kind that can be drawn.
             bail!(
-                "HDU {index} ({}) holds no 2-D-or-larger image data; run with --list to see what the file contains",
+                "cannot show HDU {index} ({}): {reason}; run with --list to see what the file contains",
                 hdu.name
             );
         }
@@ -723,7 +788,9 @@ fn scan_hdus(buf: &[u8]) -> Result<Vec<Hdu>> {
         };
 
         let xtension = header.string("XTENSION").unwrap_or("").trim().to_string();
-        let compressed = xtension == "BINTABLE" && header.bool("ZIMAGE").unwrap_or(false);
+        let zimage = header.bool("ZIMAGE").unwrap_or(false);
+        let kind = HduKind::from_header(index, &xtension, zimage);
+        let compressed = matches!(kind, HduKind::CompressedImage);
 
         // A tile-compressed image's real shape lives in ZNAXISn, not NAXISn
         // (which describe the table holding the compressed tiles). Report that
@@ -768,6 +835,7 @@ fn scan_hdus(buf: &[u8]) -> Result<Vec<Hdu>> {
             data_offset,
             data_bytes,
             compressed,
+            kind,
             header,
         });
 

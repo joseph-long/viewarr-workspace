@@ -16,7 +16,52 @@ use std::path::{Path, PathBuf};
 
 use egui_phosphor::regular as phosphor;
 
+use crate::source::{ArrayId, Children, Node};
 use crate::tab::Tab;
+
+/// Render one level of the picker's tree, recursing into groups.
+///
+/// A FITS file never gets past the first arm — every HDU is top-level — but a
+/// Zarr store's groups would, and the picker should not need to know which
+/// source it is drawing.
+fn show_array_nodes(
+    ui: &mut egui::Ui,
+    nodes: &[Node],
+    current: &ArrayId,
+    chosen: &mut Option<ArrayId>,
+) {
+    for node in nodes {
+        match node {
+            Node::Array(meta) => match meta.unviewable_reason {
+                None => {
+                    if ui
+                        .selectable_label(meta.id == *current, meta.label())
+                        .clicked()
+                    {
+                        *chosen = Some(meta.id.clone());
+                    }
+                }
+                // Shown but unselectable, so the source's full contents stay
+                // visible and the reason is one hover away.
+                Some(reason) => {
+                    ui.add_enabled(false, egui::Button::selectable(false, meta.label()))
+                        .on_hover_text(reason);
+                }
+            },
+            Node::Group { name, children } => match children {
+                Children::Loaded(kids) => {
+                    ui.menu_button(name, |ui| show_array_nodes(ui, kids, current, chosen));
+                }
+                // Its contents are not known yet, so there is nothing to
+                // offer and nothing to pretend about.
+                Children::Unexpanded => {
+                    ui.add_enabled(false, egui::Button::new(format!("{name}  …")))
+                        .on_hover_text("Not loaded yet");
+                }
+            },
+        }
+    }
+}
 
 /// What a file-picking button asked for.
 enum OpenMode {
@@ -229,10 +274,10 @@ impl NativeViewerApp {
             tab.dtype_name(),
         );
         let error = tab.error().map(str::to_string);
-        let hdu_index = tab.hdu_index();
-        // Only built for a file that has a choice to offer; `None` keeps the
-        // plain label a single-HDU file had before.
-        let choices = tab.has_hdu_choice().then(|| tab.hdu_choices());
+        let current = tab.array_id();
+        // Only built for a source that has a choice to offer; `None` keeps the
+        // plain label a single-array source had before.
+        let arrays = tab.has_array_choice().then(|| tab.arrays());
 
         let mut chosen = None;
 
@@ -241,8 +286,8 @@ impl NativeViewerApp {
                 ui.label(egui::RichText::new(title).strong())
                     .on_hover_text(path);
                 ui.separator();
-                match &choices {
-                    Some(choices) => {
+                match &arrays {
+                    Some(arrays) => {
                         egui::ComboBox::from_id_salt("hdu_picker")
                             .selected_text(hdu.as_str())
                             // egui otherwise caps a combo menu at
@@ -253,37 +298,13 @@ impl NativeViewerApp {
                             // actually fits on screen.
                             .height(ui.ctx().content_rect().height())
                             .show_ui(ui, |ui| {
-                                for choice in choices {
-                                    match choice.unviewable_reason {
-                                        None => {
-                                            if ui
-                                                .selectable_label(
-                                                    choice.index == hdu_index,
-                                                    choice.label.as_str(),
-                                                )
-                                                .clicked()
-                                            {
-                                                chosen = Some(choice.index);
-                                            }
-                                        }
-                                        // Shown but unselectable, so the file's
-                                        // full contents stay visible and the
-                                        // reason is one hover away.
-                                        Some(reason) => {
-                                            ui.add_enabled(
-                                                false,
-                                                egui::Button::selectable(
-                                                    false,
-                                                    choice.label.as_str(),
-                                                ),
-                                            )
-                                            .on_hover_text(reason);
-                                        }
-                                    }
-                                }
+                                show_array_nodes(ui, arrays.nodes(), &current, &mut chosen);
                             })
                             .response
-                            .on_hover_text("Which HDU of this file to display");
+                            .on_hover_text(format!(
+                                "Which {} of this file to display",
+                                arrays.noun()
+                            ));
                     }
                     None => {
                         ui.label(hdu.as_str());
@@ -301,9 +322,9 @@ impl NativeViewerApp {
             });
         });
 
-        if let Some(index) = chosen {
+        if let Some(id) = chosen {
             if let Some(tab) = self.tabs.get_mut(self.active) {
-                tab.set_hdu(index);
+                tab.set_array(&id);
             }
         }
     }

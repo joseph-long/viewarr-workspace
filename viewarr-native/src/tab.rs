@@ -12,15 +12,7 @@ use anyhow::Result;
 use viewarr::widget::ArrayViewerWidget;
 
 use crate::fits::FitsFile;
-
-/// One row of the HDU picker.
-pub struct HduChoice {
-    pub index: usize,
-    /// `[1] SCI  200x120  f32`
-    pub label: String,
-    /// Why this HDU cannot be shown, or `None` if it can be selected.
-    pub unviewable_reason: Option<&'static str>,
-}
+use crate::source::{ArrayId, ArrayMeta, Node, Tree};
 
 pub struct Tab {
     fits: FitsFile,
@@ -30,7 +22,7 @@ pub struct Tab {
     /// restores that HDU's own zoom, stretch and slice position. This is the
     /// viewer-per-HDU the JupyterLab front-end also keeps, except built on
     /// demand: an HDU never visited costs nothing.
-    parked: HashMap<usize, ArrayViewerWidget>,
+    parked: HashMap<ArrayId, ArrayViewerWidget>,
     /// Short label for the tab bar: the file's name.
     title: String,
     /// Set when a slice read fails, so the failure is visible in the window
@@ -101,49 +93,60 @@ impl Tab {
         &self.fits.hdus[self.hdu_index].name
     }
 
-    /// Which HDU of the file this tab is showing.
-    pub fn hdu_index(&self) -> usize {
-        self.hdu_index
+    /// Which array of the source this tab is showing.
+    pub fn array_id(&self) -> ArrayId {
+        ArrayId::for_hdu(self.hdu_index)
     }
 
-    /// Whether this file holds enough HDUs to be worth offering a choice at
-    /// all. A single-HDU file gets a plain label instead of a picker.
-    pub fn has_hdu_choice(&self) -> bool {
+    /// Whether there is enough here to be worth offering a choice at all. A
+    /// source holding one array gets a plain label instead of a picker.
+    pub fn has_array_choice(&self) -> bool {
         self.fits.hdus.len() > 1
     }
 
-    /// Every HDU in the file, in file order. The ones this reader cannot
-    /// display are listed too, carrying their reason, so a file whose image
-    /// sits in a compressed extension explains itself rather than looking
-    /// like it holds nothing.
-    pub fn hdu_choices(&self) -> Vec<HduChoice> {
-        self.fits
+    /// Everything this source holds, as the picker's model. A FITS file is a
+    /// flat forest — every HDU is top-level — so a Zarr store's groups would
+    /// be the first thing here to nest. The HDUs this reader cannot display
+    /// are included, carrying their reason, so a file whose image sits in a
+    /// compressed extension explains itself rather than looking empty.
+    pub fn arrays(&self) -> Tree {
+        let nodes = self
+            .fits
             .hdus
             .iter()
-            .map(|hdu| HduChoice {
-                index: hdu.index,
-                label: format!(
-                    "[{}] {}  {}  {}",
-                    hdu.index,
-                    hdu.name,
-                    hdu.shape_label(),
-                    hdu.bitpix.name()
-                ),
-                unviewable_reason: hdu.unviewable_reason(),
+            .map(|hdu| {
+                Node::Array(ArrayMeta {
+                    id: ArrayId::for_hdu(hdu.index),
+                    name: format!("[{}] {}", hdu.index, hdu.name),
+                    detail: format!("{}  {}", hdu.shape_label(), hdu.bitpix.name()),
+                    unviewable_reason: hdu.unviewable_reason(),
+                })
             })
-            .collect()
+            .collect();
+        Tree::new(nodes, "HDU")
     }
 
-    /// Show a different HDU of the same file. The outgoing viewer is parked
-    /// rather than dropped, so switching away and back is free and lands on
-    /// the view you left. A plane that will not read leaves the tab on the HDU
-    /// it was already showing, with the reason surfaced in the window.
-    pub fn set_hdu(&mut self, index: usize) {
-        if index == self.hdu_index || index >= self.fits.hdus.len() {
+    /// Resolve a picker identity back to an HDU. Comparing against
+    /// `ArrayId::for_hdu` keeps the encoding in that one function rather than
+    /// parsing it back out here.
+    fn hdu_for(&self, id: &ArrayId) -> Option<usize> {
+        (0..self.fits.hdus.len()).find(|&index| ArrayId::for_hdu(index) == *id)
+    }
+
+    /// Show a different array of the same source. The outgoing viewer is
+    /// parked rather than dropped, so switching away and back is free and
+    /// lands on the view you left. A plane that will not read leaves the tab
+    /// on what it was already showing, with the reason surfaced in the window.
+    pub fn set_array(&mut self, id: &ArrayId) {
+        let Some(index) = self.hdu_for(id) else {
+            self.error = Some(format!("this file has no array {id}"));
+            return;
+        };
+        if index == self.hdu_index {
             return;
         }
 
-        // The picker greys these out, but this is the API an HDU arrives
+        // The picker greys these out, but this is the API a selection arrives
         // through, so it does not get to depend on the UI having done that.
         if let Some(reason) = self.fits.hdus[index].unviewable_reason() {
             self.error = Some(format!(
@@ -155,7 +158,7 @@ impl Tab {
 
         // Reclaim or build the replacement before touching any state, so a
         // failed read is a no-op rather than a half-switched tab.
-        let widget = match self.parked.remove(&index) {
+        let widget = match self.parked.remove(id) {
             Some(widget) => widget,
             None => match Self::load_viewer(&self.fits, index) {
                 Ok(widget) => widget,
@@ -169,7 +172,7 @@ impl Tab {
         };
 
         let previous = std::mem::replace(&mut self.widget, widget);
-        self.parked.insert(self.hdu_index, previous);
+        self.parked.insert(self.array_id(), previous);
         self.hdu_index = index;
         self.error = None;
     }
@@ -263,6 +266,11 @@ mod tests {
     use std::path::PathBuf;
     use viewarr::colormap::Colormap;
 
+    /// The picker identity of an HDU, which is what `set_array` takes.
+    fn hdu(index: usize) -> ArrayId {
+        ArrayId::for_hdu(index)
+    }
+
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data")
@@ -279,7 +287,7 @@ mod tests {
     #[test]
     fn a_tab_opens_on_the_first_viewable_hdu_not_the_dataless_primary() {
         let tab = mef();
-        assert_eq!(tab.hdu_index(), 1);
+        assert_eq!(tab.array_id(), hdu(1));
         assert_eq!(tab.hdu_name(), "SCI");
     }
 
@@ -287,13 +295,13 @@ mod tests {
     fn switching_hdu_changes_what_the_tab_shows() {
         let mut tab = mef();
 
-        tab.set_hdu(2);
-        assert_eq!(tab.hdu_index(), 2);
+        tab.set_array(&hdu(2));
+        assert_eq!(tab.array_id(), hdu(2));
         assert_eq!(tab.hdu_name(), "ERR");
         assert_eq!(tab.dtype_name(), "f32", "the info bar follows the HDU");
         assert!(tab.error().is_none());
 
-        tab.set_hdu(1);
+        tab.set_array(&hdu(1));
         assert_eq!(tab.hdu_name(), "SCI");
         assert_eq!(tab.dtype_name(), "f64");
     }
@@ -305,7 +313,7 @@ mod tests {
         // Leave a mark on SCI's viewer that ERR's should not inherit...
         tab.widget.set_colormap(Colormap::Inferno);
 
-        tab.set_hdu(2);
+        tab.set_array(&hdu(2));
         assert_eq!(
             tab.widget.colormap(),
             Colormap::Grayscale,
@@ -314,9 +322,9 @@ mod tests {
         tab.widget.set_colormap(Colormap::Magma);
 
         // ...and both marks should still be there on the way back.
-        tab.set_hdu(1);
+        tab.set_array(&hdu(1));
         assert_eq!(tab.widget.colormap(), Colormap::Inferno);
-        tab.set_hdu(2);
+        tab.set_array(&hdu(2));
         assert_eq!(tab.widget.colormap(), Colormap::Magma);
     }
 
@@ -325,15 +333,15 @@ mod tests {
         let mut tab = mef();
         assert!(tab.parked.is_empty(), "nothing is parked before a switch");
 
-        tab.set_hdu(2);
+        tab.set_array(&hdu(2));
         assert_eq!(
             tab.parked.keys().collect::<Vec<_>>(),
-            vec![&1],
+            vec![&hdu(1)],
             "the outgoing viewer is parked, not dropped"
         );
 
-        tab.set_hdu(1);
-        assert_eq!(tab.parked.keys().collect::<Vec<_>>(), vec![&2]);
+        tab.set_array(&hdu(1));
+        assert_eq!(tab.parked.keys().collect::<Vec<_>>(), vec![&hdu(2)]);
     }
 
     #[test]
@@ -341,9 +349,9 @@ mod tests {
         let mut tab = mef();
 
         // HDU 0 is the dataless primary; it has nothing to show.
-        tab.set_hdu(0);
+        tab.set_array(&hdu(0));
 
-        assert_eq!(tab.hdu_index(), 1, "the tab stays on the HDU it had");
+        assert_eq!(tab.array_id(), hdu(1), "the tab stays on the HDU it had");
         assert_eq!(tab.hdu_name(), "SCI");
         let error = tab.error().expect("the refusal is surfaced in the window");
         assert!(
@@ -352,7 +360,7 @@ mod tests {
         );
 
         // A good switch afterwards clears it.
-        tab.set_hdu(2);
+        tab.set_array(&hdu(2));
         assert!(tab.error().is_none());
     }
 
@@ -360,42 +368,65 @@ mod tests {
     fn switching_nowhere_is_a_no_op() {
         let mut tab = mef();
 
-        tab.set_hdu(1); // already there
-        tab.set_hdu(99); // past the end
-        assert_eq!(tab.hdu_index(), 1);
+        tab.set_array(&hdu(1)); // already there
+        assert_eq!(tab.array_id(), hdu(1));
         assert!(tab.parked.is_empty());
         assert!(
             tab.error().is_none(),
-            "neither is a failure worth reporting"
+            "selecting what is shown is not a failure"
         );
+
+        // An id this source does not hold is reported rather than ignored —
+        // with a tree model it is a real possibility, not just a bad index.
+        tab.set_array(&ArrayId::new("calib/darks/master"));
+        assert_eq!(tab.array_id(), hdu(1), "the tab stays where it was");
+        assert!(tab
+            .error()
+            .expect("an unknown array is reported")
+            .contains("calib/darks/master"));
     }
 
     #[test]
-    fn hdu_choices_list_every_hdu_with_the_reason_it_cannot_be_shown() {
+    fn the_array_tree_lists_every_hdu_with_the_reason_it_cannot_be_shown() {
         let tab = mef();
-        let choices = tab.hdu_choices();
+        let tree = tab.arrays();
+        let arrays = tree.arrays();
 
-        assert_eq!(choices.len(), 3, "unviewable HDUs are listed, not hidden");
+        assert!(
+            tree.is_flat(),
+            "a FITS file has no groups, so the picker stays a flat menu"
+        );
+        assert_eq!(arrays.len(), 3, "unviewable HDUs are listed, not hidden");
         assert_eq!(
-            choices[0].unviewable_reason,
+            arrays[0].unviewable_reason,
             Some("no 2-D-or-larger image data")
         );
-        assert!(choices[1].unviewable_reason.is_none());
-        assert!(choices[2].unviewable_reason.is_none());
+        assert!(arrays[1].is_selectable());
+        assert!(arrays[2].is_selectable());
+        assert_eq!(tree.selectable_count(), 2);
 
         // The label is what the picker shows, so it should name the HDU and
         // say enough to tell two extensions apart.
-        assert!(choices[1].label.contains("SCI"), "{}", choices[1].label);
-        assert!(choices[1].label.contains("4x3"), "{}", choices[1].label);
-        assert!(choices[1].label.contains("f64"), "{}", choices[1].label);
-        assert!(choices[0].label.contains("no data"), "{}", choices[0].label);
+        let label = arrays[1].label();
+        assert!(label.contains("SCI"), "{label}");
+        assert!(label.contains("4x3"), "{label}");
+        assert!(label.contains("f64"), "{label}");
+        assert!(
+            arrays[0].label().contains("no data"),
+            "{}",
+            arrays[0].label()
+        );
+
+        // Identity round-trips through the tree, which is what the picker
+        // hands back to `set_array`.
+        assert_eq!(tree.find(&hdu(2)).unwrap().name, "[2] ERR");
     }
 
     #[test]
     fn a_single_hdu_file_offers_no_choice() {
         let tab = Tab::open(&fixture("cube3d.fits"), None).unwrap();
-        assert!(!tab.has_hdu_choice());
-        assert!(mef().has_hdu_choice());
+        assert!(!tab.has_array_choice());
+        assert!(mef().has_array_choice());
     }
 
     #[test]

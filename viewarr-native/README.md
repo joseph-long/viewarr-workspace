@@ -114,5 +114,8 @@ switching, wrapping, closing, and the difference between Open and Open in Tab �
 since none of that is visible to the FITS tests and all of it is easy to get
 subtly wrong. `src/tab.rs` does the same for HDU switching, including that each
 HDU keeps its own view state and that an unviewable one is refused without
-disturbing the tab. What the tests cannot cover is the drawing itself or the
-native file dialog; those need a human looking at the window.
+disturbing the tab. `src/source.rs` holds the format-agnostic model the picker
+reads — a tree of groups and arrays, of which a FITS file is the flat case —
+and is tested against synthetic nested trees, since no source produces one yet.
+What the tests cannot cover is the drawing itself or the native file dialog;
+those need a human looking at the window.

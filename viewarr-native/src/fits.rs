@@ -317,6 +317,54 @@ fn parse_header(buf: &[u8], offset: usize) -> Result<(Header, usize)> {
             if keyword == "END" {
                 return Ok((Header { cards }, pos));
             }
+            // CONTINUE carries the next piece of a long string: no value
+            // indicator, just a quoted segment and perhaps more comment. A
+            // HIERARCH keyword leaves so little room that its value and even
+            // its comment routinely spill onto these, so folding them back
+            // together is what makes such a card readable at all.
+            if keyword == "CONTINUE" {
+                let (value_field, comment) = split_value_and_comment(&text[8..]);
+                let segment = parse_value(value_field);
+                let mut folded = false;
+                if let Some(previous) = cards.last_mut() {
+                    if let Some(Value::Str(accumulated)) = previous.value.as_mut() {
+                        // Only now is a trailing '&' known to be a
+                        // continuation marker rather than part of the value:
+                        // a string that merely ends in '&' and is never
+                        // continued keeps it, as astropy does.
+                        if accumulated.ends_with('&') {
+                            accumulated.pop();
+                        }
+                        if let Some(Value::Str(piece)) = &segment {
+                            accumulated.push_str(piece);
+                        }
+                        // The standard concatenates the comments too, which
+                        // is how a comment too long for its own card arrives.
+                        if let Some(extra) = comment {
+                            match previous.comment.as_mut() {
+                                Some(existing) => {
+                                    existing.push(' ');
+                                    existing.push_str(extra);
+                                }
+                                None => previous.comment = Some(extra.to_string()),
+                            }
+                        }
+                        folded = true;
+                    }
+                }
+                if !folded {
+                    // Nothing to continue. astropy rejects the whole file
+                    // here; a viewer is more useful showing the card than
+                    // refusing to open the image beside it.
+                    cards.push(Card {
+                        key: keyword.to_string(),
+                        value: segment,
+                        comment: comment.map(str::to_string),
+                    });
+                }
+                continue;
+            }
+
             // A value is only present when columns 9-10 are exactly "= ".
             // Anything else -- COMMENT, HISTORY, a bare keyword -- is free
             // text, which the viewer still shows.
@@ -337,9 +385,17 @@ fn parse_header(buf: &[u8], offset: usize) -> Result<(Header, usize)> {
             // a bogus keyword/value pair.
             if keyword == "HIERARCH" {
                 if let Some(eq) = text.find('=') {
+                    // The keyword is what follows the marker, as the standard
+                    // defines it and astropy reports it: HIERARCH announces
+                    // the convention, it is not part of the name.
+                    let key = text[..eq]
+                        .trim()
+                        .strip_prefix("HIERARCH")
+                        .unwrap_or_default()
+                        .trim();
                     let (value_field, comment) = split_value_and_comment(&text[eq + 1..]);
                     cards.push(Card {
-                        key: text[..eq].trim().to_string(),
+                        key: key.to_string(),
                         value: parse_value(value_field),
                         comment: comment.map(str::to_string),
                     });

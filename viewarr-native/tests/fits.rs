@@ -335,24 +335,32 @@ fn filtering_a_header_looks_at_keys_values_and_comments() {
 }
 
 /// A HIERARCH card carries a multi-word keyword where a standard card has its
-/// value indicator, so the `=` sits further along. It is a real keyword with a
-/// real value, not free text.
+/// value indicator. The keyword is what follows the marker -- `HIERARCH`
+/// announces the convention rather than naming the card -- which is both what
+/// the standard says and what `astropy` reports.
 #[test]
-fn reads_a_hierarch_keyword_and_its_value() {
+fn reads_a_hierarch_keyword_without_its_marker() {
     let fits = open("header.fits");
     let card = fits.hdus[0]
         .header
         .cards
         .iter()
-        .find(|c| c.key.starts_with("HIERARCH"))
+        .find(|c| c.key == "long keyword here")
         .expect("the fixture has a HIERARCH card");
 
-    assert_eq!(card.key, "HIERARCH long keyword here");
     assert_eq!(card.value, Some(Value::Int(7)));
     assert_eq!(card.comment, None);
+    assert!(
+        !fits.hdus[0]
+            .header
+            .cards
+            .iter()
+            .any(|c| c.key == "HIERARCH"),
+        "the marker is not a keyword"
+    );
 
-    // The keyword is searchable by any of its words, which is the point of
-    // keeping it whole rather than stopping at the first eight characters.
+    // Searchable by any of its words, which is the point of keeping the
+    // keyword whole rather than stopping at eight characters.
     assert!(card.matches("long keyword"));
     assert!(card.matches("here"));
 }
@@ -370,4 +378,87 @@ fn an_equals_sign_in_comment_text_is_not_a_value_indicator() {
 
     assert_eq!(comment.value, None, "a comment has no value, = or not");
     assert_eq!(comment.comment.as_deref(), Some("ratio = 3 to 1"));
+}
+
+/// Long values and comments are split across CONTINUE cards by the writer;
+/// the reader folds them back into one card. Expected values here are what
+/// `astropy.io.fits` reports for the same file, so this pins us to its
+/// handling of over-long lines rather than to our own reading of the spec.
+#[test]
+fn folds_continue_cards_back_into_one_value_and_comment() {
+    let fits = open("longcards.fits");
+    let cards = &fits.hdus[0].header.cards;
+    let card = |key: &str| {
+        cards
+            .iter()
+            .find(|c| c.key == key)
+            .unwrap_or_else(|| panic!("no card {key}"))
+    };
+    let string_of = |key: &str| match &card(key).value {
+        Some(Value::Str(text)) => text.clone(),
+        other => panic!("{key} should be a string, got {other:?}"),
+    };
+
+    // A value too long for one card, whose comment also needed its own.
+    assert_eq!(string_of("LONGSTR"), "x".repeat(120));
+    assert_eq!(
+        card("LONGSTR").comment.as_deref(),
+        Some("a comment that is itself fairly long so it may wrap too")
+    );
+
+    // A HIERARCH keyword leaves so little room that value and comment both
+    // spill -- the case that makes folding worth doing.
+    assert_eq!(
+        string_of("a very long hierarch keyword indeed"),
+        "y".repeat(90)
+    );
+    assert_eq!(
+        card("a very long hierarch keyword indeed")
+            .comment
+            .as_deref(),
+        Some("hierarch comment also long enough to be interesting here")
+    );
+
+    // A short HIERARCH loses its marker just the same.
+    assert_eq!(string_of("ESO DET CHIP1 NAME"), "chip-a");
+    assert_eq!(
+        card("ESO DET CHIP1 NAME").comment.as_deref(),
+        Some("detector")
+    );
+
+    // A string that merely ends in '&' and is never continued keeps it: the
+    // marker only means continuation when a CONTINUE actually follows.
+    assert_eq!(string_of("AMPER"), "ends with &");
+    assert_eq!(string_of("SHORT"), "fits");
+
+    // The folded-away cards are gone, not left as rows of their own.
+    assert!(!cards.iter().any(|c| c.key == "CONTINUE"));
+    // astropy counts ten cards in this file; so should we. Catches a fold
+    // that drops a card or leaves a fragment behind, which the per-key
+    // assertions above would not notice.
+    assert_eq!(
+        cards.len(),
+        10,
+        "{:?}",
+        cards.iter().map(|c| &c.key).collect::<Vec<_>>()
+    );
+}
+
+/// An orphan CONTINUE has nothing to fold into. astropy rejects the whole
+/// file; a viewer is more useful showing the card than refusing to open the
+/// image beside it.
+#[test]
+fn an_orphan_continue_is_shown_rather_than_rejected() {
+    let fits = open("orphan.fits");
+    let cards = &fits.hdus[0].header.cards;
+
+    let orphan = cards
+        .iter()
+        .find(|c| c.key == "CONTINUE")
+        .expect("the stray card survives as itself");
+    assert_eq!(orphan.value, Some(Value::Str("nothing precedes me".into())));
+
+    // The integer card before it is untouched.
+    let int_card = cards.iter().find(|c| c.key == "INTVAL").unwrap();
+    assert_eq!(int_card.value, Some(Value::Int(42)));
 }

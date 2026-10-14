@@ -48,7 +48,11 @@ stays pure image. Each bar is subordinate to the one above:
   can sit side by side. Each tab has its own, and it closes with its tab.
   Cards appear in file order with their comments beside them, and the filter
   box matches keyword, value or comment. Values are selectable, since copying
-  one out is most of why anyone opens a header.
+  one out is most of why anyone opens a header. Keywords grow to fit, up to a
+  third of the window, then wrap in place; values are kept on one line where
+  they can be, with comments wrapping into what is left, and both wrap when
+  neither will fit otherwise. The window will not shrink past the width where
+  that stops working.
 
 Every tab holds its own viewer state, so zoom, stretch, colormap and slice
 position are per-file and survive switching away and back. Within a tab the

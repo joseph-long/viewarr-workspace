@@ -1266,28 +1266,37 @@ impl ArrayViewerWidget {
             );
         }
 
+        // Where to zoom around, or `None` when the wheel is not meant for the
+        // image. Both handlers below read *global* input (`zoom_delta` and
+        // `raw_scroll_delta` are not filtered by what is under the pointer),
+        // so geometry alone is not enough: with an open dropdown or menu
+        // layered over the canvas, scrolling its list would scroll that list
+        // *and* zoom the image underneath it. Checking the top layer rules
+        // that out. Widgets drawn over the canvas in this same layer — the
+        // colormap row, the colorbar, the bottom toolbar — still zoom as
+        // before, since only a separate `Area` takes the pointer away.
+        let zoom_anchor = ui.input(|i| i.pointer.latest_pos()).filter(|&pos| {
+            response.rect.contains(pos) && ctx.layer_id_at(pos) == Some(ui.layer_id())
+        });
+
         // Handle mouse wheel zoom
         let zoom_delta = ui.input(|i| i.zoom_delta());
         if zoom_delta != 1.0 {
-            if let Some(pointer_pos) = ui.input(|i| i.pointer.latest_pos()) {
-                if response.rect.contains(pointer_pos) {
-                    self.transform.zoom_around_point(zoom_delta, pointer_pos, viewport_center);
-                }
+            if let Some(pointer_pos) = zoom_anchor {
+                self.transform.zoom_around_point(zoom_delta, pointer_pos, viewport_center);
             }
         }
 
         // Handle scroll wheel (for zoom when not using native zoom gesture)
         let scroll_delta = ui.input(|i| i.raw_scroll_delta);
         if scroll_delta.y != 0.0 && zoom_delta == 1.0 {
-            if let Some(pointer_pos) = ui.input(|i| i.pointer.latest_pos()) {
-                if response.rect.contains(pointer_pos) {
-                    let zoom_factor = if scroll_delta.y > 0.0 {
-                        transform::SCROLL_ZOOM_STEP
-                    } else {
-                        1.0 / transform::SCROLL_ZOOM_STEP
-                    };
-                    self.transform.zoom_around_point(zoom_factor, pointer_pos, viewport_center);
-                }
+            if let Some(pointer_pos) = zoom_anchor {
+                let zoom_factor = if scroll_delta.y > 0.0 {
+                    transform::SCROLL_ZOOM_STEP
+                } else {
+                    1.0 / transform::SCROLL_ZOOM_STEP
+                };
+                self.transform.zoom_around_point(zoom_factor, pointer_pos, viewport_center);
             }
         }
 

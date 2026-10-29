@@ -52,7 +52,7 @@ impl HeaderWindow {
 
         // Immediate rather than deferred: a deferred viewport's callback must
         // be `Send + Sync + 'static`, which would mean cloning every card out
-        // of the mapped file each frame. An immediate one borrows the parsed
+        // of the open file each frame. An immediate one borrows the parsed
         // header where it already sits.
         ctx.show_viewport_immediate(id, builder, |ctx, class| {
             if class == egui::ViewportClass::Embedded {

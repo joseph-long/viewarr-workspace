@@ -1,9 +1,9 @@
 //! A small, dependency-free FITS reader for image HDUs.
 //!
 //! Only what the viewer needs: walk the HDU chain, describe each image HDU, and
-//! read one 2-D plane at a time out of an N-D cube. The file is memory-mapped
-//! and planes are decoded on demand, which is what lets the viewer scrub through
-//! a multi-gigabyte cube without loading it.
+//! read one 2-D plane at a time out of an N-D cube. Headers are read when the
+//! file is opened and planes on demand, which is what lets the viewer scrub
+//! through a multi-gigabyte cube without loading it.
 //!
 //! Scope: uncompressed image HDUs (`BITPIX` 8/16/32/64/-32/-64), including the
 //! `BZERO`/`BSCALE` linear scaling that encodes unsigned integers. Tile-compressed
@@ -13,13 +13,74 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use memmap2::Mmap;
 
 /// FITS files are a whole number of 2880-byte blocks; both headers and data
 /// units are padded out to a multiple of this.
 const BLOCK: usize = 2880;
 /// Header cards are fixed-width 80-byte records, 36 to a block.
 const CARD: usize = 80;
+
+/// The file's bytes, fetched with positioned reads as they are needed.
+///
+/// Deliberately not a memory map. Tabs follow their files as other programs
+/// rewrite them, and a program that empties a file before writing it again
+/// would leave a map pointing at pages that no longer exist: touching one
+/// kills the process with SIGBUS, before any error handling can run. A read
+/// past the end of a shrunken file just comes back short, which is an error
+/// the window can show until the rewritten file is reloaded.
+struct FileBytes {
+    file: File,
+    /// Size when opened, for a clearer message than a short read gives when a
+    /// file was simply truncated to begin with.
+    len: usize,
+}
+
+impl FileBytes {
+    fn open(path: &Path) -> Result<Self> {
+        let file =
+            File::open(path).with_context(|| format!("could not open {}", path.display()))?;
+        let len = file
+            .metadata()
+            .with_context(|| format!("could not read the size of {}", path.display()))?
+            .len() as usize;
+        Ok(Self { file, len })
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn read(&self, start: usize, len: usize) -> Result<Vec<u8>> {
+        let mut buf = vec![0; len];
+        read_exact_at(&self.file, &mut buf, start as u64).with_context(|| {
+            format!(
+                "could not read bytes {start}..{} (has the file changed?)",
+                start + len
+            )
+        })?;
+        Ok(buf)
+    }
+}
+
+#[cfg(unix)]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+}
+
+#[cfg(windows)]
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        match file.seek_read(buf, offset)? {
+            0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            n => {
+                buf = &mut buf[n..];
+                offset += n as u64;
+            }
+        }
+    }
+    Ok(())
+}
 
 // =============================================================================
 // Pixel types
@@ -298,14 +359,14 @@ fn parse_value(field: &str) -> Option<Value> {
 
 /// Parse the header starting at `offset`, returning it along with the offset of
 /// the data unit that follows (i.e. just past the block containing `END`).
-fn parse_header(buf: &[u8], offset: usize) -> Result<(Header, usize)> {
+fn parse_header(bytes: &FileBytes, offset: usize) -> Result<(Header, usize)> {
     let mut cards = Vec::new();
     let mut pos = offset;
     loop {
-        if pos + BLOCK > buf.len() {
+        if pos + BLOCK > bytes.len() {
             bail!("header at byte {offset} runs past the end of the file (truncated?)");
         }
-        let block = &buf[pos..pos + BLOCK];
+        let block = bytes.read(pos, BLOCK)?;
         pos += BLOCK;
         // BLOCK is a whole number of CARDs (36 of them), so nothing is left over.
         let (cards_in_block, _) = block.as_chunks::<CARD>();
@@ -584,33 +645,29 @@ impl Hdu {
 pub struct FitsFile {
     pub path: PathBuf,
     pub hdus: Vec<Hdu>,
-    mmap: Mmap,
+    bytes: FileBytes,
 }
 
 impl FitsFile {
-    /// Memory-map `path` and walk its HDU chain. No pixel data is read here.
+    /// Open `path` and walk its HDU chain. Only headers are read here; pixel
+    /// data waits for [`read_plane`](Self::read_plane).
     pub fn open(path: &Path) -> Result<Self> {
-        let file =
-            File::open(path).with_context(|| format!("could not open {}", path.display()))?;
-        // SAFETY: the usual mmap caveat — another process truncating the file
-        // while we hold the map would fault. Acceptable for a desktop viewer.
-        let mmap = unsafe { Mmap::map(&file) }
-            .with_context(|| format!("could not memory-map {}", path.display()))?;
+        let bytes = FileBytes::open(path)?;
 
-        if mmap.len() < BLOCK || !mmap.starts_with(b"SIMPLE  =") {
+        if bytes.len() < BLOCK || !bytes.read(0, BLOCK)?.starts_with(b"SIMPLE  =") {
             bail!(
                 "{} does not look like a FITS file (no SIMPLE record)",
                 path.display()
             );
         }
 
-        let hdus = scan_hdus(&mmap)
+        let hdus = scan_hdus(&bytes)
             .with_context(|| format!("could not read the structure of {}", path.display()))?;
 
         Ok(Self {
             path: path.to_path_buf(),
             hdus,
-            mmap,
+            bytes,
         })
     }
 
@@ -726,14 +783,14 @@ impl FitsFile {
         let elem = hdu.bitpix.width();
         let start = hdu.data_offset + plane * plane_pixels * elem;
         let end = start + plane_pixels * elem;
-        if end > self.mmap.len() {
+        if end > self.bytes.len() {
             bail!(
                 "data for this slice ends at byte {end} but the file is only {} bytes (truncated?)",
-                self.mmap.len()
+                self.bytes.len()
             );
         }
 
-        let raw = &self.mmap[start..end];
+        let raw = self.bytes.read(start, end - start)?;
         let mut out = Vec::with_capacity(plane_pixels);
         for chunk in raw.chunks_exact(elem) {
             let (value, as_int) = hdu.bitpix.decode(chunk);
@@ -753,13 +810,13 @@ impl FitsFile {
 
 /// Walk the file block by block, parsing each header and stepping over its data
 /// unit to find the next one.
-fn scan_hdus(buf: &[u8]) -> Result<Vec<Hdu>> {
+fn scan_hdus(bytes: &FileBytes) -> Result<Vec<Hdu>> {
     let mut hdus = Vec::new();
     let mut offset = 0usize;
     let mut index = 0usize;
 
-    while offset + BLOCK <= buf.len() {
-        let (header, data_offset) = parse_header(buf, offset)?;
+    while offset + BLOCK <= bytes.len() {
+        let (header, data_offset) = parse_header(bytes, offset)?;
 
         let naxis = header.int("NAXIS").unwrap_or(0).max(0) as usize;
         let mut axes = Vec::with_capacity(naxis);

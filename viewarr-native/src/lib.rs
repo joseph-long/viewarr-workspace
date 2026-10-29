@@ -11,3 +11,4 @@ pub mod header;
 pub mod macos;
 pub mod source;
 pub mod tab;
+pub mod watch;

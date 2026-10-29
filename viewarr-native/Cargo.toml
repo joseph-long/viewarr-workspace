@@ -28,9 +28,10 @@ egui-phosphor = "0.11"
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-memmap2 = "0.9"
 # Native file-open dialog for the toolbar's Open buttons.
 rfd = "0.15"
+# Filesystem change events, so a tab follows its file as it is rewritten.
+notify = "8"
 
 # Finder hands documents to an app as an "open documents" Apple Event rather
 # than on argv, and winit does not answer it; src/macos.rs does. These are the

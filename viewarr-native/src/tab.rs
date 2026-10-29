@@ -6,13 +6,14 @@
 //! the same is true of switching HDU within a file.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use viewarr::widget::ArrayViewerWidget;
 
-use crate::fits::{Card, FitsFile};
+use crate::fits::{Card, FitsFile, Hdu};
 use crate::header::HeaderWindow;
 use crate::source::{ArrayId, ArrayMeta, Node, Tree};
 
@@ -41,12 +42,53 @@ pub struct Tab {
     /// Set when a slice read fails, so the failure is visible in the window
     /// rather than only on stderr.
     error: Option<String>,
+    /// The file with every symlink and `..` resolved, which is how change
+    /// events name it. Resolved once, at open, since a file that has just been
+    /// deleted can no longer be resolved.
+    disk_path: PathBuf,
+    /// Size and modification time when the file was last read, so an event
+    /// that changed nothing — a `touch`, a duplicate — does not cost a reload.
+    stamp: Option<FileStamp>,
+}
+
+/// What a file looked like on disk when it was read.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct FileStamp {
+    len: u64,
+    modified: SystemTime,
+}
+
+impl FileStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok()?,
+        })
+    }
+}
+
+/// New pixels for a viewer that keeps its state, read in full before any
+/// viewer is touched so a failed read changes nothing.
+struct Refresh {
+    indices: Vec<usize>,
+    pixels: Vec<f64>,
+}
+
+/// What a reload does to the viewer on screen.
+enum Reloaded {
+    /// Same shape: new pixels into the viewer as it stands.
+    Kept(Refresh),
+    /// Shape changed, or the HDU is gone: a new viewer, possibly on a
+    /// different HDU.
+    Replaced(usize, ArrayViewerWidget),
 }
 
 impl Tab {
     /// Open `path` and load its first plane, so the tab has something to show
     /// the moment it appears.
     pub fn open(path: &Path, requested_hdu: Option<&str>) -> Result<Self> {
+        let stamp = FileStamp::of(path);
         let fits = FitsFile::open(path)?;
         let hdu_index = fits.resolve_hdu(requested_hdu)?;
         let widget = Self::load_viewer(&fits, hdu_index)?;
@@ -65,7 +107,128 @@ impl Tab {
             parked: HashMap::new(),
             title,
             error: None,
+            disk_path: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+            stamp,
         })
+    }
+
+    /// The file as change events name it.
+    pub fn disk_path(&self) -> &Path {
+        &self.disk_path
+    }
+
+    /// Read the file again after it changed on disk.
+    ///
+    /// An array whose shape is unchanged keeps its viewer and gets the new
+    /// pixels for the slice it is on, so zoom, pan, rotation, stretch,
+    /// colormap and slice position all survive — and so do limits the user
+    /// set, which a new image would otherwise replace with its own range.
+    /// Locked limits survive regardless, as they do across slices. An array
+    /// whose shape changed starts over with a fresh viewer, since a view of
+    /// the old shape means nothing for the new one.
+    ///
+    /// That goes for the HDUs parked behind the picker too, so switching back
+    /// to one never shows the old file. If the HDU on screen is gone, or is no
+    /// longer an image, the tab falls back to the file's default HDU.
+    ///
+    /// A file that will not read — most likely caught partway through being
+    /// written — leaves the tab as it was, with the reason shown; the next
+    /// change to the file tries again.
+    pub fn reload(&mut self) {
+        let stamp = FileStamp::of(&self.fits.path);
+        if stamp.is_some() && stamp == self.stamp {
+            return;
+        }
+        if let Err(err) = self.try_reload(stamp) {
+            let message = format!("could not reload: {err:#}");
+            eprintln!("viewarr: {message}");
+            self.error = Some(message);
+        }
+    }
+
+    fn try_reload(&mut self, stamp: Option<FileStamp>) -> Result<()> {
+        let fits = FitsFile::open(&self.fits.path)?;
+
+        // Everything fallible first, against the new file, so that failing
+        // anywhere leaves the tab untouched.
+        let old_hdu = &self.fits.hdus[self.hdu_index];
+        let active = match fits.hdus.get(self.hdu_index) {
+            Some(new_hdu) if same_shape(old_hdu, new_hdu) => {
+                Reloaded::Kept(Self::read_refresh(&fits, &self.widget, self.hdu_index)?)
+            }
+            Some(new_hdu) if new_hdu.is_viewable_image() => {
+                Reloaded::Replaced(self.hdu_index, Self::load_viewer(&fits, self.hdu_index)?)
+            }
+            _ => {
+                let index = fits.resolve_hdu(None)?;
+                Reloaded::Replaced(index, Self::load_viewer(&fits, index)?)
+            }
+        };
+
+        // A parked viewer that cannot be refreshed is dropped rather than
+        // failing the reload; visiting it again builds it from the new file.
+        let mut parked = HashMap::new();
+        for (id, mut widget) in std::mem::take(&mut self.parked) {
+            let Some(index) = self.hdu_for(&id) else {
+                continue;
+            };
+            let unchanged = fits
+                .hdus
+                .get(index)
+                .is_some_and(|new_hdu| same_shape(&self.fits.hdus[index], new_hdu));
+            if !unchanged {
+                continue;
+            }
+            if let Ok(refresh) = Self::read_refresh(&fits, &widget, index) {
+                Self::apply_refresh(&mut widget, &fits.hdus[index], refresh);
+                parked.insert(id, widget);
+            }
+        }
+
+        match active {
+            Reloaded::Kept(refresh) => {
+                Self::apply_refresh(&mut self.widget, &fits.hdus[self.hdu_index], refresh)
+            }
+            Reloaded::Replaced(index, widget) => {
+                self.widget = widget;
+                self.hdu_index = index;
+            }
+        }
+        // A parked viewer for the HDU now on screen would be a stale duplicate.
+        parked.remove(&self.array_id());
+        self.parked = parked;
+        self.fits = fits;
+        self.stamp = stamp;
+        self.error = None;
+        Ok(())
+    }
+
+    /// Read the slice `widget` is showing, from `fits`.
+    fn read_refresh(
+        fits: &FitsFile,
+        widget: &ArrayViewerWidget,
+        hdu_index: usize,
+    ) -> Result<Refresh> {
+        let indices = widget.displayed_indices().to_vec();
+        let pixels = fits.read_plane(&fits.hdus[hdu_index], &indices)?;
+        Ok(Refresh { indices, pixels })
+    }
+
+    fn apply_refresh(widget: &mut ArrayViewerWidget, hdu: &Hdu, refresh: Refresh) {
+        // The widget re-fits unlocked limits to every new image, which is right
+        // for a new slice but would throw away limits set by hand on this one.
+        let kept_limits = widget.is_limits_modified().then(|| widget.value_range());
+        widget.receive_slice(
+            refresh.indices,
+            refresh.pixels,
+            hdu.width() as u32,
+            hdu.height() as u32,
+            hdu.is_integer(),
+            hdu.value_decimals(),
+        );
+        if let Some((min, max)) = kept_limits {
+            widget.set_value_range(min, max);
+        }
     }
 
     /// A viewer showing `hdu_index`'s first plane, with its cube axes declared.
@@ -107,11 +270,11 @@ impl Tab {
     /// resolved, so a relative path from the command line and the absolute one
     /// Finder sends for the same file match, as do two routes through a symlink.
     pub fn shows_file(&self, path: &Path) -> bool {
-        match (path.canonicalize(), self.fits.path.canonicalize()) {
-            (Ok(asked), Ok(ours)) => asked == ours,
-            // Gone or unreadable since it was opened: only an identical path
-            // can still be said to be the same file.
-            _ => path == self.fits.path,
+        match path.canonicalize() {
+            Ok(asked) => asked == self.disk_path,
+            // Not there to resolve: only an identical path can still be said
+            // to be the same file.
+            Err(_) => path == self.fits.path,
         }
     }
 
@@ -286,7 +449,7 @@ impl Tab {
         self.fits.hdus[self.hdu_index].slice_dims().len()
     }
 
-    /// Fulfil whatever slice the widget is asking for. Reads are from a mapped
+    /// Fulfil whatever slice the widget is asking for. Reads are from a local
     /// file and so complete in-frame; the loop converges because the widget
     /// coalesces to at most one outstanding request, and the bound just
     /// guarantees we always hand control back to the frame.
@@ -327,6 +490,12 @@ impl Tab {
             }
         }
     }
+}
+
+/// Whether a viewer of `old` still makes sense for `new`: the same axes, so
+/// the same pixel grid and the same slices, and still something to show.
+fn same_shape(old: &Hdu, new: &Hdu) -> bool {
+    new.is_viewable_image() && old.axes == new.axes
 }
 
 #[cfg(test)]
@@ -585,6 +754,169 @@ mod tests {
         assert_eq!(
             fits.hdus[1].unviewable_reason(),
             Some("tile-compressed, not yet supported")
+        );
+    }
+
+    /// A scratch copy of a fixture that a test can rewrite, as another
+    /// program would rewrite a file the viewer has open.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn of(fixture_name: &str, test: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("viewarr-reload-{}-{test}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("data.fits");
+            std::fs::copy(fixture(fixture_name), &path).unwrap();
+            Self(path)
+        }
+
+        fn write(&self, bytes: &[u8]) {
+            std::fs::write(&self.0, bytes).unwrap();
+        }
+
+        fn replace_with(&self, fixture_name: &str) {
+            self.write(&std::fs::read(fixture(fixture_name)).unwrap());
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
+        }
+    }
+
+    /// `image2d.fits` with its first pixel (f32, right after the one header
+    /// block) set to `value`: the same shape, different data.
+    fn image2d_with_first_pixel(value: f32) -> Vec<u8> {
+        let mut bytes = std::fs::read(fixture("image2d.fits")).unwrap();
+        bytes[2880..2884].copy_from_slice(&value.to_be_bytes());
+        bytes
+    }
+
+    fn first_pixel(tab: &Tab) -> f64 {
+        let hdu = &tab.fits.hdus[tab.hdu_index];
+        tab.fits.read_plane(hdu, &[]).unwrap()[0]
+    }
+
+    #[test]
+    fn a_reload_with_the_same_shape_keeps_the_view() {
+        let scratch = Scratch::of("image2d.fits", "same-shape");
+        let mut tab = Tab::open(&scratch.0, None).unwrap();
+        tab.widget.set_colormap(Colormap::Inferno);
+        tab.widget.set_rotation(30.0);
+        tab.widget.set_value_range(-5.0, 5.0);
+
+        scratch.write(&image2d_with_first_pixel(1000.0));
+        tab.reload();
+
+        assert!(tab.error().is_none(), "{:?}", tab.error());
+        assert_eq!(first_pixel(&tab), 1000.0, "the new data was read");
+        assert_eq!(tab.widget.colormap(), Colormap::Inferno);
+        assert_eq!(tab.widget.rotation(), 30.0);
+        assert_eq!(
+            tab.widget.value_range(),
+            (-5.0, 5.0),
+            "limits set by hand are not re-fitted to the new image"
+        );
+    }
+
+    #[test]
+    fn a_reload_keeps_automatic_limits_automatic() {
+        let scratch = Scratch::of("image2d.fits", "auto-limits");
+        let mut tab = Tab::open(&scratch.0, None).unwrap();
+        let (_, before) = tab.widget.value_range();
+
+        scratch.write(&image2d_with_first_pixel(1000.0));
+        tab.reload();
+
+        let (_, after) = tab.widget.value_range();
+        assert!(
+            after > before,
+            "untouched limits follow the new data: {before} -> {after}"
+        );
+        assert!(!tab.widget.is_limits_modified());
+    }
+
+    #[test]
+    fn a_reload_with_a_new_shape_starts_the_view_over() {
+        let scratch = Scratch::of("image2d.fits", "new-shape");
+        let mut tab = Tab::open(&scratch.0, None).unwrap();
+        tab.widget.set_colormap(Colormap::Inferno);
+        assert!(!tab.has_slices());
+
+        scratch.replace_with("cube3d.fits");
+        tab.reload();
+
+        assert!(tab.error().is_none(), "{:?}", tab.error());
+        assert!(tab.has_slices(), "the cube's slice axis arrived");
+        assert_eq!(tab.widget.colormap(), Colormap::Grayscale);
+    }
+
+    #[test]
+    fn a_reload_that_cannot_read_leaves_the_tab_alone_until_the_next_change() {
+        let scratch = Scratch::of("image2d.fits", "half-written");
+        let mut tab = Tab::open(&scratch.0, None).unwrap();
+        tab.widget.set_colormap(Colormap::Inferno);
+
+        // Caught partway through a write: not even a whole header block.
+        scratch.write(b"SIMPLE  =                    T");
+        tab.reload();
+        assert!(tab.error().unwrap().contains("could not reload"));
+        assert_eq!(tab.widget.colormap(), Colormap::Inferno);
+        assert_eq!(tab.shape_string(), "6x4");
+
+        scratch.write(&image2d_with_first_pixel(7.0));
+        tab.reload();
+        assert!(tab.error().is_none(), "{:?}", tab.error());
+        assert_eq!(first_pixel(&tab), 7.0);
+        assert_eq!(tab.widget.colormap(), Colormap::Inferno);
+    }
+
+    #[test]
+    fn a_reload_refreshes_parked_hdus_and_drops_ones_that_are_gone() {
+        let scratch = Scratch::of("mef.fits", "parked");
+        let mut tab = Tab::open(&scratch.0, None).unwrap();
+        tab.widget.set_colormap(Colormap::Inferno);
+        tab.set_array(&hdu(2));
+
+        // Rewritten unchanged in shape: SCI's parked viewer survives.
+        scratch.replace_with("mef.fits");
+        tab.reload();
+        assert_eq!(tab.array_id(), hdu(2));
+        tab.set_array(&hdu(1));
+        assert_eq!(tab.widget.colormap(), Colormap::Inferno);
+
+        // Rewritten as a single-HDU file: the HDU on screen no longer exists,
+        // so the tab falls back to the file's own default.
+        scratch.replace_with("image2d.fits");
+        tab.reload();
+        assert!(tab.error().is_none(), "{:?}", tab.error());
+        assert_eq!(tab.array_id(), hdu(0));
+        assert!(tab.parked.is_empty(), "nothing of the old file lingers");
+    }
+
+    /// The case a memory map could not survive: a program empties the file in
+    /// place, then the viewer reads a slice before the rewrite settles. With
+    /// a map that read was a SIGBUS; now it must be an ordinary error.
+    #[test]
+    fn reading_a_file_emptied_underneath_the_tab_is_an_error_not_a_crash() {
+        let scratch = Scratch::of("cube3d.fits", "emptied");
+        let tab = Tab::open(&scratch.0, None).unwrap();
+        let hdu = &tab.fits.hdus[tab.hdu_index];
+        let last = vec![hdu.slice_dims()[0] - 1];
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&scratch.0)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+
+        let error = tab.fits.read_plane(hdu, &last).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("has the file changed?"),
+            "{error:#}"
         );
     }
 }

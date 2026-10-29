@@ -95,6 +95,16 @@ Every tab holds its own viewer state, so zoom, stretch, colormap and slice
 position are per-file and survive switching away and back. Within a tab the
 same is true per HDU: each one keeps the view you left it at.
 
+Open files are followed on disk. When one is rewritten, its tab reloads once
+the writing has stopped for a moment. If the array's shape is unchanged —
+same image size, same slice axes — the view is kept whole: zoom, pan,
+rotation, stretch, colormap, slice position, and limits you set by hand
+(limits left on automatic re-fit to the new data, as they do across slices).
+If the shape changed, the view starts over. A file caught mid-write, or
+deleted, leaves the tab showing what it had, with the reason in the
+file-info bar, and it reloads on the next change. Files replaced by renaming
+a new one over them, as many programs save, are followed just the same.
+
 ## What it shows
 
 The same `ArrayViewerWidget` the browser and JupyterLab front-ends embed, so
@@ -102,8 +112,12 @@ pan/zoom, stretch, colormaps, the colorbar and the hover readout all behave
 identically. N-dimensional files get viewarr's per-axis slice bar with scrubbing
 and playback.
 
-Planes are read on demand from the memory-mapped file rather than loaded up
-front, so scrubbing through a cube larger than RAM works.
+Planes are read from the file on demand rather than loaded up front, so
+scrubbing through a cube larger than RAM works. They are read with ordinary
+positioned reads, not a memory map: a mapped file that another program
+empties in place crashes the reader on its next access, whereas a read just
+comes back short and the tab shows an error until the rewrite settles and
+reloads.
 
 ## Options
 
@@ -187,6 +201,10 @@ our own reading of the spec. Two hand-built fixtures cover what astropy will
 not write: `eqcomment.fits` (an `=` inside comment prose is prose, not a value
 indicator) and `orphan.fits` (a `CONTINUE` with nothing before it). `src/source.rs` holds the
 format-agnostic model the picker reads — a tree of groups and arrays, of which a FITS file is the flat case —
-and is tested against synthetic nested trees, since no source produces one yet.
+and is tested against synthetic nested trees, since no source produces one yet. Reloading is tested
+in `src/tab.rs` against scratch copies of the fixtures rewritten underneath an
+open tab — same shape, new shape, half-written, and HDUs that vanish — and
+`src/watch.rs` checks that a real rewrite is noticed by the platform's own
+watcher.
 What the tests cannot cover is the drawing itself, the native file dialog, or
 files arriving from Finder; those need a human looking at the window.

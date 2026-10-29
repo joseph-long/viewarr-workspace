@@ -677,6 +677,12 @@ impl ArrayViewerWidget {
         }
     }
 
+    /// Indices of the slice on screen, which is what a host re-reads when the
+    /// data underneath changes. Empty for a plain 2-D image.
+    pub fn displayed_indices(&self) -> &[usize] {
+        &self.displayed_indices
+    }
+
     /// Consume and return a pending slice-index request (if any) to be emitted
     /// to the host. Mirrors [`take_shift_click_event`].
     pub fn take_slice_request(&mut self) -> Option<Vec<usize>> {

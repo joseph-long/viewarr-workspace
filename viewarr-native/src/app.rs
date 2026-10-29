@@ -18,6 +18,7 @@ use egui_phosphor::regular as phosphor;
 
 use crate::source::{ArrayId, Children, Node};
 use crate::tab::Tab;
+use crate::watch::FileWatcher;
 
 /// Render one level of the picker's tree, recursing into groups.
 ///
@@ -93,6 +94,9 @@ pub struct NativeViewerApp {
     /// Why the last open attempt failed. Shown in the button bar, since at that
     /// point there may be no tab to attach it to.
     open_error: Option<String>,
+    /// Follows open files on disk so their tabs reload when they change.
+    /// Absent in tests, and wherever the platform will not provide one.
+    watcher: Option<FileWatcher>,
 }
 
 impl NativeViewerApp {
@@ -105,7 +109,10 @@ impl NativeViewerApp {
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
 
-        Self::with_tabs(tabs)
+        Self {
+            watcher: FileWatcher::new(),
+            ..Self::with_tabs(tabs)
+        }
     }
 
     /// The tab bookkeeping on its own, with no egui context — which is also
@@ -115,6 +122,7 @@ impl NativeViewerApp {
             tabs,
             active: 0,
             open_error: None,
+            watcher: None,
         }
     }
 
@@ -186,6 +194,22 @@ impl NativeViewerApp {
         for path in paths {
             self.open_path(&path, OpenMode::NewTab);
         }
+    }
+
+    /// Reload every tab whose file has changed on disk and settled, then
+    /// bring the watched folders up to date with whatever tabs are now open.
+    fn reload_changed_files(&mut self) {
+        let Some(watcher) = &mut self.watcher else {
+            return;
+        };
+        for path in watcher.settled() {
+            for tab in &mut self.tabs {
+                if tab.disk_path() == path {
+                    tab.reload();
+                }
+            }
+        }
+        watcher.follow(self.tabs.iter().map(Tab::disk_path));
     }
 
     fn close_tab(&mut self, index: usize) {
@@ -408,6 +432,7 @@ impl NativeViewerApp {
 impl eframe::App for NativeViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.open_incoming_files(ctx);
+        self.reload_changed_files();
         self.handle_shortcuts(ctx);
 
         self.show_button_bar(ctx);

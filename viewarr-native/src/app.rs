@@ -181,6 +181,7 @@ impl NativeViewerApp {
     /// onto it, or on macOS sent by Finder — each in a tab of its own, as
     /// several files named on the command line would be.
     fn open_incoming_files(&mut self, ctx: &egui::Context) {
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut paths: Vec<PathBuf> = ctx.input(|input| {
             input
                 .raw

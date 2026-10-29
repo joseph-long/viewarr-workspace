@@ -74,8 +74,10 @@ still keeps its own `pyproject.toml` and pip-installable extras for non-uv users
 A single workflow (`.github/workflows/ci.yml`) builds viewarr once, then builds and tests both
 packages against it. On a published GitHub release it publishes **both** `fitsview` and
 `pyviewarr` to PyPI — so a viewarr change ships into both packages from one release.
-The same release also gets a macOS `viewarr.app` (universal, ad-hoc signed — see
-[`viewarr-native/README.md`](viewarr-native/README.md#macos-app)) attached as a download.
+The same release also gets the native viewer attached as downloads: a macOS `viewarr.app`
+(universal, ad-hoc signed — see [`viewarr-native/README.md`](viewarr-native/README.md#macos-app))
+and portable Linux binaries for x86_64 and aarch64 (see
+[Linux](viewarr-native/README.md#linux)).
 
 > **Before the first release from this repo:** update the PyPI Trusted Publisher config for
 > both `fitsview` and `pyviewarr` to point at this repository and `ci.yml`.

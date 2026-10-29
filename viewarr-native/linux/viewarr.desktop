@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=viewarr
+GenericName=Array Viewer
+Comment=View FITS images and cubes
+Exec=viewarr %F
+Terminal=false
+Categories=Science;Astronomy;Graphics;Viewer;
+MimeType=image/fits;

@@ -428,8 +428,92 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: viewarr-app
+          name: native-macos
           path: viewarr-native/viewarr-*-macos.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Portable Linux binaries, x86_64 and aarch64, each built natively on its own
+  # architecture's runner.
+  #
+  # The build runs in a manylinux_2_28 image (AlmaLinux 8) for its old glibc:
+  # a binary only runs where glibc is at least as new as the one it was linked
+  # against, so 2.28 reaches back to RHEL 8, Debian 10 and Ubuntu 18.10. That
+  # is the only system library it links. Wayland, X11, xkbcommon and EGL/GL
+  # are all opened at runtime, so one binary serves either kind of session
+  # and runs on machines missing whichever one they do not use.
+  # ---------------------------------------------------------------------------
+  viewarr-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    container:
+      image: quay.io/pypa/manylinux_2_28_${{ matrix.arch }}
+    defaults:
+      run:
+        working-directory: viewarr-native
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        working-directory: .
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Take version from release tag
+        if: github.event_name == 'release'
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      # Run here as well as in viewarr-native: it is the only place the tests
+      # run on aarch64, and on the old glibc the binary is built against.
+      - name: Test
+        run: cargo test
+
+      - name: Build release binary
+        run: cargo build --release
+
+      # The point of this job, so it fails loudly if a dependency starts
+      # linking a display library (which would tie the binary to systems that
+      # have it) or the glibc floor creeps up.
+      - name: Check the binary is portable
+        run: |
+          set -eu
+          bin=target/release/viewarr
+          ldd "$bin"
+          if ldd "$bin" | grep -Eiq 'wayland|libX|xkbcommon|libEGL|libGL|gtk'; then
+            echo "::error::viewarr links a display library directly; it must load it at runtime"
+            exit 1
+          fi
+          newest="$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -n1)"
+          echo "Newest glibc symbol: $newest"
+          if [ "$(printf '%s\n2.28\n' "$newest" | sort -V | tail -n1)" != "2.28" ]; then
+            echo "::error::needs glibc $newest, newer than the 2.28 floor"
+            exit 1
+          fi
+          "$bin" --version
+
+      - name: Package
+        run: |
+          set -eu
+          version="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)}"
+          name="viewarr-${version}-linux-${{ matrix.arch }}"
+          mkdir -p "dist/$name"
+          cp target/release/viewarr linux/viewarr.desktop linux/install.sh "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-linux-${{ matrix.arch }}
+          path: viewarr-native/dist/*.tar.gz
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -472,9 +556,10 @@ jobs:
         with:
           skip-existing: true
 
-  # Attach viewarr.app to the GitHub release itself, next to the PyPI uploads.
-  publish-viewarr-app:
-    needs: [viewarr-native, viewarr-app]
+  # Attach the native downloads — viewarr.app and the Linux tarballs — to the
+  # GitHub release itself, next to the PyPI uploads.
+  publish-viewarr-native:
+    needs: [viewarr-native, viewarr-app, viewarr-linux]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -483,10 +568,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: viewarr-app
+          pattern: native-*
+          merge-multiple: true
           path: dist
       - run: ls -R dist
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.zip --clobber --repo "${{ github.repository }}"
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.zip dist/*.tar.gz --clobber --repo "${{ github.repository }}"

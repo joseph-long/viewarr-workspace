@@ -53,6 +53,33 @@ to open as tabs. The file types Finder will offer come from
 format needs only its reader and a document-type entry there (the plist's
 header comment covers directory formats such as Zarr).
 
+## Linux
+
+Each GitHub release has `viewarr-<version>-linux-x86_64.tar.gz` and
+`viewarr-<version>-linux-aarch64.tar.gz` attached (every CI run uploads them
+as workflow artifacts too). One binary runs on any distribution with glibc
+2.28 or newer — RHEL/Rocky/Alma 8, Debian 10, Ubuntu 18.10 and anything
+since — and needs no packages installed beyond a desktop session:
+
+```bash
+tar xzf viewarr-*-linux-x86_64.tar.gz
+cd viewarr-*-linux-x86_64
+./install.sh          # ~/.local/bin/viewarr, plus an Open With entry for FITS
+```
+
+It picks the display server itself, as winit does for any app built on it:
+Wayland when the session offers it, X11 otherwise. Neither is linked into the
+binary — both are loaded when the window opens — so it runs on machines that
+only have one of them. To use X11 (Xwayland) on a Wayland desktop, clear the
+Wayland variable:
+
+```bash
+WAYLAND_DISPLAY= viewarr image.fits
+```
+
+The file dialog goes through the XDG desktop portal, as Flatpak apps do, so
+the desktop's own dialog appears (KDE's on Plasma, GNOME's on GNOME).
+
 ## The window
 
 Chrome stacks above the image rather than floating on top of it, so the canvas

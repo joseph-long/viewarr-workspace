@@ -16,8 +16,42 @@ viewarr a.fits b.fits c.fits      # one tab each
 viewarr                           # empty window; open files from the toolbar
 ```
 
-There is no macOS app bundle yet — this is a plain CLI binary that opens a
-window.
+## macOS app
+
+The same binary also ships as `viewarr.app`, which registers itself as a
+viewer for `.fits` files: double-click one in Finder,
+pick viewarr from **Open With**, or drop files on its Dock icon. Files sent
+to an already-running viewarr open as new tabs in it, or switch to the
+file's tab if it is already open.
+
+Each GitHub release has it attached as `viewarr-<version>-macos.zip`, a
+universal build for Apple Silicon and Intel Macs running macOS 11 or later;
+every CI run uploads one as a workflow artifact too. To build it yourself:
+
+```bash
+macos/bundle.sh               # universal; needs both targets:
+                              #   rustup target add aarch64-apple-darwin x86_64-apple-darwin
+macos/bundle.sh --host-only   # just this Mac's architecture
+open target/bundle/viewarr.app
+```
+
+**It is not signed with a Developer ID**, only ad-hoc, so a copy downloaded
+from GitHub is quarantined and macOS will refuse to open it the first time.
+Either try to open it once, then go to **System Settings → Privacy & Security**
+and click **Open Anyway**, or clear the quarantine flag after unzipping:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/viewarr.app
+```
+
+A bundle you build yourself is never quarantined and opens directly.
+
+Finder does not pass files on the command line. It sends an "open documents"
+Apple Event, which `src/macos.rs` answers by queueing the paths for the app
+to open as tabs. The file types Finder will offer come from
+`macos/Info.plist`; that handler passes along whatever arrives, so a new
+format needs only its reader and a document-type entry there (the plist's
+header comment covers directory formats such as Zarr).
 
 ## The window
 
@@ -35,6 +69,9 @@ stays pure image. Each bar is subordinate to the one above:
 - **Open…** replaces the contents of the current tab. With nothing open yet, it
   opens the first one.
 - **Open in Tab** adds a tab and switches to it.
+- Files dropped onto the window open as new tabs, one each.
+- A file that already has a tab is never opened twice: any way of opening it
+  again — either button, a drop, or Finder — switches to its tab instead.
 - **Cmd+Shift+←/→** (Ctrl+Shift+←/→ off macOS) moves between tabs, wrapping at
   both ends, and **Cmd+1…9** jumps straight to one. Nine is the limit: the
   viewer uses a bare `0` to reset zoom, and a tenth tab is reachable by
@@ -151,5 +188,5 @@ not write: `eqcomment.fits` (an `=` inside comment prose is prose, not a value
 indicator) and `orphan.fits` (a `CONTINUE` with nothing before it). `src/source.rs` holds the
 format-agnostic model the picker reads — a tree of groups and arrays, of which a FITS file is the flat case —
 and is tested against synthetic nested trees, since no source produces one yet.
-What the tests cannot cover is the drawing itself or the native file dialog;
-those need a human looking at the window.
+What the tests cannot cover is the drawing itself, the native file dialog, or
+files arriving from Finder; those need a human looking at the window.

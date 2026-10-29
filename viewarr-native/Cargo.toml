@@ -32,5 +32,20 @@ memmap2 = "0.9"
 # Native file-open dialog for the toolbar's Open buttons.
 rfd = "0.15"
 
+# Finder hands documents to an app as an "open documents" Apple Event rather
+# than on argv, and winit does not answer it; src/macos.rs does. These are the
+# same objc2 releases already in the graph through rfd and arboard.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-services",
+    "NSAppleEventDescriptor",
+    "NSAppleEventManager",
+    "NSNotification",
+    "NSString",
+    "NSURL",
+] }
+
 [profile.release]
 opt-level = 2

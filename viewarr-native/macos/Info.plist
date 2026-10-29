@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for viewarr.app's Info.plist; macos/bundle.sh fills in @VERSION@.
+
+  CFBundleDocumentTypes is what lets Finder offer viewarr for a file, send it
+  on a double-click, and accept it dropped on the Dock icon. Every type listed
+  there reaches src/macos.rs as a plain path, which hands it to the app
+  unchanged, so supporting a new format is a matter of the reader plus an
+  entry here. For a directory format such as Zarr, that entry would name a
+  type declared below as conforming to public.directory (with LSTypeIsPackage
+  false, so Finder still browses into stores) rather than public.data.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>viewarr</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.joseph-long.viewarr</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>viewarr</string>
+	<key>CFBundleDisplayName</key>
+	<string>viewarr</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>FITS image</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>gov.nasa.gsfc.fits</string>
+			</array>
+		</dict>
+	</array>
+
+	<!--
+	  Imported, not exported: viewarr does not own FITS, so if another app on
+	  the machine declares this identifier, its declaration wins and ours
+	  just fills in where there is none. The identifier is the one other
+	  macOS FITS tools already use, so they agree on what a FITS file is.
+	-->
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>gov.nasa.gsfc.fits</string>
+			<key>UTTypeDescription</key>
+			<string>FITS file</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeReferenceURL</key>
+			<string>https://fits.gsfc.nasa.gov/fits_standard.html</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>fits</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/fits</string>
+					<string>image/fits</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>

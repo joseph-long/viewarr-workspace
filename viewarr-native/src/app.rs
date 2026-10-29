@@ -127,7 +127,7 @@ impl NativeViewerApp {
     fn pick_and_open(&mut self, mode: OpenMode) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Open array file")
-            .add_filter("FITS", &["fits", "fit", "fts"])
+            .add_filter("FITS", &["fits"])
             .add_filter("All files", &["*"])
             .pick_file()
         else {
@@ -137,8 +137,15 @@ impl NativeViewerApp {
     }
 
     /// Open `path`, reporting a failure in the button bar rather than closing
-    /// or disturbing whatever is already open.
+    /// or disturbing whatever is already open. A file that already has a tab
+    /// is switched to instead, whichever way it was asked for, so the same
+    /// file never ends up in two tabs with diverging views.
     fn open_path(&mut self, path: &Path, mode: OpenMode) {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.shows_file(path)) {
+            self.open_error = None;
+            self.active = index;
+            return;
+        }
         match Tab::open(path, None) {
             Ok(tab) => {
                 self.open_error = None;
@@ -159,6 +166,25 @@ impl NativeViewerApp {
                 eprintln!("viewarr: {message}");
                 self.open_error = Some(message);
             }
+        }
+    }
+
+    /// Open files that arrived from outside the window's own buttons — dropped
+    /// onto it, or on macOS sent by Finder — each in a tab of its own, as
+    /// several files named on the command line would be.
+    fn open_incoming_files(&mut self, ctx: &egui::Context) {
+        let mut paths: Vec<PathBuf> = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect()
+        });
+        #[cfg(target_os = "macos")]
+        paths.extend(crate::macos::take_opened_files());
+        for path in paths {
+            self.open_path(&path, OpenMode::NewTab);
         }
     }
 
@@ -381,6 +407,7 @@ impl NativeViewerApp {
 
 impl eframe::App for NativeViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.open_incoming_files(ctx);
         self.handle_shortcuts(ctx);
 
         self.show_button_bar(ctx);
@@ -568,6 +595,38 @@ mod tests {
         assert_eq!(app.tabs.len(), 2);
         assert_eq!(app.active, 1, "a newly opened tab becomes the active one");
         assert_eq!(app.tabs[1].title(), "cube3d.fits");
+    }
+
+    #[test]
+    fn opening_a_file_that_already_has_a_tab_selects_it() {
+        let mut app = app_with(&["image2d.fits", "cube3d.fits"]);
+        app.active = 1;
+
+        app.open_path(&fixture("image2d.fits"), OpenMode::NewTab);
+        assert_eq!(app.tabs.len(), 2, "no second tab for the same file");
+        assert_eq!(app.active, 0);
+
+        // "Open" switches too, rather than duplicating the file over the
+        // active tab.
+        app.active = 1;
+        app.open_path(&fixture("image2d.fits"), OpenMode::Replace);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 0);
+        assert_eq!(app.tabs[1].title(), "cube3d.fits", "nothing was replaced");
+    }
+
+    #[test]
+    fn the_same_file_by_another_path_is_still_the_same_file() {
+        let mut app = app_with(&["image2d.fits", "cube3d.fits"]);
+
+        let roundabout = fixture("image2d.fits")
+            .parent()
+            .unwrap()
+            .join("../data/./image2d.fits");
+        app.open_path(&roundabout, OpenMode::NewTab);
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 0);
     }
 
     #[test]

@@ -103,6 +103,18 @@ impl Tab {
         self.fits.path.display().to_string()
     }
 
+    /// Whether this tab is showing the file at `path`. Paths are compared once
+    /// resolved, so a relative path from the command line and the absolute one
+    /// Finder sends for the same file match, as do two routes through a symlink.
+    pub fn shows_file(&self, path: &Path) -> bool {
+        match (path.canonicalize(), self.fits.path.canonicalize()) {
+            (Ok(asked), Ok(ours)) => asked == ours,
+            // Gone or unreadable since it was opened: only an identical path
+            // can still be said to be the same file.
+            _ => path == self.fits.path,
+        }
+    }
+
     /// The HDU's name, as `EXTNAME` gives it (or `PRIMARY`).
     pub fn hdu_name(&self) -> &str {
         &self.fits.hdus[self.hdu_index].name

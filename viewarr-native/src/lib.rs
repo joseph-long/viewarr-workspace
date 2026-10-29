@@ -7,5 +7,7 @@
 pub mod app;
 pub mod fits;
 pub mod header;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod source;
 pub mod tab;

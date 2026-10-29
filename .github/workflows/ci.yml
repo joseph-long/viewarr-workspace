@@ -378,6 +378,61 @@ jobs:
         run: cargo build --release
 
   # ---------------------------------------------------------------------------
+  # viewarr.app — the same binary as a double-clickable macOS bundle that
+  # Finder will open FITS files with. Built universal (Apple Silicon + Intel)
+  # by viewarr-native/macos/bundle.sh, which the README points people at too,
+  # so CI and a local build cannot drift apart.
+  #
+  # Ad-hoc signed only: there is no Developer ID to sign or notarize with.
+  # ---------------------------------------------------------------------------
+  viewarr-app:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: viewarr-native
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust with both macOS targets
+        working-directory: .
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add aarch64-apple-darwin x86_64-apple-darwin
+
+      # A release reports its tag as the app version; anything else reports
+      # Cargo.toml's.
+      - name: Take version from release tag
+        if: github.event_name == 'release'
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Build viewarr.app
+        run: macos/bundle.sh
+
+      - name: Check the bundle
+        run: |
+          set -eux
+          app=target/bundle/viewarr.app
+          lipo -archs "$app/Contents/MacOS/viewarr" | grep -q arm64
+          lipo -archs "$app/Contents/MacOS/viewarr" | grep -q x86_64
+          plutil -extract CFBundleDocumentTypes.0.LSItemContentTypes.0 raw "$app/Contents/Info.plist" | grep -qx gov.nasa.gsfc.fits
+          "$app/Contents/MacOS/viewarr" --version
+
+      # ditto, not zip: it keeps the bundle's symlinks, permissions and
+      # extended attributes the way Finder's own Compress does.
+      - name: Archive viewarr.app
+        run: |
+          version="$(plutil -extract CFBundleShortVersionString raw target/bundle/viewarr.app/Contents/Info.plist)"
+          ditto -c -k --keepParent target/bundle/viewarr.app "viewarr-${version}-macos.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: viewarr-app
+          path: viewarr-native/viewarr-*-macos.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Publish BOTH packages to PyPI on a published GitHub release.
   # One release ships the freshly built viewarr into both packages.
   # ---------------------------------------------------------------------------
@@ -416,3 +471,22 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
+
+  # Attach viewarr.app to the GitHub release itself, next to the PyPI uploads.
+  publish-viewarr-app:
+    needs: [viewarr-native, viewarr-app]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    if: github.event_name == 'release' && github.event.action == 'published'
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: viewarr-app
+          path: dist
+      - run: ls -R dist
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.zip --clobber --repo "${{ github.repository }}"

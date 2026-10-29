@@ -80,6 +80,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         ..Default::default()
     };
 
+    // Files double-clicked in Finder arrive as an Apple Event once the event
+    // loop starts, not on the command line; the app picks them up from there.
+    #[cfg(target_os = "macos")]
+    viewarr_native::macos::install_open_handler();
+
     eframe::run_native(
         &title,
         options,

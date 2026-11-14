@@ -323,17 +323,19 @@ def shipped_packages(manifest, targets):
     """
     shipped = {}
     for target in targets:
-        meta = json.loads(
-            subprocess.run(
-                [
-                    "cargo", "metadata", "--format-version", "1", "--locked",
-                    "--manifest-path", str(manifest), "--filter-platform", target,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout
+        # --locked: the notices have to describe the versions Cargo.lock
+        # pins, which are the ones the release builds compile.
+        result = subprocess.run(
+            [
+                "cargo", "metadata", "--format-version", "1", "--locked",
+                "--manifest-path", str(manifest), "--filter-platform", target,
+            ],
+            capture_output=True,
+            text=True,
         )
+        if result.returncode != 0:
+            raise SystemExit(f"cargo metadata failed for {manifest.relative_to(ROOT)}:\n{result.stderr}")
+        meta = json.loads(result.stdout)
         packages = {p["id"]: p for p in meta["packages"]}
         nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
         stack, seen = [meta["resolve"]["root"]], set()

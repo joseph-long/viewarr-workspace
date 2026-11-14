@@ -83,6 +83,10 @@ const SMOOTHING_ICON_SIZE: f32 = 10.0;
 const SMOOTHING_ICON_CIRCLE_RADIUS: f32 = 7.0;
 /// FWHM offered the first time smoothing is switched on.
 const DEFAULT_SMOOTHING_FWHM: f64 = 2.0;
+/// What the image sits on and pans over: mid gray in both themes, so the
+/// image's own blacks and whites stay distinguishable from the space around
+/// it, and its colours are not judged against a theme-tinted surround.
+const CANVAS_BACKGROUND: Color32 = Color32::from_gray(128);
 /// Duration to show zoom level overlay after zooming
 const ZOOM_OVERLAY_DURATION: f64 = 0.5;
 /// Default play interval in seconds (¼ s)
@@ -1264,6 +1268,8 @@ impl ArrayViewerWidget {
             );
             return response;
         }
+
+        ui.painter_at(rect).rect_filled(rect, 0.0, CANVAS_BACKGROUND);
 
         let (img_width, img_height) = self.dimensions();
 
@@ -5253,5 +5259,41 @@ mod smoothing_tests {
                 assert!((v - 5.0).abs() < 1e-12, "pixel {i} drifted to {v}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod canvas_tests {
+    use super::*;
+
+    /// The colour the canvas is painted with, read off the first filled rect
+    /// the widget draws.
+    fn canvas_fill(dark_mode: bool) -> Option<Color32> {
+        let mut w = ArrayViewerWidget::new();
+        w.set_image(vec![0.0, 1.0, 2.0, 3.0], 2, 2, false, 6);
+        let ctx = egui::Context::default();
+        ctx.set_visuals(if dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() });
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let output = ctx.run(
+            egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+            |ctx| {
+                let frame = egui::Frame::central_panel(&ctx.style()).inner_margin(0.0);
+                egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+                    let size = ui.available_size();
+                    w.show(ui, size);
+                });
+            },
+        );
+        output.shapes.iter().find_map(|clipped| match &clipped.shape {
+            egui::Shape::Rect(r) if r.rect == screen && r.fill != Color32::TRANSPARENT
+                && r.fill != ctx.style().visuals.panel_fill => Some(r.fill),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn the_canvas_is_mid_gray_in_both_themes() {
+        assert_eq!(canvas_fill(true), Some(CANVAS_BACKGROUND));
+        assert_eq!(canvas_fill(false), Some(CANVAS_BACKGROUND));
     }
 }

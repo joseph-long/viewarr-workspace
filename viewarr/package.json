@@ -11,8 +11,8 @@
   "scripts": {
     "build:wasm": "wasm-pack build --target web --out-dir pkg -- --locked",
     "build:wasm:dev": "wasm-pack build --target web --out-dir pkg --dev",
-    "postbuild:wasm": "cp js/index.js pkg/wrapper.js && cp js/index.d.ts pkg/wrapper.d.ts && node -e \"const p=require('./pkg/package.json'); p.main='wrapper.js'; p.types='wrapper.d.ts'; p.files.push('wrapper.js','wrapper.d.ts'); require('fs').writeFileSync('./pkg/package.json', JSON.stringify(p, null, 2));\"",
-    "postbuild:wasm:dev": "cp js/index.js pkg/wrapper.js && cp js/index.d.ts pkg/wrapper.d.ts && node -e \"const p=require('./pkg/package.json'); p.main='wrapper.js'; p.types='wrapper.d.ts'; p.files.push('wrapper.js','wrapper.d.ts'); require('fs').writeFileSync('./pkg/package.json', JSON.stringify(p, null, 2));\"",
+    "postbuild:wasm": "cp js/index.js pkg/wrapper.js && cp js/index.d.ts pkg/wrapper.d.ts && cp THIRD_PARTY_LICENSES.txt pkg/ && node -e \"const p=require('./pkg/package.json'); p.main='wrapper.js'; p.types='wrapper.d.ts'; p.files.push('wrapper.js','wrapper.d.ts','THIRD_PARTY_LICENSES.txt'); require('fs').writeFileSync('./pkg/package.json', JSON.stringify(p, null, 2));\"",
+    "postbuild:wasm:dev": "cp js/index.js pkg/wrapper.js && cp js/index.d.ts pkg/wrapper.d.ts && cp THIRD_PARTY_LICENSES.txt pkg/ && node -e \"const p=require('./pkg/package.json'); p.main='wrapper.js'; p.types='wrapper.d.ts'; p.files.push('wrapper.js','wrapper.d.ts','THIRD_PARTY_LICENSES.txt'); require('fs').writeFileSync('./pkg/package.json', JSON.stringify(p, null, 2));\"",
     "build": "npm run build:wasm && npm run postbuild:wasm",
     "build:dev": "npm run build:wasm:dev && npm run postbuild:wasm:dev",
     "clean": "rm -rf pkg target"

@@ -33,6 +33,7 @@ macos/bundle.sh               # universal; needs both targets:
                               #   rustup target add aarch64-apple-darwin x86_64-apple-darwin
 macos/bundle.sh --host-only   # just this Mac's architecture
 open target/bundle/viewarr.app
+macos/bundle.sh --install     # also replace /Applications/viewarr.app
 ```
 
 **It is not signed with a Developer ID**, only ad-hoc, so a copy downloaded

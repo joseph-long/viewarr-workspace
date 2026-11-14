@@ -88,6 +88,7 @@ stays pure image. Each bar is subordinate to the one above:
 
 ```
 ┌ button bar ───────── Open… / Open in Tab — act on whichever tab is active
+│                      (not on macOS, where they are in the File menu)
 ├ tab bar ──────────── which files are open
 ├ file info ────────── name · HDU picker · shape · type · header, for the active tab
 ├ slice controls ───── only for files with sliceable axes
@@ -96,14 +97,23 @@ stays pure image. Each bar is subordinate to the one above:
 
 - **Open…** replaces the contents of the current tab. With nothing open yet, it
   opens the first one.
-- **Open in Tab** adds a tab and switches to it.
+- **Open in Tab** adds a tab and switches to it, as does **+** at the end of
+  the tab bar.
+- Middle-clicking a tab closes it.
 - Files dropped onto the window open as new tabs, one each.
 - A file that already has a tab is never opened twice: any way of opening it
-  again — either button, a drop, or Finder — switches to its tab instead.
+  again — a button, the menu, a drop, or Finder — switches to its tab instead.
 - **Cmd+Shift+←/→** (Ctrl+Shift+←/→ off macOS) moves between tabs, wrapping at
   both ends, and **Cmd+1…9** jumps straight to one. Nine is the limit: the
   viewer uses a bare `0` to reset zoom, and a tenth tab is reachable by
-  stepping or clicking. **✕** on a tab closes it.
+  stepping or clicking. **✕** on a tab closes it, as does **Cmd+W** (Ctrl+W)
+  for the current tab; with no tabs left, the empty window stays open until
+  you quit. **Cmd+O** and **Cmd+T** (Ctrl+O, Ctrl+T) are **Open…** and
+  **Open in Tab…**.
+- On macOS those commands also live in the menu bar's **File** menu, and a
+  **Window** menu has **Minimize** (Cmd+M), **Zoom** and the list of open
+  windows. **Close** (Cmd+W) closes a header window when one is in front,
+  rather than the tab behind it.
 - The **HDU** in the file-info bar is a picker whenever the file holds more
   than one HDU. It lists every HDU with its shape and type; ones this build
   cannot display are greyed out with the reason on hover, so a file whose image

@@ -34,10 +34,18 @@ rfd = "0.15"
 notify = "8"
 
 # Finder hands documents to an app as an "open documents" Apple Event rather
-# than on argv, and winit does not answer it; src/macos.rs does. These are the
-# same objc2 releases already in the graph through rfd and arboard.
+# than on argv, and winit does not answer it; src/macos.rs does, and also adds
+# the File and Window menus to the menu bar winit sets up. These are the same
+# objc2 releases already in the graph through rfd and arboard.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "objc2-core-services",

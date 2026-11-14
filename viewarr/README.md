@@ -6,6 +6,7 @@ An array/image viewer built with Rust, WebAssembly, and egui.
 
 - Re-stretches images with linear, log, or symmetric linear scales
 - Adjusts contrast and bias interactively by right-clicking and dragging
+- Optionally smooths the displayed image with a Gaussian kernel of a chosen FWHM (hover values stay raw)
 - Shows original pixel values on hover
 - Supports multiple independent viewer instances per page
 - Accepts all JavaScript TypedArray types (Int8, Uint8, Int16, Uint16, Int32, Uint32, BigInt64, BigUint64, Float32, Float64), carried internally as `f64` to match JavaScript's own number type — exact for every type above except BigInt64/BigUint64 past ±2^53

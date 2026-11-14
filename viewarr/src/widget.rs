@@ -61,6 +61,18 @@ const COLORBAR_BOX_OUTER_W: f32 = COLORBAR_BOX_WIDTH + 14.0;
 /// A full turn costs about a screen-height of travel, which leaves fine angles
 /// reachable without making a half-turn a marathon.
 const ROTATION_DRAG_DEG_PER_POINT: f32 = 0.5;
+/// FWHM of a Gaussian in units of its sigma, 2·sqrt(2·ln 2).
+const FWHM_PER_SIGMA: f64 = 2.354_820_045_030_949;
+/// How many sigmas out the smoothing kernel reaches before it is cut off.
+/// Matches scipy's `gaussian_filter` default, so the two agree on an image.
+const SMOOTHING_TRUNCATE_SIGMAS: f64 = 4.0;
+/// Size of the asterisk inside the smoothing toggle's ⊛, shrunk from the
+/// body size so the circle drawn around it fits the toolbar row.
+const SMOOTHING_ICON_SIZE: f32 = 10.0;
+/// Radius of the circle drawn around that asterisk.
+const SMOOTHING_ICON_CIRCLE_RADIUS: f32 = 7.0;
+/// FWHM offered the first time smoothing is switched on.
+const DEFAULT_SMOOTHING_FWHM: f64 = 2.0;
 /// Duration to show zoom level overlay after zooming
 const ZOOM_OVERLAY_DURATION: f64 = 0.5;
 /// Default play interval in seconds (¼ s)
@@ -97,6 +109,9 @@ enum StretchAction {
     SetDiverging,
     SetColormap(Colormap),
     ToggleReverse,
+    ToggleSmoothing,
+    SetSmoothingFwhm(f64),
+    ClearSmoothing,
 }
 
 /// Actions returned from the slice / play controls overlay
@@ -249,6 +264,21 @@ pub struct ArrayViewerWidget {
     /// Keep current display limits when loading new arrays.
     colorbar_locked: bool,
 
+    // === Smoothing ===
+    /// Whether the displayed image is smoothed with a Gaussian kernel.
+    smoothing_enabled: bool,
+    /// Kernel FWHM in pixels; remembered while smoothing is off.
+    smoothing_fwhm: f64,
+    /// Text in the FWHM input box (may differ from the value while editing).
+    smoothing_input_text: String,
+    /// Smoothed copy of `pixels`, drawn in their place.
+    ///
+    /// Display only: hover values, auto limits and the histogram all keep
+    /// reading the raw data. `Some` only while smoothing is on and the cache
+    /// matches the current pixels and FWHM; anything that changes either drops
+    /// it, and the next texture rebuild recomputes it.
+    smoothed_pixels: Option<Vec<f64>>,
+
     // === Rendering state ===
     /// Flag indicating texture needs rebuild
     texture_dirty: bool,
@@ -390,6 +420,10 @@ impl ArrayViewerWidget {
             symmetric_mode: false,
             colormap_reversed: false,
             colorbar_locked: false,
+            smoothing_enabled: false,
+            smoothing_fwhm: DEFAULT_SMOOTHING_FWHM,
+            smoothing_input_text: format_smoothing_fwhm(DEFAULT_SMOOTHING_FWHM),
+            smoothed_pixels: None,
             texture_dirty: false,
             hover_info: None,
             texture: None,
@@ -439,6 +473,7 @@ impl ArrayViewerWidget {
         self.height = height;
         // New pixels, so the cached histogram describes the wrong image.
         self.colorbar_histogram = None;
+        self.smoothed_pixels = None;
         if !self.colorbar_locked {
             self.apply_limits(computed_min_val, computed_max_val, true);
         }
@@ -978,6 +1013,40 @@ impl ArrayViewerWidget {
     }
 
     // =========================================================================
+    // Smoothing API
+    // =========================================================================
+
+    /// The smoothing FWHM in pixels, or `None` when the image is shown as-is.
+    pub fn smoothing_fwhm(&self) -> Option<f64> {
+        self.smoothing_enabled.then_some(self.smoothing_fwhm)
+    }
+
+    /// Turn Gaussian smoothing on or off, keeping the current FWHM.
+    pub fn set_smoothing_enabled(&mut self, enabled: bool) {
+        if self.smoothing_enabled != enabled {
+            self.smoothing_enabled = enabled;
+            self.smoothed_pixels = None;
+            self.texture_dirty = true;
+        }
+    }
+
+    /// Set the smoothing kernel's FWHM in pixels. Values that are not finite
+    /// and positive are ignored. Does not by itself turn smoothing on.
+    pub fn set_smoothing_fwhm(&mut self, fwhm: f64) {
+        if !(fwhm.is_finite() && fwhm > 0.0) {
+            return;
+        }
+        self.smoothing_input_text = format_smoothing_fwhm(fwhm);
+        if self.smoothing_fwhm != fwhm {
+            self.smoothing_fwhm = fwhm;
+            self.smoothed_pixels = None;
+            if self.smoothing_enabled {
+                self.texture_dirty = true;
+            }
+        }
+    }
+
+    // =========================================================================
     // Internal helpers
     // =========================================================================
 
@@ -1078,7 +1147,7 @@ impl ArrayViewerWidget {
 
     /// Build a ColorImage from the current pixel data using colormap
     fn build_color_image(&self) -> Option<ColorImage> {
-        let pixels = self.pixels.as_ref()?;
+        let pixels = self.smoothed_pixels.as_ref().or(self.pixels.as_ref())?;
 
         let (scale_min, scale_max) = self.scaling_range();
         let cb = self.current_contrast_bias();
@@ -1106,6 +1175,17 @@ impl ArrayViewerWidget {
 
     /// Rebuild the main image texture
     fn rebuild_texture(&mut self, ctx: &egui::Context) {
+        if self.smoothing_enabled && self.smoothed_pixels.is_none() {
+            if let Some(pixels) = self.pixels.as_deref() {
+                let sigma = self.smoothing_fwhm / FWHM_PER_SIGMA;
+                self.smoothed_pixels = Some(gaussian_smooth(
+                    pixels,
+                    self.width as usize,
+                    self.height as usize,
+                    sigma,
+                ));
+            }
+        }
         if let Some(color_image) = self.build_color_image() {
             self.texture = Some(ctx.load_texture(
                 "image",
@@ -1409,7 +1489,14 @@ impl ArrayViewerWidget {
 
         self.apply_zoom_action(control_action, viewport_center);
 
-        match stretch_action {
+        self.apply_stretch_action(stretch_action);
+
+        response
+    }
+
+    /// Apply an action collected from the stretch/colormap/smoothing row.
+    fn apply_stretch_action(&mut self, action: StretchAction) {
+        match action {
             StretchAction::None => {}
             StretchAction::SetLinear => {
                 self.set_symmetric(false);
@@ -1425,9 +1512,22 @@ impl ArrayViewerWidget {
             }
             StretchAction::SetColormap(cmap) => self.set_colormap(cmap),
             StretchAction::ToggleReverse => self.toggle_reverse(),
+            StretchAction::ToggleSmoothing => {
+                self.set_smoothing_enabled(!self.smoothing_enabled)
+            }
+            StretchAction::SetSmoothingFwhm(fwhm) => {
+                // Typing a width is a request to see it, so it switches
+                // smoothing on rather than silently waiting for the toggle.
+                self.set_smoothing_fwhm(fwhm);
+                self.set_smoothing_enabled(true);
+            }
+            StretchAction::ClearSmoothing => {
+                // The 0 that asked for this is not a usable width, so the box
+                // goes back to the default ready for the next time.
+                self.set_smoothing_enabled(false);
+                self.set_smoothing_fwhm(DEFAULT_SMOOTHING_FWHM);
+            }
         }
-
-        response
     }
 
     /// Apply an action collected from the zoom/rotation control row.
@@ -1725,7 +1825,7 @@ impl ArrayViewerWidget {
 
     /// Render stretch controls at top-right of widget.
     /// Returns an action to be applied after rendering.
-    fn render_stretch_controls(&self, ctx: &egui::Context, widget_rect: egui::Rect) -> StretchAction {
+    fn render_stretch_controls(&mut self, ctx: &egui::Context, widget_rect: egui::Rect) -> StretchAction {
         let margin = 10.0;
 
         let mut action = StretchAction::None;
@@ -1746,6 +1846,51 @@ impl ArrayViewerWidget {
 
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
+
+                    // Smoothing group: a toggle and the FWHM box, both always
+                    // shown so the row does not shift as smoothing turns on/off
+                    frame_style.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            // ⊛, the convolution operator. Phosphor has no
+                            // circled asterisk, so the circle is painted around
+                            // a shrunken ASTERISK to keep the icon set's weight.
+                            let smooth_label = egui::RichText::new(phosphor::ASTERISK)
+                                .size(SMOOTHING_ICON_SIZE)
+                                .color(text_color);
+                            let smooth_response = ui
+                                .selectable_label(self.smoothing_enabled, smooth_label)
+                                .on_hover_text("Gaussian smoothing (display only; hover values stay raw)");
+                            ui.painter().circle_stroke(
+                                smooth_response.rect.center(),
+                                SMOOTHING_ICON_CIRCLE_RADIUS,
+                                egui::Stroke::new(1.0_f32, text_color),
+                            );
+                            if smooth_response.clicked() {
+                                action = StretchAction::ToggleSmoothing;
+                            }
+                            let text_edit = egui::TextEdit::singleline(&mut self.smoothing_input_text)
+                                .desired_width(36.0)
+                                .horizontal_align(egui::Align::Center);
+                            let response = ui.add(text_edit);
+                            // Applied on commit rather than per keystroke:
+                            // each change is a full pass over the image.
+                            if response.lost_focus() {
+                                action = smoothing_commit_action(
+                                    &self.smoothing_input_text,
+                                    self.smoothing_fwhm,
+                                );
+                                if action == StretchAction::None {
+                                    self.smoothing_input_text =
+                                        format_smoothing_fwhm(self.smoothing_fwhm);
+                                }
+                            }
+                            response.on_hover_text(format!(
+                                "Kernel FWHM in pixels (σ = {:.3} px); entering a new width turns smoothing on, 0 turns it off",
+                                self.smoothing_fwhm / FWHM_PER_SIGMA
+                            ));
+                            ui.label(egui::RichText::new("px").color(text_color));
+                        });
+                    });
 
                     // Colormaps group with Rev toggle
                     frame_style.show(ui, |ui| {
@@ -3111,6 +3256,100 @@ fn overlay_frame(ui: &Ui) -> egui::Frame {
         .fill(bg)
         .corner_radius(4.0)
         .inner_margin(egui::Margin::symmetric(6, 4))
+}
+
+/// Format a smoothing FWHM for its input box, without trailing zeros.
+fn format_smoothing_fwhm(fwhm: f64) -> String {
+    let text = format!("{:.2}", fwhm);
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// What committing the FWHM box should do, given its text and the width
+/// currently in effect.
+///
+/// A new positive width sets it (and turns smoothing on); 0 turns smoothing
+/// off. Anything else -- including the same width, which is what a click into
+/// the box and back out leaves behind -- is [`StretchAction::None`], so merely
+/// passing through the box never flips the toggle.
+fn smoothing_commit_action(text: &str, current_fwhm: f64) -> StretchAction {
+    match text.trim().parse::<f64>() {
+        Ok(fwhm) if fwhm == 0.0 => StretchAction::ClearSmoothing,
+        Ok(fwhm) if fwhm.is_finite() && fwhm > 0.0 && fwhm != current_fwhm => {
+            StretchAction::SetSmoothingFwhm(fwhm)
+        }
+        _ => StretchAction::None,
+    }
+}
+
+/// Blur a row-major `width` × `height` image with a Gaussian of the given
+/// sigma (in pixels), truncated at [`SMOOTHING_TRUNCATE_SIGMAS`].
+///
+/// Non-finite pixels are treated as missing: they contribute nothing, and
+/// each output is divided by the kernel weight that actually landed on data.
+/// The same renormalisation handles the image border, so neither masked
+/// regions nor edges drag their surroundings toward zero. Missing pixels stay
+/// missing in the output rather than being filled in.
+///
+/// The kernel is separable, and so is the weight mask's contribution, so both
+/// the weighted sum and the weight total are built from two 1-D passes.
+fn gaussian_smooth(pixels: &[f64], width: usize, height: usize, sigma: f64) -> Vec<f64> {
+    let radius = (SMOOTHING_TRUNCATE_SIGMAS * sigma).ceil().max(1.0) as usize;
+    let kernel: Vec<f64> = (0..=radius)
+        .map(|d| (-0.5 * (d as f64 / sigma).powi(2)).exp())
+        .collect();
+
+    // Horizontal pass: weighted sums and weight totals along each row.
+    let mut row_sum = vec![0.0; pixels.len()];
+    let mut row_weight = vec![0.0; pixels.len()];
+    for y in 0..height {
+        let row = &pixels[y * width..(y + 1) * width];
+        for x in 0..width {
+            let (mut sum, mut weight) = (0.0, 0.0);
+            for sx in x.saturating_sub(radius)..(x + radius + 1).min(width) {
+                let v = row[sx];
+                if v.is_finite() {
+                    let k = kernel[sx.abs_diff(x)];
+                    sum += k * v;
+                    weight += k;
+                }
+            }
+            row_sum[y * width + x] = sum;
+            row_weight[y * width + x] = weight;
+        }
+    }
+
+    // Vertical pass over both, then normalise. Accumulated a whole row at a
+    // time so memory is walked in order rather than down columns.
+    let mut out = vec![0.0; pixels.len()];
+    let mut sum = vec![0.0; width];
+    let mut weight = vec![0.0; width];
+    for y in 0..height {
+        sum.fill(0.0);
+        weight.fill(0.0);
+        for sy in y.saturating_sub(radius)..(y + radius + 1).min(height) {
+            let k = kernel[sy.abs_diff(y)];
+            let src = sy * width..(sy + 1) * width;
+            for ((s, w), (rs, rw)) in sum
+                .iter_mut()
+                .zip(weight.iter_mut())
+                .zip(row_sum[src.clone()].iter().zip(&row_weight[src]))
+            {
+                *s += k * rs;
+                *w += k * rw;
+            }
+        }
+        for x in 0..width {
+            let idx = y * width + x;
+            // A finite centre pixel always carries weight, so the division
+            // is safe wherever it happens.
+            out[idx] = if pixels[idx].is_finite() {
+                sum[x] / weight[x]
+            } else {
+                pixels[idx]
+            };
+        }
+    }
+    out
 }
 
 /// Format zoom level as a nice multiple string with consistent decimal places
@@ -4678,5 +4917,138 @@ mod scroll_zoom_tests {
             "the second notch, under the readout, did not zoom ({after_first} -> {})",
             w.zoom_level()
         );
+    }
+}
+
+#[cfg(test)]
+mod smoothing_tests {
+    use super::*;
+
+    #[test]
+    fn smoothing_is_off_by_default_and_draws_the_raw_pixels() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_image(vec![0.0, 0.0, 9.0, 0.0, 0.0], 5, 1, false, 6);
+        assert_eq!(w.smoothing_fwhm(), None);
+        let ctx = egui::Context::default();
+        w.rebuild_texture(&ctx);
+        assert!(w.smoothed_pixels.is_none());
+    }
+
+    #[test]
+    fn enabling_smoothing_draws_a_blurred_copy_and_leaves_hover_raw() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_image(vec![0.0, 0.0, 9.0, 0.0, 0.0], 5, 1, false, 6);
+        w.set_smoothing_fwhm(2.0);
+        w.set_smoothing_enabled(true);
+        assert_eq!(w.smoothing_fwhm(), Some(2.0));
+        let ctx = egui::Context::default();
+        w.rebuild_texture(&ctx);
+        let smoothed = w.smoothed_pixels.as_ref().expect("smoothed on rebuild");
+        assert!(smoothed[2] < 9.0 && smoothed[1] > 0.0);
+        assert_eq!(w.get_pixel_value(2, 0), Some(9.0));
+        assert_eq!(w.value_range(), (0.0, 9.0));
+    }
+
+    #[test]
+    fn new_pixels_or_a_new_fwhm_drop_the_cached_blur() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_image(vec![1.0; 4], 2, 2, false, 6);
+        w.set_smoothing_enabled(true);
+        let ctx = egui::Context::default();
+        w.rebuild_texture(&ctx);
+        assert!(w.smoothed_pixels.is_some());
+
+        w.set_smoothing_fwhm(3.0);
+        assert!(w.smoothed_pixels.is_none() && w.texture_dirty);
+        w.rebuild_texture(&ctx);
+
+        w.set_image(vec![2.0; 4], 2, 2, false, 6);
+        assert!(w.smoothed_pixels.is_none());
+    }
+
+    #[test]
+    fn committing_a_width_turns_smoothing_on() {
+        let mut w = ArrayViewerWidget::new();
+        w.apply_stretch_action(StretchAction::SetSmoothingFwhm(3.0));
+        assert_eq!(w.smoothing_fwhm(), Some(3.0));
+
+        // Toggling off keeps the width in the box.
+        w.apply_stretch_action(StretchAction::ToggleSmoothing);
+        assert_eq!(w.smoothing_fwhm(), None);
+        assert_eq!(w.smoothing_input_text, "3");
+    }
+
+    #[test]
+    fn leaving_the_box_unchanged_does_not_touch_the_toggle() {
+        assert_eq!(smoothing_commit_action("2", 2.0), StretchAction::None);
+        assert_eq!(smoothing_commit_action(" 2.00 ", 2.0), StretchAction::None);
+        assert_eq!(
+            smoothing_commit_action("1.5", 2.0),
+            StretchAction::SetSmoothingFwhm(1.5)
+        );
+    }
+
+    #[test]
+    fn entering_zero_turns_smoothing_off_and_restores_the_default_width() {
+        let mut w = ArrayViewerWidget::new();
+        w.apply_stretch_action(StretchAction::SetSmoothingFwhm(5.0));
+        assert_eq!(smoothing_commit_action("0", 5.0), StretchAction::ClearSmoothing);
+        w.smoothing_input_text = "0".to_string();
+        w.apply_stretch_action(StretchAction::ClearSmoothing);
+        assert_eq!(w.smoothing_fwhm(), None);
+        assert_eq!(w.smoothing_fwhm, DEFAULT_SMOOTHING_FWHM);
+        assert_eq!(w.smoothing_input_text, format_smoothing_fwhm(DEFAULT_SMOOTHING_FWHM));
+    }
+
+    #[test]
+    fn invalid_fwhm_is_ignored() {
+        let mut w = ArrayViewerWidget::new();
+        w.set_smoothing_fwhm(0.0);
+        w.set_smoothing_fwhm(-1.0);
+        w.set_smoothing_fwhm(f64::NAN);
+        assert_eq!(w.smoothing_fwhm, DEFAULT_SMOOTHING_FWHM);
+        assert_eq!(smoothing_commit_action("-1", 2.0), StretchAction::None);
+        assert_eq!(smoothing_commit_action("abc", 2.0), StretchAction::None);
+        assert_eq!(smoothing_commit_action("inf", 2.0), StretchAction::None);
+        assert_eq!(format_smoothing_fwhm(2.0), "2");
+        assert_eq!(format_smoothing_fwhm(2.5), "2.5");
+    }
+
+    #[test]
+    fn blur_conserves_flux_away_from_the_edges() {
+        let (w, h) = (31, 31);
+        let mut pixels = vec![0.0; w * h];
+        pixels[15 * w + 15] = 1.0;
+        let out = gaussian_smooth(&pixels, w, h, 2.0);
+        let total: f64 = out.iter().sum();
+        assert!((total - 1.0).abs() < 1e-6, "total {total}");
+        // Symmetric about the source.
+        assert!((out[15 * w + 13] - out[15 * w + 17]).abs() < 1e-15);
+        assert!((out[13 * w + 15] - out[15 * w + 13]).abs() < 1e-15);
+    }
+
+    #[test]
+    fn fwhm_converts_to_the_matching_sigma() {
+        // A point source blurred with FWHM f falls to half its peak f/2 away.
+        let n = 201;
+        let mut pixels = vec![0.0; n];
+        pixels[100] = 1.0;
+        let fwhm = 10.0;
+        let out = gaussian_smooth(&pixels, n, 1, fwhm / FWHM_PER_SIGMA);
+        assert!((out[105] / out[100] - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn flat_images_stay_flat_at_the_edges_and_around_nans() {
+        let mut pixels = vec![5.0; 7 * 5];
+        pixels[2 * 7 + 3] = f64::NAN;
+        let out = gaussian_smooth(&pixels, 7, 5, 1.5);
+        for (i, v) in out.iter().enumerate() {
+            if i == 2 * 7 + 3 {
+                assert!(v.is_nan(), "masked pixel should stay masked");
+            } else {
+                assert!((v - 5.0).abs() < 1e-12, "pixel {i} drifted to {v}");
+            }
+        }
     }
 }

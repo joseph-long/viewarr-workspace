@@ -57,10 +57,20 @@ const COLORBAR_BOX_WIDTH: f32 = 70.0;
 /// The box's full footprint including the text edit's own margins, used to
 /// decide when the pointer counts as being on the colorbar.
 const COLORBAR_BOX_OUTER_W: f32 = COLORBAR_BOX_WIDTH + 14.0;
-/// Degrees of rotation per point of vertical drag on the rotation grip.
-/// A full turn costs about a screen-height of travel, which leaves fine angles
-/// reachable without making a half-turn a marathon.
-const ROTATION_DRAG_DEG_PER_POINT: f32 = 0.5;
+/// Length of the rotation slider's track, which spans -180° to 180°.
+/// At 1.5° per point, fine angles are still reachable by hand; the text box
+/// is there for exact ones.
+const ROTATION_SLIDER_TRACK_W: f32 = 240.0;
+/// Radius of the rotation slider's handle.
+const ROTATION_SLIDER_HANDLE_R: f32 = 6.0;
+/// How close, in points, the handle must come to a multiple of 90° to snap.
+const ROTATION_SLIDER_SNAP_PT: f32 = 6.0;
+/// Space between an end label of the rotation slider and its container.
+const ROTATION_SLIDER_LABEL_MARGIN: f32 = 3.0;
+/// Font size of the rotation slider's tick labels.
+const ROTATION_SLIDER_LABEL_SIZE: f32 = 10.0;
+/// Gap between the bottom toolbar and the slider popped up above it.
+const ROTATION_SLIDER_GAP: f32 = 4.0;
 /// FWHM of a Gaussian in units of its sigma, 2·sqrt(2·ln 2).
 const FWHM_PER_SIGMA: f64 = 2.354_820_045_030_949;
 /// How many sigmas out the smoothing kernel reaches before it is cut off.
@@ -95,6 +105,7 @@ enum ZoomAction {
     Reset,
     ResetRotation,
     RotateBy(f32),        // Rotate by delta degrees
+    SetRotation(f32),     // Rotate to an absolute angle (any value; wrapped)
     TogglePivotMarker,    // Toggle pivot marker visibility
     ResetPivot,           // Reset pivot to image center
     CenterOnPoint(f32, f32), // Center view on image point (x, y)
@@ -233,6 +244,20 @@ pub struct ArrayViewerWidget {
     rotation_input_text: String,
     /// Whether the rotation input field is currently focused
     rotation_input_focused: bool,
+    /// Screen rect of the toolbar's rotation buttons and angle box, whose
+    /// hover reveals the rotation slider.
+    rotation_section_rect: egui::Rect,
+    /// Screen x of the angle box's centre, which the slider's 0° sits over.
+    rotation_input_center_x: f32,
+    /// Whether the rotation slider was showing last frame.
+    rotation_slider_open: bool,
+    /// While the slider handle is dragged, the handle's offset from the
+    /// pointer in points. `Some` doubles as "a drag is in progress".
+    rotation_slider_grab: Option<f32>,
+    /// The angle the handle shows during a drag, *not* wrapped into
+    /// -180..180: dragging past an end carries the handle off the track, and
+    /// only the rotation actually applied is wrapped.
+    rotation_slider_angle: f32,
 
     // === Colorbar UI state ===
     /// Text buffer for min limit input (only applied on enter/defocus)
@@ -408,6 +433,11 @@ impl ArrayViewerWidget {
             transform: ViewTransform::new(),
             rotation_input_text: "0".to_string(),
             rotation_input_focused: false,
+            rotation_section_rect: egui::Rect::NOTHING,
+            rotation_input_center_x: 0.0,
+            rotation_slider_open: false,
+            rotation_slider_grab: None,
+            rotation_slider_angle: 0.0,
             min_limit_input_text: "0".to_string(),
             max_limit_input_text: "1".to_string(),
             stretch_type: StretchType::default(),
@@ -1556,6 +1586,12 @@ impl ArrayViewerWidget {
                 self.rotation_input_text = format!("{:.1}", self.transform.rotation());
             }
         }
+        ZoomAction::SetRotation(degrees) => {
+            self.transform.set_rotation(degrees);
+            if !self.rotation_input_focused {
+                self.rotation_input_text = format!("{:.1}", self.transform.rotation());
+            }
+        }
         ZoomAction::TogglePivotMarker => {
             self.transform.show_pivot_marker = !self.transform.show_pivot_marker;
         }
@@ -1653,7 +1689,7 @@ impl ArrayViewerWidget {
 
     /// Render bottom controls (rotation + zoom) as one container at bottom-right.
     /// Returns an action to be applied after rendering.
-    fn render_zoom_controls(&mut self, ctx: &egui::Context, _viewport_center: egui::Pos2, _widget_rect: egui::Rect) -> (ZoomAction, egui::Rect) {
+    fn render_zoom_controls(&mut self, ctx: &egui::Context, _viewport_center: egui::Pos2, widget_rect: egui::Rect) -> (ZoomAction, egui::Rect) {
         let button_size = egui::vec2(28.0, 28.0);
         let small_button_size = egui::vec2(24.0, 28.0);
         let margin = 10.0;
@@ -1714,6 +1750,7 @@ impl ArrayViewerWidget {
                             })
                         ).fill(Color32::TRANSPARENT);
                         let reset_rotation_response = ui.add_sized(small_button_size, reset_rotation_btn);
+                        let mut rotation_section = reset_rotation_response.rect;
                         if !rotation_zero && reset_rotation_response.clicked() {
                             action = ZoomAction::ResetRotation;
                         }
@@ -1726,7 +1763,9 @@ impl ArrayViewerWidget {
                         let ccw_btn = egui::Button::new(
                             egui::RichText::new(phosphor::ARROW_COUNTER_CLOCKWISE).color(text_color)
                         ).fill(Color32::TRANSPARENT);
-                        if ui.add_sized(small_button_size, ccw_btn).on_hover_text("Rotate 15° CCW").clicked() {
+                        let ccw_response = ui.add_sized(small_button_size, ccw_btn);
+                        rotation_section = rotation_section.union(ccw_response.rect);
+                        if ccw_response.on_hover_text("Rotate 15° CCW").clicked() {
                             action = ZoomAction::RotateBy(transform::ROTATION_STEP);
                         }
 
@@ -1735,6 +1774,8 @@ impl ArrayViewerWidget {
                             .horizontal_align(egui::Align::Center)
                             .font(egui::FontId::proportional(14.0));
                         let response = ui.add(text_edit);
+                        self.rotation_input_center_x = response.rect.center().x;
+                        rotation_section = rotation_section.union(response.rect);
 
                         if response.gained_focus() {
                             self.rotation_input_focused = true;
@@ -1755,38 +1796,17 @@ impl ArrayViewerWidget {
                         let cw_btn = egui::Button::new(
                             egui::RichText::new(phosphor::ARROW_CLOCKWISE).color(text_color)
                         ).fill(Color32::TRANSPARENT);
-                        if ui.add_sized(small_button_size, cw_btn).on_hover_text("Rotate 15° CW").clicked() {
+                        let cw_response = ui.add_sized(small_button_size, cw_btn);
+                        rotation_section = rotation_section.union(cw_response.rect);
+                        if cw_response.on_hover_text("Rotate 15° CW").clicked() {
                             action = ZoomAction::RotateBy(-transform::ROTATION_STEP);
                         }
-
-                        // Continuous rotation, for angles the 15° steps cannot
-                        // reach. Vertical drag rather than horizontal: the row
-                        // is a horizontal strip, so sideways travel would run
-                        // straight into its neighbours after a few degrees.
-                        let (grip_rect, grip_response) =
-                            ui.allocate_exact_size(small_button_size, egui::Sense::drag());
-                        let grip_color = if grip_response.dragged() {
-                            text_color
-                        } else if grip_response.hovered() {
-                            text_color
-                        } else {
-                            text_color.gamma_multiply(0.6)
-                        };
-                        paint_grip_lines(ui.painter(), grip_rect, grip_color);
-                        if grip_response.dragged() {
-                            let dy = grip_response.drag_delta().y;
-                            if dy != 0.0 {
-                                // Screen y grows downward and rotation is
-                                // counter-clockwise-positive, so dragging up
-                                // has to turn the image left.
-                                action = ZoomAction::RotateBy(
-                                    -dy * ROTATION_DRAG_DEG_PER_POINT,
-                                );
-                            }
-                        }
-                        grip_response
-                            .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-                            .on_hover_text("Drag up/down to rotate left/right");
+                        // Hovering anywhere on these, gaps included, reveals
+                        // the rotation slider. Collected from the widgets'
+                        // own rects rather than by nesting them in a child
+                        // `horizontal`, whose shorter default row height
+                        // would knock them off the toolbar's centreline.
+                        self.rotation_section_rect = rotation_section;
 
                         ui.separator();
 
@@ -1820,7 +1840,152 @@ impl ArrayViewerWidget {
                 });
             });
 
-        (action, area_response.response.rect)
+        let toolbar_rect = area_response.response.rect;
+        if let Some(slider_action) = self.render_rotation_slider(ctx, toolbar_rect, widget_rect) {
+            action = slider_action;
+        }
+
+        (action, toolbar_rect)
+    }
+
+    /// Pop a -180°..180° rotation slider up above the toolbar's rotation
+    /// buttons while the pointer is on them, on the slider, or dragging it.
+    ///
+    /// Positive angles lie to the left, matching astronomy's east-of-north
+    /// convention and the toolbar, whose left-hand button turns CCW. The
+    /// slider is centred so that 0° sits over the angle box.
+    ///
+    /// The handle snaps to multiples of 90°. Dragging past either end carries
+    /// the handle on off the track rather than pinning it, so a turn can keep
+    /// going through ±180°; the rotation applied is always wrapped back into
+    /// range, and the handle returns there when released.
+    fn render_rotation_slider(
+        &mut self,
+        ctx: &egui::Context,
+        toolbar_rect: egui::Rect,
+        widget_rect: egui::Rect,
+    ) -> Option<ZoomAction> {
+        let id = egui::Id::new("rotation_slider");
+        let section = self.rotation_section_rect;
+        // Last frame's slider counts as part of the hover zone only if it was
+        // actually showing, and so does the gap between it and the toolbar --
+        // otherwise the slider would vanish as the pointer crossed over to it.
+        let zone = match ctx.memory(|m| m.area_rect(id)) {
+            Some(slider) if self.rotation_slider_open => section.union(slider),
+            _ => section,
+        };
+        let (pointer, held_from) = ctx.input(|i| {
+            (i.pointer.hover_pos(), i.pointer.primary_down().then(|| i.pointer.press_origin()).flatten())
+        });
+        // A press made in the zone holds the slider open too: egui only
+        // reports a drag once the pointer has moved, and a quick flick can
+        // carry it out of the zone in that same frame.
+        self.rotation_slider_open = section.is_positive()
+            && (self.rotation_slider_grab.is_some()
+                || pointer.is_some_and(|p| zone.contains(p))
+                || held_from.is_some_and(|p| zone.contains(p)));
+        if !self.rotation_slider_open {
+            return None;
+        }
+
+        let mut action = None;
+        egui::Area::new(id)
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .fixed_pos(egui::pos2(self.rotation_input_center_x, toolbar_rect.top() - ROTATION_SLIDER_GAP))
+            .constrain_to(widget_rect)
+            .show(ctx, |ui| {
+                let text_color = get_overlay_text_color(ui);
+                overlay_frame(ui).show(ui, |ui| {
+                    let label_font = egui::FontId::proportional(ROTATION_SLIDER_LABEL_SIZE);
+                    // The end labels are centred on the track's ends, so the
+                    // track is inset by half the wider one plus a margin.
+                    let end_label_w = ["180°", "-180°"]
+                        .iter()
+                        .map(|t| {
+                            ui.painter()
+                                .layout_no_wrap(t.to_string(), label_font.clone(), text_color)
+                                .size()
+                                .x
+                        })
+                        .fold(0.0_f32, f32::max);
+                    let inset = (end_label_w / 2.0 + ROTATION_SLIDER_LABEL_MARGIN)
+                        .max(ROTATION_SLIDER_HANDLE_R);
+                    let size = egui::vec2(
+                        ROTATION_SLIDER_TRACK_W + 2.0 * inset,
+                        2.0 * ROTATION_SLIDER_HANDLE_R + 14.0,
+                    );
+                    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                    let track = egui::Rangef::new(rect.left() + inset, rect.right() - inset);
+                    let track_y = rect.top() + ROTATION_SLIDER_HANDLE_R;
+                    let deg_per_pt = 360.0 / track.span();
+                    // +180° at the left end, -180° at the right.
+                    let x_of = |angle: f32| track.min + (180.0 - angle) / deg_per_pt;
+                    let angle_at = |x: f32| {
+                        snap_rotation(180.0 - (x - track.min) * deg_per_pt, deg_per_pt)
+                    };
+
+                    if response.drag_started() {
+                        // Grabbing the handle keeps it where it was under the
+                        // pointer; pressing elsewhere on the track jumps there.
+                        let press = ctx.input(|i| i.pointer.press_origin());
+                        let handle_x = x_of(self.transform.rotation());
+                        let offset = press
+                            .filter(|p| (p.x - handle_x).abs() <= ROTATION_SLIDER_HANDLE_R + 2.0)
+                            .map_or(0.0, |p| handle_x - p.x);
+                        self.rotation_slider_grab = Some(offset);
+                    }
+                    if let (Some(offset), true) = (self.rotation_slider_grab, response.dragged()) {
+                        if let Some(p) = response.interact_pointer_pos() {
+                            self.rotation_slider_angle = angle_at(p.x + offset);
+                            action = Some(ZoomAction::SetRotation(self.rotation_slider_angle));
+                        }
+                    } else {
+                        self.rotation_slider_grab = None;
+                        if response.clicked() {
+                            if let Some(p) = response.interact_pointer_pos() {
+                                action = Some(ZoomAction::SetRotation(angle_at(p.x)));
+                            }
+                        }
+                    }
+
+                    // Clipped to the viewer, not the slider, so an overdragged
+                    // handle can be seen leaving the track.
+                    let painter = ui.painter().with_clip_rect(widget_rect);
+                    let dim = text_color.gamma_multiply(0.5);
+                    painter.line_segment(
+                        [egui::pos2(track.min, track_y), egui::pos2(track.max, track_y)],
+                        egui::Stroke::new(2.0_f32, dim),
+                    );
+                    for tick in [-180, -90, 0, 90, 180] {
+                        let x = x_of(tick as f32);
+                        painter.line_segment(
+                            [egui::pos2(x, track_y - 4.0), egui::pos2(x, track_y + 4.0)],
+                            egui::Stroke::new(1.0_f32, dim),
+                        );
+                        painter.text(
+                            egui::pos2(x, rect.bottom()),
+                            egui::Align2::CENTER_BOTTOM,
+                            format!("{tick}°"),
+                            label_font.clone(),
+                            dim,
+                        );
+                    }
+                    let shown = if self.rotation_slider_grab.is_some() {
+                        self.rotation_slider_angle
+                    } else {
+                        self.transform.rotation()
+                    };
+                    painter.circle_filled(
+                        egui::pos2(x_of(shown), track_y),
+                        ROTATION_SLIDER_HANDLE_R,
+                        text_color,
+                    );
+                    response
+                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                        .on_hover_text("Drag to rotate (snaps to 90°)");
+                });
+            });
+        action
     }
 
     /// Render stretch controls at top-right of widget.
@@ -3142,6 +3307,18 @@ fn colorbar_y_to_value(bar: egui::Rect, span: (f64, f64), axis: StretchType, y: 
         0.0
     };
     lo + invert_stretch(t, axis) * (hi - lo)
+}
+
+/// Snap an angle to the nearest multiple of 90° when it is within
+/// [`ROTATION_SLIDER_SNAP_PT`] of it on a slider at `deg_per_pt`. Works on
+/// unwrapped angles too, so 270° snaps just like -90°.
+fn snap_rotation(angle: f32, deg_per_pt: f32) -> f32 {
+    let nearest = (angle / 90.0).round() * 90.0;
+    if ((angle - nearest) / deg_per_pt).abs() <= ROTATION_SLIDER_SNAP_PT {
+        nearest
+    } else {
+        angle
+    }
 }
 
 /// The conventional "drag me" texture: parallel lines across `rect`, drawn
@@ -4692,8 +4869,10 @@ mod hover_overlay_tests {
 }
 
 #[cfg(test)]
-mod rotation_grip_tests {
+mod rotation_slider_tests {
     use super::*;
+
+    const SCREEN: egui::Rect = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(800.0, 600.0));
 
     fn widget_with_image() -> ArrayViewerWidget {
         let mut w = ArrayViewerWidget::new();
@@ -4702,149 +4881,173 @@ mod rotation_grip_tests {
     }
 
     /// Run one frame of the zoom/rotation control row and apply whatever it
-    /// produced, exactly as `show` does. Returns the grip's rect, found by the
-    /// parallel lines it paints -- the only horizontal hairlines in the row.
+    /// produced, exactly as `show` does. Returns the slider handle's centre,
+    /// found as the only filled circle the row paints, if it is showing.
     fn run_controls(
         w: &mut ArrayViewerWidget,
         ctx: &egui::Context,
         events: Vec<egui::Event>,
-    ) -> egui::Rect {
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+    ) -> Option<egui::Pos2> {
         let output = ctx.run(
             egui::RawInput {
-                screen_rect: Some(screen),
+                screen_rect: Some(SCREEN),
                 events,
                 ..Default::default()
             },
             |ctx| {
-                let (action, _) = w.render_zoom_controls(ctx, screen.center(), screen);
-                w.apply_zoom_action(action, screen.center());
+                let (action, _) = w.render_zoom_controls(ctx, SCREEN.center(), SCREEN);
+                w.apply_zoom_action(action, SCREEN.center());
             },
         );
 
-        fn collect(shape: &egui::Shape, out: &mut Vec<[egui::Pos2; 2]>) {
+        fn find(shape: &egui::Shape) -> Option<egui::Pos2> {
             match shape {
-                egui::Shape::LineSegment { points, .. } if points[0].y == points[1].y => {
-                    out.push(*points)
-                }
-                egui::Shape::Vec(v) => {
-                    for s in v {
-                        collect(s, out);
-                    }
-                }
-                _ => {}
+                egui::Shape::Circle(c) if c.fill != Color32::TRANSPARENT => Some(c.center),
+                egui::Shape::Vec(v) => v.iter().find_map(find),
+                _ => None,
             }
         }
-        let mut segments = Vec::new();
-        for clipped in &output.shapes {
-            collect(&clipped.shape, &mut segments);
-        }
-
-        let mut rect = egui::Rect::NOTHING;
-        for seg in segments {
-            rect.extend_with(seg[0]);
-            rect.extend_with(seg[1]);
-        }
-        rect
+        output.shapes.iter().find_map(|c| find(&c.shape))
     }
 
-    fn drag_grip(w: &mut ArrayViewerWidget, ctx: &egui::Context, grip: egui::Rect, dy: f32) {
-        let from = grip.center();
-        let to = egui::pos2(from.x, from.y + dy);
-        // Walk the pointer over first. A press that teleports it would land on
-        // the grip carrying the whole jump as drag delta, which a real pointer
-        // arriving by moving never does.
-        run_controls(w, ctx, vec![egui::Event::PointerMoved(from)]);
-        run_controls(
-            w,
-            ctx,
-            vec![egui::Event::PointerButton {
-                pos: from,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::default(),
-            }],
-        );
-        run_controls(w, ctx, vec![egui::Event::PointerMoved(to)]);
-        run_controls(
-            w,
-            ctx,
-            vec![egui::Event::PointerButton {
-                pos: to,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::default(),
-            }],
-        );
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
     }
 
-    /// Lay the row out and find the grip. egui sizes on one pass and paints on
-    /// the next, so this takes two frames.
-    fn settle(w: &mut ArrayViewerWidget, ctx: &egui::Context) -> egui::Rect {
+    /// Lay the row out, hover the rotation section so the slider opens, and
+    /// return the handle's position. egui sizes on one pass and paints on the
+    /// next, so this takes a few frames.
+    fn open_slider(w: &mut ArrayViewerWidget, ctx: &egui::Context) -> egui::Pos2 {
         run_controls(w, ctx, Vec::new());
-        let grip = run_controls(w, ctx, Vec::new());
-        assert!(grip.is_positive(), "the grip should have been painted");
-        grip
+        run_controls(w, ctx, Vec::new());
+        let section = w.rotation_section_rect;
+        assert!(section.is_positive(), "the rotation section should be laid out");
+        run_controls(w, ctx, vec![egui::Event::PointerMoved(section.center())]);
+        run_controls(w, ctx, Vec::new()).expect("hovering the section should open the slider")
+    }
+
+    /// Walk the pointer onto the handle, press, move by `dx`, and return the
+    /// handle's position while still held, before releasing.
+    fn drag_handle(
+        w: &mut ArrayViewerWidget,
+        ctx: &egui::Context,
+        handle: egui::Pos2,
+        dx: f32,
+    ) -> egui::Pos2 {
+        let to = egui::pos2(handle.x + dx, handle.y);
+        run_controls(w, ctx, vec![egui::Event::PointerMoved(handle)]);
+        run_controls(w, ctx, vec![press(handle, true)]);
+        run_controls(w, ctx, vec![egui::Event::PointerMoved(to)]);
+        let held = run_controls(w, ctx, Vec::new()).expect("slider stays open mid-drag");
+        run_controls(w, ctx, vec![press(to, false)]);
+        held
+    }
+
+    fn deg_per_pt() -> f32 {
+        360.0 / ROTATION_SLIDER_TRACK_W
     }
 
     #[test]
-    fn dragging_up_turns_left_and_down_turns_right() {
+    fn the_slider_only_shows_while_hovering_the_rotation_section() {
         let mut w = widget_with_image();
         let ctx = egui::Context::default();
-        let grip = settle(&mut w, &ctx);
+        run_controls(&mut w, &ctx, Vec::new());
+        assert!(run_controls(&mut w, &ctx, Vec::new()).is_none());
 
-        // Up the screen is negative y; rotation is counter-clockwise-positive.
-        drag_grip(&mut w, &ctx, grip, -40.0);
-        let after_up = w.rotation();
-        assert!(
-            after_up > 0.0,
-            "dragging up should turn the image left, got {after_up}"
-        );
-        assert!(
-            (after_up - 40.0 * ROTATION_DRAG_DEG_PER_POINT).abs() < 1.0,
-            "expected about {} degrees, got {after_up}",
-            40.0 * ROTATION_DRAG_DEG_PER_POINT
-        );
+        open_slider(&mut w, &ctx);
 
-        drag_grip(&mut w, &ctx, grip, 40.0);
+        run_controls(&mut w, &ctx, vec![egui::Event::PointerMoved(egui::pos2(10.0, 10.0))]);
+        assert!(run_controls(&mut w, &ctx, Vec::new()).is_none(), "leaving should close it");
+    }
+
+    #[test]
+    fn the_rotation_controls_sit_on_the_toolbar_centreline() {
+        let mut w = widget_with_image();
+        let ctx = egui::Context::default();
+        run_controls(&mut w, &ctx, Vec::new());
+        run_controls(&mut w, &ctx, Vec::new());
+        // The buttons are 28 points tall and the angle box shorter; sharing a
+        // centreline, they span exactly one button's height. Any of them
+        // knocked up or down (as a nested `horizontal` does) makes it taller.
+        let section = w.rotation_section_rect;
+        assert_eq!(section.height(), 28.0, "rotation controls span {section:?}");
+    }
+
+    #[test]
+    fn zero_sits_over_the_angle_box() {
+        let mut w = widget_with_image();
+        let ctx = egui::Context::default();
+        let handle = open_slider(&mut w, &ctx);
         assert!(
-            w.rotation().abs() < 1.0,
-            "dragging back down should undo it, got {}",
-            w.rotation()
+            (handle.x - w.rotation_input_center_x).abs() < 0.5,
+            "handle at {} but the box is centred at {}",
+            handle.x,
+            w.rotation_input_center_x
         );
     }
 
     #[test]
-    fn the_text_box_follows_the_drag() {
+    fn dragging_left_turns_counter_clockwise_and_the_box_follows() {
+        // East of north: positive angles to the left, like the CCW button.
         let mut w = widget_with_image();
         let ctx = egui::Context::default();
-        let grip = settle(&mut w, &ctx);
+        let handle = open_slider(&mut w, &ctx);
 
-        drag_grip(&mut w, &ctx, grip, -30.0);
+        drag_handle(&mut w, &ctx, handle, -30.0);
 
-        assert!(w.rotation().abs() > 0.1, "the drag should have done something");
-        assert_eq!(
-            w.rotation_input_text,
-            format!("{:.1}", w.rotation()),
-            "the box should show the angle the drag produced"
-        );
+        let expected = 30.0 * deg_per_pt();
+        assert!((w.rotation() - expected).abs() < 0.5, "expected ~{expected}, got {}", w.rotation());
+        assert_eq!(w.rotation_input_text, format!("{:.1}", w.rotation()));
     }
 
     #[test]
-    fn rotation_from_the_grip_is_continuous_not_stepped() {
-        // The whole point of the grip: angles the 15-degree buttons cannot hit.
+    fn the_handle_snaps_to_ninety_degrees() {
         let mut w = widget_with_image();
         let ctx = egui::Context::default();
-        let grip = settle(&mut w, &ctx);
+        let handle = open_slider(&mut w, &ctx);
 
-        drag_grip(&mut w, &ctx, grip, -7.0);
+        // A few points shy of 90 degrees still lands on it.
+        let dx = 90.0 / deg_per_pt() - 3.0;
+        drag_handle(&mut w, &ctx, handle, dx);
+        assert_eq!(w.rotation(), -90.0);
+    }
 
-        let angle = w.rotation();
-        assert!(angle.abs() > 0.01, "nothing moved: {angle}");
-        assert!(
-            (angle % transform::ROTATION_STEP).abs() > 0.01,
-            "expected an off-step angle, got {angle}"
-        );
+    #[test]
+    fn overdragging_carries_the_handle_off_the_track_then_wraps_the_angle() {
+        let mut w = widget_with_image();
+        let ctx = egui::Context::default();
+        let handle = open_slider(&mut w, &ctx);
+        let track_end = handle.x + ROTATION_SLIDER_TRACK_W / 2.0;
+
+        // Rightward from 0 to an unwrapped -225 degrees: 45 past the -180 end.
+        let dx = 225.0 / deg_per_pt();
+        let held = drag_handle(&mut w, &ctx, handle, dx);
+
+        assert!(held.x > track_end + 20.0, "handle {held:?} should be past the end at {track_end}");
+        assert!((w.rotation() - 135.0).abs() < 0.5, "expected 135, got {}", w.rotation());
+
+        // Released (and closed, the pointer having left), the slider reopens
+        // with the handle back on the track at the wrapped angle.
+        let section = w.rotation_section_rect;
+        run_controls(&mut w, &ctx, vec![egui::Event::PointerMoved(section.center())]);
+        let after = run_controls(&mut w, &ctx, Vec::new()).expect("hovered again");
+        let expected_x = handle.x - 135.0 / deg_per_pt();
+        assert!((after.x - expected_x).abs() < 1.0, "handle at {after:?}, expected x {expected_x}");
+    }
+
+    #[test]
+    fn snapping_only_applies_near_multiples_of_ninety() {
+        let d = deg_per_pt();
+        assert_eq!(snap_rotation(88.0, d), 90.0);
+        assert_eq!(snap_rotation(-93.0, d), -90.0);
+        assert_eq!(snap_rotation(268.0, d), 270.0);
+        assert_eq!(snap_rotation(45.0, d), 45.0);
+        assert_eq!(snap_rotation(80.0, d), 80.0);
     }
 }
 

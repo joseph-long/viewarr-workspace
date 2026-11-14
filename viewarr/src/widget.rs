@@ -132,6 +132,8 @@ struct ColorbarHistogram {
     /// The value span the bins were computed for; a different span needs a
     /// different histogram.
     span: (f64, f64),
+    /// The spacing the bins were laid out in along the bar.
+    axis: StretchType,
     /// Log-scaled bin heights normalised to the tallest bin, bottom bin first.
     /// Normalising keeps the drawn width independent of how many pixels landed
     /// in the mode; the log keeps the sparse tail visible, which for the images
@@ -255,8 +257,6 @@ pub struct ArrayViewerWidget {
     hover_info: Option<(f64, f64, f64)>,
     /// Main image texture
     texture: Option<TextureHandle>,
-    /// Colorbar texture
-    colorbar_texture: Option<TextureHandle>,
     /// While a limit handle is being dragged, the value span the bar covered
     /// when the drag began.
     ///
@@ -393,7 +393,6 @@ impl ArrayViewerWidget {
             texture_dirty: false,
             hover_info: None,
             texture: None,
-            colorbar_texture: None,
             colorbar_drag: None,
             colorbar_histogram: None,
             stretch_drag_active: false,
@@ -1114,33 +1113,6 @@ impl ArrayViewerWidget {
                 TextureOptions::NEAREST,
             ));
         }
-        // Also rebuild colorbar
-        self.rebuild_colorbar_texture(ctx);
-    }
-
-    /// Rebuild the colorbar texture
-    fn rebuild_colorbar_texture(&mut self, ctx: &egui::Context) {
-        let height = 256;
-        let width = 1;
-
-        // Shares ramp_color with the saturated end bands, so the bands and the
-        // gradient they abut are guaranteed to be the same colour.
-        let pixels: Vec<Color32> = (0..height)
-            .rev() // Reverse so high values are at top
-            .map(|y| self.ramp_color(y as f64 / (height - 1) as f64))
-            .collect();
-
-        let color_image = ColorImage {
-            size: [width, height],
-            pixels,
-            source_size: egui::Vec2::new(width as f32, height as f32),
-        };
-
-        self.colorbar_texture = Some(ctx.load_texture(
-            "colorbar",
-            color_image,
-            TextureOptions::LINEAR,
-        ));
     }
 
     // =========================================================================
@@ -1981,9 +1953,21 @@ impl ArrayViewerWidget {
         (lo, hi)
     }
 
+    /// The stretch the colorbar's scale is spaced in; see [`colorbar_value_to_y`].
+    ///
+    /// Symmetric mode keeps a linear bar whatever the stretch: its whole point
+    /// is zero at the centre with the handles mirrored about it, which a log
+    /// spacing anchored at the bottom edge would break.
+    fn colorbar_axis(&self) -> StretchType {
+        if self.symmetric_mode {
+            StretchType::Linear
+        } else {
+            self.stretch_type
+        }
+    }
+
     /// Colour at `t` along the ramp with the current stretch, contrast/bias and
-    /// reversal applied — the same chain [`Self::rebuild_colorbar_texture`]
-    /// uses, so the saturated bands meet the gradient without a seam.
+    /// reversal applied.
     fn ramp_color(&self, t: f64) -> Color32 {
         let cb = self.current_contrast_bias();
         let stretched = apply_stretch(t, self.stretch_type);
@@ -2014,24 +1998,29 @@ impl ArrayViewerWidget {
             Some(hist) => hist.bins.len() != bin_count || hist.span != span,
             None => true,
         };
+        let axis = self.colorbar_axis();
+        let stale = stale || self.colorbar_histogram.as_ref().is_some_and(|h| h.axis != axis);
 
         if stale {
             let mut bins = vec![0.0_f32; bin_count];
             if let Some(pixels) = self.pixels.as_deref() {
                 let (lo, hi) = span;
-                let scale = if hi > lo {
-                    bin_count as f64 / (hi - lo)
-                } else {
-                    0.0
-                };
                 for &v in pixels {
                     // NaN is "no value" here exactly as it is for auto-scaling,
                     // so it belongs in no bin.
                     if !v.is_finite() {
                         continue;
                     }
-                    let idx = (((v - lo) * scale) as isize).clamp(0, bin_count as isize - 1);
-                    bins[idx as usize] += 1.0;
+                    // Binned along the bar rather than in raw value, so on a
+                    // log-spaced bar each bin still lines up with its stretch
+                    // of the ramp.
+                    let t = if hi > lo {
+                        apply_stretch(((v - lo) / (hi - lo)).clamp(0.0, 1.0), axis)
+                    } else {
+                        0.0
+                    };
+                    let idx = ((t * bin_count as f64) as usize).min(bin_count - 1);
+                    bins[idx] += 1.0;
                 }
             }
             // Sky frames put almost every pixel into a handful of bins near the
@@ -2049,7 +2038,7 @@ impl ArrayViewerWidget {
                     *bin /= peak;
                 }
             }
-            self.colorbar_histogram = Some(ColorbarHistogram { span, bins });
+            self.colorbar_histogram = Some(ColorbarHistogram { span, axis, bins });
         }
 
         &self.colorbar_histogram.as_ref().expect("just populated").bins
@@ -2113,15 +2102,16 @@ impl ArrayViewerWidget {
 
         // Hold the span still for the length of a drag; see ColorbarDrag.
         let span = self.colorbar_drag.unwrap_or_else(|| self.colorbar_span());
+        let axis = self.colorbar_axis();
         let (vmin, vmax) = self.scaling_range();
         // Each box is centred on its own handle, so an arrow and its value are
         // always on the same line.
-        let max_y = colorbar_value_to_y(bar_rect, span, vmax);
-        let min_y = colorbar_value_to_y(bar_rect, span, vmin);
+        let max_y = colorbar_value_to_y(bar_rect, span, axis, vmax);
+        let min_y = colorbar_value_to_y(bar_rect, span, axis, vmin);
 
         // Everything painted into the shared layer goes down first, so the
         // interactive grips and the value boxes land on top of it.
-        self.paint_colorbar_ramp(ctx, bar_rect, max_y, min_y);
+        self.paint_colorbar_ramp(ctx, bar_rect, span, max_y, min_y);
 
         // The histogram is a hint about where the data actually lives, so it
         // appears only while the user is working the colorbar -- hovering it or
@@ -2175,46 +2165,56 @@ impl ArrayViewerWidget {
 
     /// Paint the bar: the gradient between the limits, and a flat band of the
     /// end colour beyond each one.
+    ///
+    /// Every row is coloured by running the value it stands for through the
+    /// same pipeline as the image's pixels. On a log-spaced bar with the limits
+    /// pulled in, the stretch is anchored at the limits but the bar's spacing
+    /// at the data's ends, so the gradient between the handles is not a
+    /// rescaled copy of any fixed ramp and has to be worked out row by row.
     fn paint_colorbar_ramp(
         &self,
         ctx: &egui::Context,
         bar: egui::Rect,
+        span: (f64, f64),
         max_y: f32,
         min_y: f32,
     ) {
         let painter = Self::colorbar_painter(ctx);
+        let axis = self.colorbar_axis();
+        let (vmin, vmax) = self.scaling_range();
+        let color_at = |y: f32| {
+            let v = colorbar_y_to_value(bar, span, axis, y);
+            let t = if vmax - vmin > f64::EPSILON {
+                ((v - vmin) / (vmax - vmin)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            self.ramp_color(t)
+        };
 
-        // Order the two so an inverted pair of limits still paints forwards.
-        let upper = max_y.min(min_y).clamp(bar.min.y, bar.max.y);
-        let lower = max_y.max(min_y).clamp(bar.min.y, bar.max.y);
+        // A vertex per pixel row, plus one exactly on each handle so the
+        // gradient meets its saturated band right at the arrow, not at the
+        // nearest whole row.
+        let rows = bar.height().ceil().max(1.0) as usize;
+        let mut ys: Vec<f32> = (0..=rows)
+            .map(|i| bar.min.y + bar.height() * i as f32 / rows as f32)
+            .chain([max_y, min_y].map(|y| y.clamp(bar.min.y, bar.max.y)))
+            .collect();
+        ys.sort_by(f32::total_cmp);
+        ys.dedup();
 
-        if upper > bar.min.y {
-            painter.rect_filled(
-                egui::Rect::from_min_max(bar.min, egui::pos2(bar.max.x, upper)),
-                0.0,
-                self.ramp_color(1.0),
-            );
+        let mut mesh = egui::Mesh::default();
+        for &y in &ys {
+            let color = color_at(y);
+            mesh.colored_vertex(egui::pos2(bar.min.x, y), color);
+            mesh.colored_vertex(egui::pos2(bar.max.x, y), color);
         }
-        if lower < bar.max.y {
-            painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(bar.min.x, lower), bar.max),
-                0.0,
-                self.ramp_color(0.0),
-            );
+        for i in 0..ys.len().saturating_sub(1) as u32 {
+            let (a, b) = (2 * i, 2 * i + 2);
+            mesh.add_triangle(a, a + 1, b);
+            mesh.add_triangle(a + 1, b + 1, b);
         }
-        if let Some(texture) = &self.colorbar_texture {
-            if lower > upper {
-                painter.image(
-                    texture.id(),
-                    egui::Rect::from_min_max(
-                        egui::pos2(bar.min.x, upper),
-                        egui::pos2(bar.max.x, lower),
-                    ),
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-            }
-        }
+        painter.add(egui::Shape::mesh(mesh));
 
         painter.rect_stroke(
             bar.expand(1.0),
@@ -2345,7 +2345,7 @@ impl ArrayViewerWidget {
                 }
                 if response.dragged() {
                     if let Some(pos) = response.interact_pointer_pos() {
-                        let value = colorbar_y_to_value(bar, span, pos.y);
+                        let value = colorbar_y_to_value(bar, span, self.colorbar_axis(), pos.y);
                         // Keep a sliver between the limits so they cannot cross
                         // and invert the ramp.
                         let epsilon = (span.1 - span.0) * 1e-6;
@@ -2961,11 +2961,18 @@ impl ArrayViewerWidget {
 // =============================================================================
 
 /// Map a data value to its y on the bar, clamped to the bar's extent.
-/// `span` is (value at the bottom edge, value at the top edge).
-fn colorbar_value_to_y(bar: egui::Rect, span: (f64, f64), value: f64) -> f32 {
+/// `span` is (value at the bottom edge, value at the top edge), and `axis` is
+/// the stretch the bar's own scale is laid out in.
+///
+/// Under a log stretch the bar is log-spaced too. The image stretch spends
+/// most of the colormap on the faint end, so a linearly spaced bar would
+/// squeeze nearly every colour into a sliver at the bottom and show little
+/// but the top of the ramp; spacing the bar with the same curve spreads the
+/// colours back out evenly and gives the faint values room to be dragged.
+fn colorbar_value_to_y(bar: egui::Rect, span: (f64, f64), axis: StretchType, value: f64) -> f32 {
     let (lo, hi) = span;
     let t = if hi > lo {
-        ((value - lo) / (hi - lo)).clamp(0.0, 1.0) as f32
+        apply_stretch(((value - lo) / (hi - lo)).clamp(0.0, 1.0), axis) as f32
     } else {
         0.0
     };
@@ -2974,14 +2981,14 @@ fn colorbar_value_to_y(bar: egui::Rect, span: (f64, f64), value: f64) -> f32 {
 
 /// Inverse of [`colorbar_value_to_y`]: where on the bar the pointer is, as a
 /// data value. Positions outside the bar clamp to its ends.
-fn colorbar_y_to_value(bar: egui::Rect, span: (f64, f64), y: f32) -> f64 {
+fn colorbar_y_to_value(bar: egui::Rect, span: (f64, f64), axis: StretchType, y: f32) -> f64 {
     let (lo, hi) = span;
     let t = if bar.height() > 0.0 {
         ((bar.max.y - y) / bar.height()).clamp(0.0, 1.0) as f64
     } else {
         0.0
     };
-    lo + t * (hi - lo)
+    lo + invert_stretch(t, axis) * (hi - lo)
 }
 
 /// The conventional "drag me" texture: parallel lines across `rect`, drawn
@@ -3040,9 +3047,18 @@ fn style_limit_edit(ui: &mut Ui) {
 fn apply_stretch(x: f64, stretch_type: StretchType) -> f64 {
     match stretch_type {
         StretchType::Linear => x,
-        StretchType::Log => {
-            (LOG_EXPONENT * x + 1.0).log10() / LOG_EXPONENT.log10()
-        }
+        // Normalised by log(a + 1) rather than DS9's log(a) so that 1 maps to
+        // exactly 1: the colorbar is spaced with this curve and inverts it, and
+        // DS9's version overshoots the top by a hair.
+        StretchType::Log => (LOG_EXPONENT * x).ln_1p() / LOG_EXPONENT.ln_1p(),
+    }
+}
+
+/// Inverse of [`apply_stretch`] over 0-1.
+fn invert_stretch(y: f64, stretch_type: StretchType) -> f64 {
+    match stretch_type {
+        StretchType::Linear => y,
+        StretchType::Log => (y * LOG_EXPONENT.ln_1p()).exp_m1() / LOG_EXPONENT,
     }
 }
 
@@ -3615,7 +3631,7 @@ mod colorbar_tests {
         // neutral colour sits where the data's zero is.
         let bar = harness_bar();
         assert!(
-            (colorbar_value_to_y(bar, (lo, hi), 0.0) - bar.center().y).abs() < 1e-3,
+            (colorbar_value_to_y(bar, (lo, hi), StretchType::Linear, 0.0) - bar.center().y).abs() < 1e-3,
             "zero is not at the centre of the bar"
         );
     }
@@ -3633,8 +3649,8 @@ mod colorbar_tests {
         for vmax in [1.0, 25.0, 60.0, 100.0] {
             w.set_max_val(vmax);
             let (vmin, vmax) = w.scaling_range();
-            let max_y = colorbar_value_to_y(bar, span, vmax);
-            let min_y = colorbar_value_to_y(bar, span, vmin);
+            let max_y = colorbar_value_to_y(bar, span, StretchType::Linear, vmax);
+            let min_y = colorbar_value_to_y(bar, span, StretchType::Linear, vmin);
             let centre = bar.center().y;
             assert!(
                 ((centre - max_y) - (min_y - centre)).abs() < 1e-3,
@@ -3646,8 +3662,8 @@ mod colorbar_tests {
         // out early while vmax still has room.
         w.set_max_val(100.0);
         let (vmin, vmax) = w.scaling_range();
-        assert!((colorbar_value_to_y(bar, span, vmax) - bar.min.y).abs() < 1e-3);
-        assert!((colorbar_value_to_y(bar, span, vmin) - bar.max.y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, vmax) - bar.min.y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, vmin) - bar.max.y).abs() < 1e-3);
     }
 
     #[test]
@@ -3663,7 +3679,7 @@ mod colorbar_tests {
         run_colorbar_frame(&mut w, &ctx, None);
 
         let span = w.colorbar_span();
-        let start = colorbar_value_to_y(bar, span, 1.0);
+        let start = colorbar_value_to_y(bar, span, StretchType::Linear, 1.0);
         let grip = harness_grip(start);
 
         run_colorbar_frame(&mut w, &ctx, Some(grip));
@@ -3704,7 +3720,7 @@ mod colorbar_tests {
         run_colorbar_frame(&mut w, &ctx, None);
 
         let span = w.colorbar_span();
-        let grip = harness_grip(colorbar_value_to_y(bar, span, 8.0));
+        let grip = harness_grip(colorbar_value_to_y(bar, span, StretchType::Linear, 8.0));
         run_colorbar_frame(&mut w, &ctx, Some(grip));
         run_colorbar_events(
             &mut w,
@@ -3795,7 +3811,7 @@ mod colorbar_tests {
         assert_eq!(centres.len(), 2, "expected one box per limit: {centres:?}");
 
         for (value, centre) in [(300.0, centres[0]), (100.0, centres[1])] {
-            let arrow_y = colorbar_value_to_y(bar, span, value);
+            let arrow_y = colorbar_value_to_y(bar, span, StretchType::Linear, value);
             assert!(
                 (centre - arrow_y).abs() < 1.5,
                 "box for {value} centred at {centre}, arrow at {arrow_y}"
@@ -3965,34 +3981,110 @@ mod colorbar_tests {
         let span = (-10.0, 30.0);
 
         // The span's ends land on the bar's ends, low at the bottom.
-        assert!((colorbar_value_to_y(bar, span, -10.0) - bar.max.y).abs() < 1e-3);
-        assert!((colorbar_value_to_y(bar, span, 30.0) - bar.min.y).abs() < 1e-3);
-        assert!((colorbar_value_to_y(bar, span, 10.0) - bar.center().y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, -10.0) - bar.max.y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, 30.0) - bar.min.y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, 10.0) - bar.center().y).abs() < 1e-3);
 
         for value in [-10.0, -3.5, 0.0, 12.25, 30.0] {
-            let y = colorbar_value_to_y(bar, span, value);
-            let back = colorbar_y_to_value(bar, span, y);
+            let y = colorbar_value_to_y(bar, span, StretchType::Linear, value);
+            let back = colorbar_y_to_value(bar, span, StretchType::Linear, y);
             assert!((back - value).abs() < 1e-6, "{value} -> {y} -> {back}");
         }
+    }
+
+    #[test]
+    fn a_log_bar_gives_the_faint_end_most_of_its_height() {
+        let bar = bar();
+        let span = (0.0, 1000.0);
+        let log = StretchType::Log;
+
+        // The ends stay put.
+        assert!((colorbar_value_to_y(bar, span, log, 0.0) - bar.max.y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, log, 1000.0) - bar.min.y).abs() < 1e-3);
+        // Each decade of the span gets roughly an equal share of the bar, so
+        // the bottom 1% of the values climbs a third of the way up rather than
+        // sitting in the bottom 1% of it.
+        let third = bar.max.y - colorbar_value_to_y(bar, span, log, 9.0);
+        assert!(
+            (third / bar.height() - 1.0 / 3.0).abs() < 1e-3,
+            "9 should sit a third of the way up, got {}",
+            third / bar.height()
+        );
+
+        for value in [0.0, 0.5, 3.0, 42.0, 999.0] {
+            let y = colorbar_value_to_y(bar, span, log, value);
+            let back = colorbar_y_to_value(bar, span, log, y);
+            // y is an f32, and near the top a log bar packs many values into
+            // each of its pixels, so allow for that.
+            assert!((back - value).abs() < 1e-6 * value.max(1.0) * 1e3, "{value} -> {y} -> {back}");
+        }
+    }
+
+    #[test]
+    fn with_the_limits_at_the_ends_a_log_bar_spreads_the_colours_evenly() {
+        // The complaint a log bar fixes: spaced linearly, the log stretch puts
+        // nearly the whole colormap in the bottom sliver. Spaced in log, the
+        // fraction of the colormap reached should track height up the bar.
+        let mut w = widget_with((0..400).map(|i| (i * i) as f64).collect(), 20, 20);
+        w.set_stretch_type(StretchType::Log);
+        let bar = bar();
+        let span = w.colorbar_span();
+        let (vmin, vmax) = w.scaling_range();
+        assert_eq!(span, (vmin, vmax), "test assumes the limits sit at the ends");
+
+        for i in 0..=10 {
+            let t = i as f64 / 10.0;
+            let y = bar.max.y - t as f32 * bar.height();
+            let v = colorbar_y_to_value(bar, span, w.colorbar_axis(), y);
+            let reached = apply_stretch((v - vmin) / (vmax - vmin), StretchType::Log);
+            assert!((reached - t).abs() < 1e-4, "at {t} up the bar the ramp is at {reached}");
+        }
+    }
+
+    #[test]
+    fn symmetric_mode_keeps_a_linear_bar_under_log() {
+        let mut w = widget_with(vec![-5.0, 0.0, 5.0, 10.0], 2, 2);
+        w.set_stretch_type(StretchType::Log);
+        w.set_symmetric(true);
+        assert_eq!(w.colorbar_axis(), StretchType::Linear);
+    }
+
+    #[test]
+    fn the_histogram_follows_a_log_bar() {
+        // 1 sits a tenth of the way up a log bar spanning 0..1000, not a
+        // thousandth, and its bin has to say so.
+        let mut pixels = vec![1.0; 10];
+        pixels.extend([0.0, 1000.0]);
+        let count = pixels.len() as u32;
+        let mut w = widget_with(pixels, count, 1);
+        w.set_stretch_type(StretchType::Log);
+        let span = w.colorbar_span();
+        let bins = w.colorbar_histogram_bins(span, 30).to_vec();
+        assert!((bins[3] - 1.0).abs() < 1e-6, "the ten 1.0s should be bin 3: {bins:?}");
+
+        // Leaving log for linear lays the bins out afresh.
+        w.set_stretch_type(StretchType::Linear);
+        let bins = w.colorbar_histogram_bins(span, 30).to_vec();
+        assert!((bins[0] - 1.0).abs() < 1e-6, "linear puts them back in bin 0: {bins:?}");
     }
 
     #[test]
     fn positions_clamp_to_the_bar() {
         let bar = bar();
         let span = (0.0, 1.0);
-        assert!((colorbar_value_to_y(bar, span, 99.0) - bar.min.y).abs() < 1e-3);
-        assert!((colorbar_value_to_y(bar, span, -99.0) - bar.max.y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, 99.0) - bar.min.y).abs() < 1e-3);
+        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, -99.0) - bar.max.y).abs() < 1e-3);
         // Dragging past either end of the bar pins to that end's value.
-        assert!((colorbar_y_to_value(bar, span, bar.min.y - 40.0) - 1.0).abs() < 1e-9);
-        assert!((colorbar_y_to_value(bar, span, bar.max.y + 40.0) - 0.0).abs() < 1e-9);
+        assert!((colorbar_y_to_value(bar, span, StretchType::Linear, bar.min.y - 40.0) - 1.0).abs() < 1e-9);
+        assert!((colorbar_y_to_value(bar, span, StretchType::Linear, bar.max.y + 40.0) - 0.0).abs() < 1e-9);
     }
 
     #[test]
     fn degenerate_span_does_not_divide_by_zero() {
         let bar = bar();
-        let y = colorbar_value_to_y(bar, (5.0, 5.0), 5.0);
+        let y = colorbar_value_to_y(bar, (5.0, 5.0), StretchType::Linear, 5.0);
         assert!(y.is_finite());
-        assert!(colorbar_y_to_value(bar, (5.0, 5.0), y).is_finite());
+        assert!(colorbar_y_to_value(bar, (5.0, 5.0), StretchType::Linear, y).is_finite());
     }
 
     #[test]

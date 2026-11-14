@@ -190,19 +190,49 @@ pub fn install_menus() {
     let handler_object: &AnyObject = &handler;
 
     let file = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str("File"));
-    file.addItem(&menu_item(mtm, "Open…", sel!(openFile:), "o", Some(handler_object)));
-    file.addItem(&menu_item(mtm, "Open in Tab…", sel!(openFileInTab:), "t", Some(handler_object)));
+    file.addItem(&menu_item(
+        mtm,
+        "Open…",
+        sel!(openFile:),
+        "o",
+        Some(handler_object),
+    ));
+    file.addItem(&menu_item(
+        mtm,
+        "Open in Tab…",
+        sel!(openFileInTab:),
+        "t",
+        Some(handler_object),
+    ));
     file.addItem(&NSMenuItem::separatorItem(mtm));
-    file.addItem(&menu_item(mtm, "Close", sel!(closeTabOrWindow:), "w", Some(handler_object)));
+    file.addItem(&menu_item(
+        mtm,
+        "Close",
+        sel!(closeTabOrWindow:),
+        "w",
+        Some(handler_object),
+    ));
 
     // No target: these go up the responder chain to the key window (or, for
     // Bring All to Front, the application), which is what makes them act on
     // whichever window is in front, header windows included.
     let window = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str("Window"));
-    window.addItem(&menu_item(mtm, "Minimize", sel!(performMiniaturize:), "m", None));
+    window.addItem(&menu_item(
+        mtm,
+        "Minimize",
+        sel!(performMiniaturize:),
+        "m",
+        None,
+    ));
     window.addItem(&menu_item(mtm, "Zoom", sel!(performZoom:), "", None));
     window.addItem(&NSMenuItem::separatorItem(mtm));
-    window.addItem(&menu_item(mtm, "Bring All to Front", sel!(arrangeInFront:), "", None));
+    window.addItem(&menu_item(
+        mtm,
+        "Bring All to Front",
+        sel!(arrangeInFront:),
+        "",
+        None,
+    ));
 
     // File goes right after the application menu, Window at the end -- the
     // order every Mac app uses.

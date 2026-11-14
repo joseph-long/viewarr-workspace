@@ -364,7 +364,11 @@ impl NativeViewerApp {
                         ui.separator();
                     }
                     ui.colored_label(ui.visuals().error_fg_color, error);
-                    if ui.small_button(phosphor::X).on_hover_text("Dismiss").clicked() {
+                    if ui
+                        .small_button(phosphor::X)
+                        .on_hover_text("Dismiss")
+                        .clicked()
+                    {
                         self.open_error = None;
                     }
                 }
@@ -392,7 +396,12 @@ impl NativeViewerApp {
             .lerp_to_gamma(Color32::BLACK, if visuals.dark_mode { 0.35 } else { 0.08 });
         let frame = egui::Frame::side_top_panel(&ctx.style())
             .fill(strip_fill)
-            .inner_margin(egui::Margin { left: 6, right: 6, top: 5, bottom: 0 });
+            .inner_margin(egui::Margin {
+                left: 6,
+                right: 6,
+                top: 5,
+                bottom: 0,
+            });
 
         egui::TopBottomPanel::top("tab_bar")
             .frame(frame)
@@ -653,14 +662,22 @@ fn tab_button(
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, TAB_HEIGHT), egui::Sense::click());
     let close_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.right() - TAB_PADDING / 2.0 - TAB_CLOSE_SLOT / 2.0 + 2.0, rect.center().y),
+        egui::pos2(
+            rect.right() - TAB_PADDING / 2.0 - TAB_CLOSE_SLOT / 2.0 + 2.0,
+            rect.center().y,
+        ),
         egui::vec2(TAB_CLOSE_SLOT, TAB_CLOSE_SLOT),
     );
     let close = ui.interact(close_rect, response.id.with("close"), egui::Sense::click());
     let hovered = response.hovered() || close.hovered();
 
     let painter = ui.painter();
-    let corner = egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 };
+    let corner = egui::CornerRadius {
+        nw: 6,
+        ne: 6,
+        sw: 0,
+        se: 0,
+    };
     if is_active {
         painter.rect_filled(rect, corner, visuals.panel_fill);
         // Outlined on three sides: the bottom edge is painted back over in
@@ -698,19 +715,30 @@ fn tab_button(
     );
     job.wrap = egui::text::TextWrapping::truncate_at_width(max_text);
     let galley = painter.layout_job(job);
-    let text_pos = egui::pos2(rect.left() + TAB_PADDING, rect.center().y - galley.size().y / 2.0);
+    let text_pos = egui::pos2(
+        rect.left() + TAB_PADDING,
+        rect.center().y - galley.size().y / 2.0,
+    );
     painter.galley(text_pos, galley, text_color);
 
     if is_active || hovered {
         if close.hovered() {
-            painter.rect_filled(close_rect.shrink(1.0), 4.0, visuals.widgets.hovered.weak_bg_fill);
+            painter.rect_filled(
+                close_rect.shrink(1.0),
+                4.0,
+                visuals.widgets.hovered.weak_bg_fill,
+            );
         }
         painter.text(
             close_rect.center(),
             egui::Align2::CENTER_CENTER,
             phosphor::X,
             egui::FontId::proportional(12.0),
-            if close.hovered() { visuals.strong_text_color() } else { text_color },
+            if close.hovered() {
+                visuals.strong_text_color()
+            } else {
+                text_color
+            },
         );
     }
 
@@ -870,7 +898,9 @@ mod tests {
         press_cmd_w(&mut app);
         assert_eq!(app.tabs.len(), 2);
         assert!(
-            app.tabs.iter().all(|t| !t.shows_file(&fixture("cube3d.fits"))),
+            app.tabs
+                .iter()
+                .all(|t| !t.shows_file(&fixture("cube3d.fits"))),
             "the active tab, not some other, is the one closed"
         );
 
@@ -905,7 +935,11 @@ mod tests {
         assert_eq!(app.tabs.len(), 2, "the header window, not a tab, is closed");
 
         run(&mut app, false);
-        assert_eq!(app.tabs.len(), 1, "with the main window in front, the tab goes");
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "with the main window in front, the tab goes"
+        );
     }
 
     #[test]

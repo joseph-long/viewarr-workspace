@@ -14,6 +14,8 @@ prefix="${PREFIX:-$HOME/.local}"
 
 install -Dm755 "$here/viewarr" "$prefix/bin/viewarr"
 install -Dm644 "$here/viewarr.desktop" "$prefix/share/applications/viewarr.desktop"
+install -Dm644 "$here/LICENSE" "$prefix/share/doc/viewarr/LICENSE"
+install -Dm644 "$here/THIRD_PARTY_LICENSES.txt" "$prefix/share/doc/viewarr/THIRD_PARTY_LICENSES.txt"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$prefix/share/applications" || true

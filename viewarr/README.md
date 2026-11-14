@@ -143,4 +143,7 @@ This package is designed to be used as the image viewer backend for [jupyterlab-
 
 ## License
 
-MIT
+MIT. Builds also contain third-party code, fonts and colormap data under
+their own licenses; [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt)
+reproduces them, and `licenses/generate.py` at the repository root keeps it
+current.

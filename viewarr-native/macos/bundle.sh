@@ -46,6 +46,9 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 lipo -create -output "$app/Contents/MacOS/viewarr" $binaries
 sed "s/@VERSION@/$version/g" macos/Info.plist > "$app/Contents/Info.plist"
 printf 'APPL????' > "$app/Contents/PkgInfo"
+# The binary carries a few hundred crates' worth of code whose licenses ask
+# for their notices to travel with it.
+cp LICENSE THIRD_PARTY_LICENSES.txt "$app/Contents/Resources/"
 
 plutil -lint "$app/Contents/Info.plist" >/dev/null
 codesign --force --sign - "$app"

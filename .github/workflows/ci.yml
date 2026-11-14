@@ -367,6 +367,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      # Every release artifact ships these files; a dependency added or bumped
+      # without regenerating them would ship stale notices.
+      - name: Check third-party license files are current
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: python3 licenses/generate.py --check
+
       # Covers the FITS reader (against the astropy-written fixtures) and the
       # tab bookkeeping. Neither opens a window, so this runs fine headless.
       - name: Test
@@ -417,6 +424,8 @@ jobs:
           lipo -archs "$app/Contents/MacOS/viewarr" | grep -q arm64
           lipo -archs "$app/Contents/MacOS/viewarr" | grep -q x86_64
           plutil -extract CFBundleDocumentTypes.0.LSItemContentTypes.0 raw "$app/Contents/Info.plist" | grep -qx gov.nasa.gsfc.fits
+          test -s "$app/Contents/Resources/LICENSE"
+          test -s "$app/Contents/Resources/THIRD_PARTY_LICENSES.txt"
           "$app/Contents/MacOS/viewarr" --version
 
       # ditto, not zip: it keeps the bundle's symlinks, permissions and
@@ -506,7 +515,8 @@ jobs:
           version="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)}"
           name="viewarr-${version}-linux-${{ matrix.arch }}"
           mkdir -p "dist/$name"
-          cp target/release/viewarr linux/viewarr.desktop linux/install.sh "dist/$name/"
+          cp target/release/viewarr linux/viewarr.desktop linux/install.sh \
+            LICENSE THIRD_PARTY_LICENSES.txt "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           ls -l dist
 

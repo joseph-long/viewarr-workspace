@@ -1252,7 +1252,9 @@ impl ArrayViewerWidget {
         // *and* zoom the image underneath it. Checking the top layer rules
         // that out. Widgets drawn over the canvas in this same layer — the
         // colormap row, the colorbar, the bottom toolbar — still zoom as
-        // before, since only a separate `Area` takes the pointer away.
+        // before, since only a separate, interactable `Area` takes the pointer
+        // away -- which is why display-only overlays must opt out with
+        // `.interactable(false)`.
         let zoom_anchor = ui.input(|i| i.pointer.latest_pos()).filter(|&pos| {
             response.rect.contains(pos) && ctx.layer_id_at(pos) == Some(ui.layer_id())
         });
@@ -2586,6 +2588,7 @@ impl ArrayViewerWidget {
 
         egui::Area::new(egui::Id::new("stretch_info_overlay"))
             .fixed_pos(egui::pos2(widget_rect.center().x - 80.0, widget_rect.min.y + 50.0))
+            .interactable(false)
             .show(ctx, |ui| {
                 let text_color = get_overlay_text_color(ui);
                 let bg = get_overlay_bg(ui);
@@ -2661,8 +2664,12 @@ impl ArrayViewerWidget {
         let zoom_level = self.zoom_level();
         let zoom_text = format_zoom_multiple(zoom_level);
 
+        // Display only, and it sits right where a pointer zooming on the
+        // centre would be: an interactable Area there would claim the pointer
+        // and stop the very scroll that summoned it.
         egui::Area::new(egui::Id::new("zoom_info_overlay"))
             .fixed_pos(egui::pos2(widget_rect.center().x - 50.0, widget_rect.center().y - 20.0))
+            .interactable(false)
             .show(ctx, |ui| {
                 let text_color = get_overlay_text_color(ui);
                 let bg = get_overlay_bg(ui);
@@ -2695,6 +2702,7 @@ impl ArrayViewerWidget {
 
         egui::Area::new(egui::Id::new("build_info"))
             .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -margin))
+            .interactable(false)
             .show(ctx, |ui| {
                 let text_color = get_overlay_text_color(ui);
                 let bg = get_overlay_bg(ui);
@@ -4597,6 +4605,78 @@ mod rotation_grip_tests {
         assert!(
             (angle % transform::ROTATION_STEP).abs() > 0.01,
             "expected an off-step angle, got {angle}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod scroll_zoom_tests {
+    use super::*;
+
+    const SCREEN: egui::Rect = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(800.0, 600.0));
+
+    fn widget_with_image() -> ArrayViewerWidget {
+        let mut w = ArrayViewerWidget::new();
+        w.set_image(vec![0.0, 1.0, 2.0, 3.0], 2, 2, false, 6);
+        w
+    }
+
+    /// One whole frame of the widget, hosted the way app.rs hosts it.
+    fn run_frame(w: &mut ArrayViewerWidget, ctx: &egui::Context, time: f64, events: Vec<egui::Event>) {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(SCREEN),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                let frame = egui::Frame::central_panel(&ctx.style()).inner_margin(0.0);
+                egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+                    let size = ui.available_size();
+                    w.show(ui, size);
+                });
+            },
+        );
+    }
+
+    fn wheel_up() -> egui::Event {
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    #[test]
+    fn scrolling_keeps_zooming_under_the_zoom_readout() {
+        // The readout pops up at the middle of the image as soon as the zoom
+        // changes, which is exactly where a pointer zooming on the centre
+        // sits. Being an Area of its own, it used to count as covering the
+        // canvas, so the second notch of the wheel -- and every one after it
+        // while the readout stayed up -- was thrown away.
+        let mut w = widget_with_image();
+        let ctx = egui::Context::default();
+        let pointer = SCREEN.center();
+
+        run_frame(&mut w, &ctx, 0.0, vec![egui::Event::PointerMoved(pointer)]);
+        run_frame(&mut w, &ctx, 0.05, vec![wheel_up()]);
+        let after_first = w.zoom_level();
+        assert!(after_first > 1.0, "the first notch should zoom in");
+
+        // A frame for the readout to be laid out, then make sure the test is
+        // still testing something: the pointer has to be on top of it.
+        run_frame(&mut w, &ctx, 0.1, Vec::new());
+        let readout = ctx
+            .memory(|m| m.area_rect(egui::Id::new("zoom_info_overlay")))
+            .expect("the zoom readout should be showing");
+        assert!(readout.contains(pointer), "readout {readout:?} is not under {pointer:?}");
+
+        run_frame(&mut w, &ctx, 0.15, vec![wheel_up()]);
+        assert!(
+            w.zoom_level() > after_first,
+            "the second notch, under the readout, did not zoom ({after_first} -> {})",
+            w.zoom_level()
         );
     }
 }

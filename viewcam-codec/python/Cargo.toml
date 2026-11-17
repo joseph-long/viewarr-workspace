@@ -1,0 +1,23 @@
+[package]
+name = "viewcam-codec-py"
+version = "0.1.0"
+edition = "2021"
+authors = ["Joseph D. Long <me@joseph-long.com>"]
+license = "MIT"
+description = "Python bindings for viewcam-codec, so servers encode with the same code browsers decode with"
+repository = "https://github.com/joseph-long/viewarr"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+viewcam-codec = { path = ".." }
+# abi3: one wheel per platform serves every Python from 3.11 on (the
+# buffer protocol joined the stable ABI in 3.11; 3.10 is end-of-life).
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py311"] }
+
+[profile.release]
+opt-level = 3
+lto = true

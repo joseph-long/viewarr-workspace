@@ -22,6 +22,10 @@
 //!
 //! The same plane decodes with [`decode`] here, or with the WASM
 //! [`Decoder`](wasm::Decoder) in a browser worker.
+//!
+//! These are the payloads of the viewcam protocol's `shuffle-lz4` codec. Its
+//! plain `lz4` codec (no shuffle) decodes with the same functions and an
+//! element size of 1, since shuffling single bytes changes nothing.
 
 use std::fmt;
 
@@ -80,15 +84,25 @@ pub fn shuffle_into(
 ) -> Result<(), CodecError> {
     let n = check_layout(input.len(), element_size)?;
     assert_eq!(input.len(), output.len());
-    if element_size == 1 {
-        output.copy_from_slice(input);
-        return Ok(());
-    }
-    // Walk the input contiguously; each element scatters one byte into each
-    // of the `element_size` output runs.
-    for (i, element) in input.chunks_exact(element_size).enumerate() {
-        for (j, &byte) in element.iter().enumerate() {
-            output[j * n + i] = byte;
+    match element_size {
+        1 => output.copy_from_slice(input),
+        // The common camera case, written out (as in `unshuffle_into`) so it
+        // compiles to a tight split of one run into two.
+        2 => {
+            let (lo, hi) = output.split_at_mut(n);
+            for ((pair, l), h) in input.chunks_exact(2).zip(lo).zip(hi) {
+                *l = pair[0];
+                *h = pair[1];
+            }
+        }
+        // Walk the input contiguously; each element scatters one byte into
+        // each of the `element_size` output runs.
+        _ => {
+            for (i, element) in input.chunks_exact(element_size).enumerate() {
+                for (j, &byte) in element.iter().enumerate() {
+                    output[j * n + i] = byte;
+                }
+            }
         }
     }
     Ok(())
@@ -124,11 +138,22 @@ pub fn unshuffle_into(
     Ok(())
 }
 
+/// [`shuffle_into`] a new buffer.
+pub fn shuffle(input: &[u8], element_size: usize) -> Result<Vec<u8>, CodecError> {
+    let mut shuffled = vec![0u8; input.len()];
+    shuffle_into(input, &mut shuffled, element_size)?;
+    Ok(shuffled)
+}
+
+/// LZ4-compress bytes into a raw block, no size prefix. On its own this is
+/// the protocol's plain `lz4` codec; [`encode`] shuffles first.
+pub fn compress_block(data: &[u8]) -> Vec<u8> {
+    lz4_flex::block::compress(data)
+}
+
 /// Shuffle and LZ4-compress a plane of `element_size`-byte elements.
 pub fn encode(plane: &[u8], element_size: usize) -> Result<Vec<u8>, CodecError> {
-    let mut shuffled = vec![0u8; plane.len()];
-    shuffle_into(plane, &mut shuffled, element_size)?;
-    Ok(lz4_flex::block::compress(&shuffled))
+    Ok(compress_block(&shuffle(plane, element_size)?))
 }
 
 /// Decompress and unshuffle a plane that should decode to `decoded_len` bytes.

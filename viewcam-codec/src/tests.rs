@@ -111,9 +111,10 @@ fn vectors_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors")
 }
 
-/// Planes the Python reference (`python/viewcam_codec.py`) encoded decode to
-/// the raw planes stored beside them. `<name>.e<size>.lz4` holds the encoded
-/// plane, `<name>.raw` the expected bytes.
+/// Planes the independent reference (numpy + the C liblz4, in `python/tests/`)
+/// encoded decode to the raw planes stored beside them. `<name>.e<size>.lz4`
+/// holds the encoded plane (element size 1 is plain lz4), `<name>.raw` the
+/// expected bytes.
 #[test]
 fn decodes_python_encoded_vectors() {
     let mut seen = 0;

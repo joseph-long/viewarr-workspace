@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "viewcam-codec"
+description = "LZ4 and byte-shuffle + LZ4 codecs for viewcam frames (the same Rust the browser decoder runs)"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Joseph D. Long", email = "me@joseph-long.com" }]
+classifiers = ["Programming Language :: Rust", "Programming Language :: Python :: 3"]
+dynamic = ["version"]
+# numpy is needed only for decode(); encode() takes any buffer.
+optional-dependencies = { numpy = ["numpy"], test = ["numpy", "lz4", "pytest"] }
+
+[tool.maturin]
+module-name = "viewcam_codec._native"
+features = ["pyo3/extension-module"]

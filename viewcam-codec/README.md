@@ -20,15 +20,37 @@ shuffled bytes. The decoded length is not stored: the receiver supplies it
 from the image's width × height × element size, so a corrupt stream cannot
 ask for an arbitrary allocation.
 
-Server side, in Python ([`python/viewcam_codec.py`](python/viewcam_codec.py)
-is a reference implementation):
+Planes must be little-endian.
+
+These are the payloads of the viewcam protocol's `shuffle-lz4` codec
+(`viewcam-proto/PROTOCOL.md`). Its plain `lz4` codec is the same without the
+shuffle, and decodes here with an element size of 1, since shuffling single
+bytes changes nothing. The `raw` codec needs no decoder.
+
+## Python (servers)
+
+[`python/`](python/) builds this same Rust code as a Python extension with
+[maturin](https://www.maturin.rs/) and PyO3, so the server encodes with the
+code the browser decodes with: one implementation, not two to keep in step.
 
 ```python
-shuffled = plane.view(np.uint8).reshape(-1, plane.itemsize).T.tobytes()
-encoded = lz4.block.compress(shuffled, store_size=False)
+import viewcam_codec
+
+payload = viewcam_codec.encode(frame)                  # shuffle-lz4
+payload = viewcam_codec.encode(satmap, shuffle=False)  # lz4
+image = viewcam_codec.decode(payload, "<u2", (h, w))   # needs numpy
 ```
 
-Planes must be little-endian.
+`encode` takes any C-contiguous little-endian buffer (numpy arrays included;
+strided views are copied to contiguous first) and reads the element size
+from it. It releases the GIL while compressing, so several threads can
+encode at once. Wheels are `abi3`: one per platform covers Python 3.11 and
+later.
+
+On an Apple Silicon Mac, `shuffle-lz4` encodes a 1024×1024 `u16` camera-like
+frame in about 0.4 ms, against about 1.1 ms for numpy's shuffle followed by
+the C liblz4, with an identical compression ratio (1.9× on that frame; plain
+LZ4 managed 1.0×, which is why the shuffle is there).
 
 ## Web worker
 
@@ -74,16 +96,21 @@ reuses one scratch buffer across calls.
 
 ```bash
 npm run build          # -> pkg/ (wasm-pack, --target web)
-npm run test:wasm      # Node: decode the Python vectors, time a 1024x1024 frame
-cargo test             # Rust: layout, round trips, corruption, Python vectors
-uv run --with numpy --with lz4 python -m unittest discover python
+npm run test:wasm      # Node: decode the reference vectors, time a 1024x1024 frame
+cargo test             # Rust: layout, round trips, corruption, reference vectors
+
+cd python              # the Python extension, in a virtualenv:
+pip install maturin numpy lz4 pytest
+maturin develop --release
+pytest tests
 ```
 
-`tests/vectors/` holds planes encoded by each implementation for the other
-to decode (`py_*` by Python, `rs_*` by Rust). LZ4 encoders may legitimately
-produce different bytes for the same input, so the check is that each side
-decodes the other's output exactly. Regenerate with `VIEWCAM_REGEN_VECTORS=1`
-on either test suite.
+The Python tests check the extension against an independent reference:
+numpy for the shuffle and the C liblz4 (through the `lz4` package) for
+compression, in both directions, which also proves the payloads are standard
+LZ4. `tests/vectors/` holds planes that reference encoded (`py_*`, decoded by
+the Rust and WASM tests) and one the Rust code encoded (`rs_*`, decoded by
+the reference). Regenerate with `VIEWCAM_REGEN_VECTORS=1` on either suite.
 
 On an Apple Silicon Mac under Node, a 1024×1024 `u16` frame decodes in about
 1.4 ms (~1.4 GiB/s). The compression ratio depends entirely on the data; the

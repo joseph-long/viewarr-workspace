@@ -1,0 +1,13 @@
+[package]
+name = "viewcam-proto"
+version = "0.1.0"
+edition = "2021"
+authors = ["Joseph D. Long <me@joseph-long.com>"]
+license = "MIT"
+description = "The viewcam frame-streaming protocol: message encoding and client state, without I/O"
+repository = "https://github.com/joseph-long/viewarr"
+
+# No dependencies on purpose: this is the part shared by the native client,
+# the browser client (as WASM) and the test vectors, so it does no I/O and
+# pulls in nothing that would tie it to one of them.
+[dependencies]

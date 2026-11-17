@@ -34,6 +34,11 @@ htmlcov/
 viewarr/target/
 viewarr/pkg/
 viewarr-native/target/
+viewcam/target/
+viewcam/pkg/
+viewcam-proto/target/
+viewcam-codec/target/
+viewcam-codec/pkg/
 *.wasm
 
 # Package-specific build artifacts

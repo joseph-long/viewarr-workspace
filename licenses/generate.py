@@ -9,6 +9,8 @@ them from `cargo metadata` and the crates' own sources:
 
     viewarr/THIRD_PARTY_LICENSES.txt         the WebAssembly build (both wheels)
     viewarr-native/THIRD_PARTY_LICENSES.txt  the native app (macOS and Linux)
+    viewcam/THIRD_PARTY_LICENSES.txt         the camera viewer's WebAssembly build
+    viewcam-codec/THIRD_PARTY_LICENSES.txt   the frame decoder's WebAssembly build
 
 Material that did not arrive as a crate (the colormap tables, the Phosphor
 icon font) is added from licenses/extra/.
@@ -49,6 +51,18 @@ PRODUCTS = [
             "aarch64-unknown-linux-gnu",
         ],
         "the viewarr desktop app, as shipped for macOS and Linux",
+    ),
+    (
+        ROOT / "viewcam" / "THIRD_PARTY_LICENSES.txt",
+        ROOT / "viewcam" / "Cargo.toml",
+        ["wasm32-unknown-unknown"],
+        "the viewcam camera viewer's WebAssembly build",
+    ),
+    (
+        ROOT / "viewcam-codec" / "THIRD_PARTY_LICENSES.txt",
+        ROOT / "viewcam-codec" / "Cargo.toml",
+        ["wasm32-unknown-unknown"],
+        "the viewcam frame decoder's WebAssembly build",
     ),
 ]
 

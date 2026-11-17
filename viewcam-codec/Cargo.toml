@@ -1,0 +1,29 @@
+[package]
+name = "viewcam-codec"
+version = "0.1.0"
+edition = "2021"
+authors = ["Joseph D. Long <me@joseph-long.com>"]
+license = "MIT"
+description = "Byte-shuffle + LZ4 frame codec for viewcam, small enough to load in a web worker"
+repository = "https://github.com/joseph-long/viewarr"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Deliberately nothing from viewarr/egui: the WASM build is meant to be loaded
+# on its own in a worker, so it should cost the page only the codec.
+[dependencies]
+# Pure Rust, so it builds for wasm32 with no C toolchain. The default features
+# keep decoding memory-safe on corrupt input, which matters for data off a
+# network.
+lz4_flex = "0.14"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.108"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3"]

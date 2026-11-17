@@ -1,0 +1,32 @@
+{
+  "name": "viewcam-codec",
+  "version": "0.1.0",
+  "description": "Byte-shuffle + LZ4 decoder for viewcam frames, as a WASM module for web workers",
+  "main": "pkg/viewcam_codec.js",
+  "module": "pkg/viewcam_codec.js",
+  "types": "pkg/viewcam_codec.d.ts",
+  "files": [
+    "pkg/"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build --target web --out-dir pkg -- --locked",
+    "postbuild:wasm": "cp js/decode-worker.js pkg/ && cp THIRD_PARTY_LICENSES.txt pkg/ && node -e \"const p=require('./pkg/package.json'); p.files.push('decode-worker.js','THIRD_PARTY_LICENSES.txt'); require('fs').writeFileSync('./pkg/package.json', JSON.stringify(p, null, 2));\"",
+    "build": "npm run build:wasm",
+    "test:wasm": "node js/smoke-test.mjs",
+    "clean": "rm -rf pkg target"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joseph-long/viewarr.git"
+  },
+  "keywords": [
+    "wasm",
+    "lz4",
+    "shuffle",
+    "compression",
+    "web-worker",
+    "viewcam"
+  ],
+  "author": "",
+  "license": "MIT"
+}

@@ -1,0 +1,83 @@
+/**
+ * TypeScript type definitions for viewcam
+ */
+
+/** Toolbar settings reported to {@link onStateChange}. */
+export interface ViewcamState {
+  darkSubtraction: boolean;
+  saturationOverlay: boolean;
+  /** CSS `#rrggbb`. */
+  saturationColor: string;
+}
+
+/** Create a new camera viewer in the element with this ID. */
+export function createViewer(containerId: string): Promise<void>;
+
+/** Set the science frame (dark-subtracted while that toggle is on). */
+export function setData(
+  containerId: string,
+  buffer: ArrayBuffer,
+  width: number,
+  height: number,
+  dtype: string
+): void;
+
+/** Set the dark frame; kept until replaced or cleared. */
+export function setDark(
+  containerId: string,
+  buffer: ArrayBuffer,
+  width: number,
+  height: number,
+  dtype: string
+): void;
+
+export function clearDark(containerId: string): void;
+
+/** Set the saturation image; nonzero pixels are painted in the saturation colour. */
+export function setSaturation(
+  containerId: string,
+  buffer: ArrayBuffer,
+  width: number,
+  height: number,
+  dtype: string
+): void;
+
+export function clearSaturation(containerId: string): void;
+
+export function getDarkSubtraction(containerId: string): boolean;
+export function setDarkSubtraction(containerId: string, enabled: boolean): void;
+
+export function getSaturationOverlay(containerId: string): boolean;
+export function setSaturationOverlay(containerId: string, enabled: boolean): void;
+
+/** CSS `#rrggbb`. */
+export function getSaturationColor(containerId: string): string;
+/** CSS `#rrggbb`; throws on anything else. */
+export function setSaturationColor(containerId: string, color: string): void;
+
+export function onStateChange(containerId: string, callback: (state: ViewcamState) => void): void;
+export function clearCallbacks(containerId: string): void;
+
+export function destroyViewer(containerId: string): void;
+export function hasViewer(containerId: string): boolean;
+
+declare const viewcam: {
+  createViewer: typeof createViewer;
+  setData: typeof setData;
+  setDark: typeof setDark;
+  clearDark: typeof clearDark;
+  setSaturation: typeof setSaturation;
+  clearSaturation: typeof clearSaturation;
+  getDarkSubtraction: typeof getDarkSubtraction;
+  setDarkSubtraction: typeof setDarkSubtraction;
+  getSaturationOverlay: typeof getSaturationOverlay;
+  setSaturationOverlay: typeof setSaturationOverlay;
+  getSaturationColor: typeof getSaturationColor;
+  setSaturationColor: typeof setSaturationColor;
+  onStateChange: typeof onStateChange;
+  clearCallbacks: typeof clearCallbacks;
+  destroyViewer: typeof destroyViewer;
+  hasViewer: typeof hasViewer;
+};
+
+export default viewcam;

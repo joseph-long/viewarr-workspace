@@ -1,0 +1,4 @@
+/target
+/pkg
+*.wasm
+.DS_Store

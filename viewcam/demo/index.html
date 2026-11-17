@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>viewcam demo</title>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #f4f4f4; }
+    header { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 12px; }
+    #cam { width: 100vw; height: calc(100vh - 90px); }
+    #log { padding: 0 12px; font: 12px monospace; color: #555; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>viewcam demo</strong>
+    <button id="stream">Start stream</button>
+    <button id="dark-mismatch">Load 256×256 dark (mismatch)</button>
+    <button id="dark-ok">Load matching dark</button>
+    <button id="clear-sat">Stop sending saturation</button>
+    <span id="fps"></span>
+  </header>
+  <div id="cam"></div>
+  <div id="log"></div>
+
+  <script type="module">
+    // Serve the viewcam directory (npm run demo) and open /demo/.
+    import * as viewcam from '../pkg/wrapper.js';
+
+    const W = 512, H = 512, FULL_WELL = 65535;
+    const id = 'cam';
+    const log = (msg) => { document.getElementById('log').textContent = msg; };
+
+    // A fixed-pattern dark: an offset, a vertical gradient, and hot columns.
+    // These are exactly what dark subtraction should remove.
+    function makeDark(w, h) {
+      const dark = new Uint16Array(w * h);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const hot = x % 64 === 7 ? 3000 : 0;
+          dark[y * w + x] = 1000 + 4 * y + hot;
+        }
+      }
+      return dark;
+    }
+    const dark = makeDark(W, H);
+
+    // Data = dark + a few drifting Gaussian stars + noise, clipped at full
+    // well. The saturation image flags the clipped pixels.
+    function makeFrame(t) {
+      const data = new Uint16Array(W * H);
+      const sat = new Uint8Array(W * H);
+      const stars = [
+        [256 + 120 * Math.cos(t), 256 + 120 * Math.sin(t), 90000, 6],
+        [150, 380, 40000, 4],
+        [380 + 20 * Math.sin(2 * t), 140, 200000, 3],
+      ];
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          let v = dark[y * W + x] + 200 * Math.random();
+          for (const [sx, sy, amp, sigma] of stars) {
+            const r2 = (x - sx) ** 2 + (y - sy) ** 2;
+            if (r2 < 400 * sigma) v += amp * Math.exp(-r2 / (2 * sigma * sigma));
+          }
+          if (v >= FULL_WELL) { v = FULL_WELL; sat[y * W + x] = 1; }
+          data[y * W + x] = v;
+        }
+      }
+      return { data, sat };
+    }
+
+    function pushFrame(t) {
+      const { data, sat } = makeFrame(t);
+      viewcam.setData(id, data.buffer, W, H, 'u16');
+      if (sendSaturation) viewcam.setSaturation(id, sat.buffer, W, H, 'u8');
+    }
+    let sendSaturation = true;
+
+    await viewcam.createViewer(id);
+    viewcam.onStateChange(id, (s) => log(`state: ${JSON.stringify(s)}`));
+    viewcam.setDark(id, dark.buffer, W, H, 'u16');
+    pushFrame(0);
+
+    let running = false, t = 0, frames = 0, since = performance.now();
+    function tick() {
+      if (!running) return;
+      t += 0.05;
+      pushFrame(t);
+      frames++;
+      const now = performance.now();
+      if (now - since > 1000) {
+        document.getElementById('fps').textContent = `${(1000 * frames / (now - since)).toFixed(1)} frames/s pushed`;
+        frames = 0; since = now;
+      }
+      requestAnimationFrame(tick);
+    }
+    document.getElementById('stream').onclick = (e) => {
+      running = !running;
+      e.target.textContent = running ? 'Stop stream' : 'Start stream';
+      if (running) tick();
+    };
+    document.getElementById('dark-mismatch').onclick = () => {
+      viewcam.setDark(id, makeDark(256, 256).buffer, 256, 256, 'u16');
+    };
+    document.getElementById('dark-ok').onclick = () => {
+      viewcam.setDark(id, dark.buffer, W, H, 'u16');
+    };
+    document.getElementById('clear-sat').onclick = (e) => {
+      sendSaturation = !sendSaturation;
+      e.target.textContent = sendSaturation ? 'Stop sending saturation' : 'Send saturation';
+      if (!sendSaturation) viewcam.clearSaturation(id);
+    };
+  </script>
+</body>
+</html>

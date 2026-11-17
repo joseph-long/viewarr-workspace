@@ -383,6 +383,11 @@ jobs:
       - name: Test
         run: cargo test
 
+      # The viewarr widget's own unit tests (view transforms, widget state);
+      # the WASM build jobs only compile it.
+      - name: Test the viewarr widget
+        run: cargo test --manifest-path ../viewarr/Cargo.toml
+
       # The tests alone would not catch a break in the GUI code, since nothing
       # headless instantiates it -- but it still has to compile and link.
       - name: Build release binary

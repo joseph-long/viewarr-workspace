@@ -1,11 +1,11 @@
 //! The viewcam frame-streaming protocol, without I/O.
 //!
 //! [PROTOCOL.md](../PROTOCOL.md) is the specification; this crate is its
-//! reference implementation. It turns bytes into frames and frames into
-//! bytes, and tracks a client's side of the credit window and the
-//! newest-frame-wins rule for one feed. Reading streams and sending datagrams
-//! is left to the caller, so the same logic, and the same tests, serve every
-//! client and transport.
+//! reference implementation. It turns messages into frames and frames into
+//! messages, and tracks a client's side of the window and the
+//! newest-frame-wins rule for one feed. Reading and writing WebSocket
+//! messages is left to the caller, so the same logic, and the same tests,
+//! serve the native client and the browser.
 //!
 //! Payloads are carried as they arrived, still encoded; decoding the LZ4
 //! codecs is the `viewcam-codec` crate's job, so this one stays
@@ -19,18 +19,14 @@ pub const VERSION: u8 = 1;
 /// Length of the prefix every message starts with.
 pub const PREFIX_LEN: usize = 8;
 pub const FRAME_HEADER_LEN: usize = 32;
-pub const CREDIT_LEN: usize = 16;
+pub const ACK_LEN: usize = 32;
 
 const KIND_FRAME: u8 = 1;
-const KIND_CREDIT: u8 = 0x81;
+const KIND_ACK: u8 = 0x81;
 
 /// Largest image a client accepts by default, in pixels. Bounds what a corrupt
 /// header can make it allocate.
 pub const DEFAULT_MAX_PIXELS: u64 = 1 << 28;
-
-/// How often a client re-sends its credit even when nothing changed, since
-/// datagrams can be lost.
-pub const CREDIT_RESEND_INTERVAL_MS: u64 = 100;
 
 // =============================================================================
 // Errors
@@ -54,19 +50,21 @@ pub enum ProtoError {
         encoded: u64,
         decoded: u64,
     },
-    /// The stream ended before the message was complete.
+    /// The message ended before its header said it would.
     Truncated {
         expected: usize,
         got: usize,
     },
-    /// The stream carried bytes past the end of its message.
+    /// The message ran on past the length its header gave.
     TrailingBytes {
         expected: usize,
         got: usize,
     },
-    /// A message that may not travel the way it arrived (a credit on a
-    /// stream, a frame in a datagram).
-    WrongChannel(u8),
+    /// A message of a kind the other side doesn't send (an ack from the
+    /// server, a frame from the client).
+    UnexpectedKind(u8),
+    /// An ack for fewer frames or bytes than an earlier one, or for more than were sent.
+    BadAck,
 }
 
 impl fmt::Display for ProtoError {
@@ -90,15 +88,18 @@ impl fmt::Display for ProtoError {
                 codec.name()
             ),
             ProtoError::Truncated { expected, got } => {
-                write!(f, "stream ended after {got} of {expected} bytes")
+                write!(f, "message ended after {got} of {expected} bytes")
             }
             ProtoError::TrailingBytes { expected, got } => {
-                write!(
-                    f,
-                    "stream carried {got} bytes for a {expected}-byte message"
-                )
+                write!(f, "{got}-byte message where {expected} bytes were expected")
             }
-            ProtoError::WrongChannel(k) => write!(f, "message kind {k:#04x} on the wrong channel"),
+            ProtoError::UnexpectedKind(k) => {
+                write!(f, "message kind {k:#04x} is not expected from this side")
+            }
+            ProtoError::BadAck => write!(
+                f,
+                "ack for less than an earlier one, or for more than was sent"
+            ),
         }
     }
 }
@@ -367,13 +368,14 @@ impl FrameHeader {
         out
     }
 
-    /// Decode and validate a header from the start of a stream. `Ok(None)`
-    /// means more bytes are needed.
+    /// Decode and validate the header at the start of a message, so it can
+    /// be checked before the payload is trusted. `Ok(None)` means `buf` is
+    /// too short to hold one.
     pub fn decode(buf: &[u8], max_pixels: u64) -> Result<Option<FrameHeader>, ProtoError> {
         match read_prefix(buf)? {
             None => return Ok(None),
             Some(KIND_FRAME) => {}
-            Some(KIND_CREDIT) => return Err(ProtoError::WrongChannel(KIND_CREDIT)),
+            Some(KIND_ACK) => return Err(ProtoError::UnexpectedKind(KIND_ACK)),
             Some(kind) => return Err(ProtoError::UnknownKind(kind)),
         }
         if buf.len() < FRAME_HEADER_LEN {
@@ -433,152 +435,159 @@ impl Frame {
         Frame::new(seq, 0, 0, dtype, Codec::Raw, Vec::new()).unwrap()
     }
 
-    /// Encode the whole message, as a server writes it to its stream.
+    /// Encode the whole message, as a server sends it.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.header.message_len());
         out.extend_from_slice(&self.header.encode());
         out.extend_from_slice(&self.payload);
         out
     }
-}
 
-/// Reassembles one frame stream into a [`Frame`].
-///
-/// Feed it chunks as they arrive with [`push`](Self::push); it reports the
-/// header as soon as it is complete, so a client can abandon a stale frame
-/// before the rest of it arrives. Call [`finish`](Self::finish) when the
-/// stream ends.
-pub struct StreamReader {
-    max_pixels: u64,
-    buf: Vec<u8>,
-    header: Option<FrameHeader>,
-}
-
-impl StreamReader {
-    pub fn new(max_pixels: u64) -> Self {
-        Self {
-            max_pixels,
-            buf: Vec::new(),
-            header: None,
-        }
-    }
-
-    /// The header, once enough of the stream has arrived.
-    pub fn header(&self) -> Option<&FrameHeader> {
-        self.header.as_ref()
-    }
-
-    /// Append a chunk. Returns the header the first time it becomes complete.
-    pub fn push(&mut self, chunk: &[u8]) -> Result<Option<FrameHeader>, ProtoError> {
-        self.buf.extend_from_slice(chunk);
-        if self.header.is_some() {
-            return Ok(None);
-        }
-        let Some(header) = FrameHeader::decode(&self.buf, self.max_pixels)? else {
-            return Ok(None);
-        };
-        // Now the full size is known, reserve it once instead of growing by
-        // doubling through a multi-megabyte frame.
-        self.buf
-            .reserve(header.message_len().saturating_sub(self.buf.len()));
-        self.header = Some(header);
-        Ok(Some(header))
-    }
-
-    /// The stream ended: return the frame, or why it was malformed.
-    pub fn finish(self) -> Result<Frame, ProtoError> {
-        let got = self.buf.len();
-        let Some(header) = self.header else {
-            let expected = if got < PREFIX_LEN {
+    /// Decode one whole `FRAME` message, checking that its length is the
+    /// one its header gives.
+    pub fn decode(message: &[u8], max_pixels: u64) -> Result<Frame, ProtoError> {
+        let Some(header) = FrameHeader::decode(message, max_pixels)? else {
+            let expected = if message.len() < PREFIX_LEN {
                 PREFIX_LEN
             } else {
                 FRAME_HEADER_LEN
             };
-            return Err(ProtoError::Truncated { expected, got });
+            return Err(ProtoError::Truncated {
+                expected,
+                got: message.len(),
+            });
         };
         let expected = header.message_len();
+        let got = message.len();
         if got < expected {
             return Err(ProtoError::Truncated { expected, got });
         }
         if got > expected {
             return Err(ProtoError::TrailingBytes { expected, got });
         }
-        let mut buf = self.buf;
-        let payload = buf.split_off(FRAME_HEADER_LEN);
-        Ok(Frame { header, payload })
+        Ok(Frame {
+            header,
+            payload: message[FRAME_HEADER_LEN..].to_vec(),
+        })
     }
 }
 
 // =============================================================================
-// Credit
+// Ack
 // =============================================================================
 
-pub fn encode_credit(limit: u64) -> [u8; CREDIT_LEN] {
-    let mut out = [0u8; CREDIT_LEN];
-    out[..PREFIX_LEN].copy_from_slice(&prefix(KIND_CREDIT));
-    out[8..].copy_from_slice(&limit.to_le_bytes());
-    out
+/// A client's acknowledgement: what it has received on the connection, and how much
+/// more it lets be in flight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ack {
+    /// `FRAME`s received on this connection.
+    pub acked_frames: u64,
+    /// Their total length, headers included.
+    pub acked_bytes: u64,
+    /// Frames allowed in flight beyond those received; `0` pauses the feed.
+    pub window_frames: u32,
+    /// Bytes allowed in flight beyond those received; `0` means no limit.
+    pub window_bytes: u32,
 }
 
-pub fn decode_credit(buf: &[u8]) -> Result<u64, ProtoError> {
-    let truncated = ProtoError::Truncated {
-        expected: CREDIT_LEN,
-        got: buf.len(),
-    };
-    match read_prefix(buf)? {
-        Some(KIND_CREDIT) if buf.len() == CREDIT_LEN => Ok(read_u64(buf, 8)),
-        Some(KIND_CREDIT) | None => Err(truncated),
-        Some(kind) => Err(ProtoError::WrongChannel(kind)),
+impl Ack {
+    pub fn encode(&self) -> [u8; ACK_LEN] {
+        let mut out = [0u8; ACK_LEN];
+        out[..PREFIX_LEN].copy_from_slice(&prefix(KIND_ACK));
+        out[8..16].copy_from_slice(&self.acked_frames.to_le_bytes());
+        out[16..24].copy_from_slice(&self.acked_bytes.to_le_bytes());
+        out[24..28].copy_from_slice(&self.window_frames.to_le_bytes());
+        out[28..32].copy_from_slice(&self.window_bytes.to_le_bytes());
+        out
+    }
+
+    pub fn decode(message: &[u8]) -> Result<Ack, ProtoError> {
+        let got = message.len();
+        match read_prefix(message)? {
+            Some(KIND_ACK) if got == ACK_LEN => Ok(Ack {
+                acked_frames: read_u64(message, 8),
+                acked_bytes: read_u64(message, 16),
+                window_frames: read_u32(message, 24),
+                window_bytes: read_u32(message, 28),
+            }),
+            Some(KIND_ACK) if got > ACK_LEN => Err(ProtoError::TrailingBytes {
+                expected: ACK_LEN,
+                got,
+            }),
+            Some(KIND_ACK) | None => Err(ProtoError::Truncated {
+                expected: ACK_LEN,
+                got,
+            }),
+            Some(kind) => Err(ProtoError::UnexpectedKind(kind)),
+        }
     }
 }
 
 /// A client's side of flow control and newest-frame-wins, for one feed.
 #[derive(Clone, Debug)]
 pub struct ClientState {
-    window: u64,
-    finished: u64,
+    acked_frames: u64,
+    acked_bytes: u64,
+    window_frames: u32,
+    window_bytes: u32,
     newest_shown: Option<u64>,
 }
 
 impl ClientState {
-    pub fn new(window: u64) -> Self {
+    /// A new connection's state, with the window to ask for. Send
+    /// [`ack`](Self::ack) as soon as the connection opens: the server
+    /// sends nothing until it has one.
+    pub fn new(window_frames: u32, window_bytes: u32) -> Self {
         Self {
-            window: window.max(1),
-            finished: 0,
+            acked_frames: 0,
+            acked_bytes: 0,
+            window_frames,
+            window_bytes,
             newest_shown: None,
         }
     }
 
-    /// The credit limit to send: frames finished plus the window.
-    pub fn credit_limit(&self) -> u64 {
-        self.finished + self.window
+    /// The ack describing the current state.
+    pub fn ack(&self) -> Ack {
+        Ack {
+            acked_frames: self.acked_frames,
+            acked_bytes: self.acked_bytes,
+            window_frames: self.window_frames,
+            window_bytes: self.window_bytes,
+        }
     }
 
-    /// Whether a frame with this `seq` is already superseded, so its stream
-    /// should be abandoned without reading the rest.
+    /// A `FRAME` message of `message_len` bytes arrived, however it then
+    /// fares (shown, dropped as stale, or malformed). Returns the ack to
+    /// send straight away.
+    pub fn frame_received(&mut self, message_len: usize) -> Ack {
+        self.acked_frames += 1;
+        self.acked_bytes += message_len as u64;
+        self.ack()
+    }
+
+    /// Change the window, e.g. to `0` frames to pause a feed that isn't
+    /// shown. Returns the ack to send straight away.
+    pub fn set_window(&mut self, window_frames: u32, window_bytes: u32) -> Ack {
+        self.window_frames = window_frames;
+        self.window_bytes = window_bytes;
+        self.ack()
+    }
+
+    /// Whether a frame with this `seq` is already superseded by one shown.
     pub fn is_stale(&self, seq: u64) -> bool {
         self.newest_shown.is_some_and(|newest| seq <= newest)
     }
 
-    /// A frame arrived complete: `true` if it should be shown (it is the
-    /// newest yet), in which case it becomes the newest shown.
+    /// A frame is ready to show (decoded, perhaps off the main thread and
+    /// out of order): `true` if it should be shown, being the newest yet, in
+    /// which case it becomes the newest shown.
     pub fn accept(&mut self, seq: u64) -> bool {
         if self.is_stale(seq) {
             return false;
         }
         self.newest_shown = Some(seq);
         true
-    }
-
-    /// A frame stream ended, however it ended. Returns the new credit limit,
-    /// to send straight away.
-    pub fn frame_stream_finished(&mut self) -> u64 {
-        self.finished += 1;
-        self.credit_limit()
-    }
-
-    pub fn frames_finished(&self) -> u64 {
-        self.finished
     }
 }
 

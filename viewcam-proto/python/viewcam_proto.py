@@ -4,23 +4,24 @@ Standard library only, so an instrument server can vendor this one file.
 See ../PROTOCOL.md for the specification; the Rust crate in this directory's
 parent is the client side, and both are checked against ../tests/vectors/.
 
-Every feed (data, dark, saturation) carries the same FRAME messages. A server
-writes ``encode_frame(...)`` to a fresh unidirectional stream per frame,
-finishing the stream after it, and reads client credit datagrams with
-``decode_credit``. Payloads are passed in already encoded; for the LZ4
-codecs, the ``viewcam_codec`` extension (``viewcam-codec/python``)
-produces them.
+Every feed (data, dark, saturation) is its own WebSocket carrying the same
+FRAME messages, one per WebSocket message. A server sends
+``encode_frame(...)`` as a binary message whenever its ``SendWindow`` allows,
+and passes each binary message from the client through ``decode_ack``.
+Payloads are passed in already encoded; for the LZ4 codecs, the
+``viewcam_codec`` extension (``viewcam-codec/python``) produces them.
 """
 
 from __future__ import annotations
 
 import struct
+from typing import NamedTuple
 
 MAGIC = b"VCAM"
 VERSION = 1
 
 KIND_FRAME = 1
-KIND_CREDIT = 0x81
+KIND_ACK = 0x81
 
 CODEC_RAW = 0
 CODEC_LZ4 = 1
@@ -44,10 +45,11 @@ DTYPES = {
 # prefix (magic, version, kind, reserved), seq, width, height, dtype, codec,
 # reserved, encoded_len
 _FRAME = struct.Struct("<4sBBHQIIBBHI")
-_CREDIT = struct.Struct("<4sBBHQ")  # prefix, limit
+# prefix, acked_frames, acked_bytes, window_frames, window_bytes
+_ACK = struct.Struct("<4sBBHQQII")
 
 FRAME_HEADER_LEN = _FRAME.size  # 32
-CREDIT_LEN = _CREDIT.size  # 16
+ACK_LEN = _ACK.size  # 32
 
 
 class ProtocolError(ValueError):
@@ -107,42 +109,86 @@ def encode_empty_frame(seq: int, dtype: int) -> bytes:
     return encode_frame(seq, 0, 0, dtype, b"")
 
 
-def encode_credit(limit: int) -> bytes:
-    """A CREDIT datagram (normally sent by clients; here for tests)."""
-    return _CREDIT.pack(MAGIC, VERSION, KIND_CREDIT, 0, limit)
+class Ack(NamedTuple):
+    """What a client has received on its connection, and how much more it
+    lets be in flight."""
+
+    acked_frames: int
+    acked_bytes: int
+    window_frames: int  # 0 pauses the feed
+    window_bytes: int  # 0 means no byte limit
 
 
-def decode_credit(datagram: bytes) -> int:
-    """The ``limit`` from a client's CREDIT datagram."""
-    if len(datagram) != CREDIT_LEN:
-        raise ProtocolError(f"credit datagram is {len(datagram)} bytes, expected {CREDIT_LEN}")
-    magic, version, kind, _, limit = _CREDIT.unpack(datagram)
+def encode_ack(ack: Ack) -> bytes:
+    """An ACK message (normally sent by clients; here for tests)."""
+    return _ACK.pack(MAGIC, VERSION, KIND_ACK, 0, *ack)
+
+
+def decode_ack(message: bytes) -> Ack:
+    """The ack in a client's message."""
+    if len(message) != ACK_LEN:
+        raise ProtocolError(f"ack message is {len(message)} bytes, expected {ACK_LEN}")
+    magic, version, kind, _, *fields = _ACK.unpack(message)
     if magic != MAGIC:
         raise ProtocolError("not a viewcam message (bad magic)")
     if version != VERSION:
         raise ProtocolError(f"unsupported protocol version {version}")
-    if kind != KIND_CREDIT:
-        raise ProtocolError(f"expected a credit datagram, got kind {kind:#04x}")
-    return limit
+    if kind != KIND_ACK:
+        raise ProtocolError(f"expected an ack message, got kind {kind:#04x}")
+    return Ack(*fields)
 
 
-class CreditGate:
-    """The server's side of the credit window, for one feed.
+class SendWindow:
+    """The server's side of the window, for one connection.
 
-    Call ``on_credit`` with each datagram's limit, ``may_send`` before opening
-    a FRAME stream, and ``sent`` after opening one.
+    Call ``on_ack`` with each ack the client sends, ``may_send`` with a
+    frame's message length before sending it, and ``sent`` after.
+
+    In flight is everything sent that the client hasn't reported receiving,
+    wherever it is: the server's buffers, the kernel's, the network. Holding
+    that to the client's window is what bounds the stale frames a stalled
+    connection delivers once it recovers.
     """
 
     def __init__(self) -> None:
-        self.limit = 0
-        self.opened = 0
+        self.sent_frames = 0
+        self.sent_bytes = 0
+        # Nothing may be sent before the first ack.
+        self.ack = Ack(0, 0, 0, 0)
 
-    def on_credit(self, limit: int) -> None:
-        # Datagrams can arrive out of order; credit only ever grows.
-        self.limit = max(self.limit, limit)
+    def on_ack(self, ack: Ack) -> None:
+        if (
+            ack.acked_frames < self.ack.acked_frames
+            or ack.acked_bytes < self.ack.acked_bytes
+            or ack.acked_frames > self.sent_frames
+            or ack.acked_bytes > self.sent_bytes
+        ):
+            raise ProtocolError(
+                f"ack for {ack.acked_frames} frames, {ack.acked_bytes} bytes; "
+                f"previously {self.ack.acked_frames}, {self.ack.acked_bytes}, "
+                f"with {self.sent_frames}, {self.sent_bytes} sent"
+            )
+        self.ack = ack
 
-    def may_send(self) -> bool:
-        return self.opened < self.limit
+    @property
+    def in_flight_frames(self) -> int:
+        return self.sent_frames - self.ack.acked_frames
 
-    def sent(self) -> None:
-        self.opened += 1
+    @property
+    def in_flight_bytes(self) -> int:
+        return self.sent_bytes - self.ack.acked_bytes
+
+    def may_send(self, message_len: int) -> bool:
+        window_frames, window_bytes = self.ack.window_frames, self.ack.window_bytes
+        if self.in_flight_frames >= window_frames:
+            return False
+        # Alone, a frame may exceed the byte window; otherwise it never goes.
+        return (
+            window_bytes == 0
+            or self.in_flight_frames == 0
+            or self.in_flight_bytes + message_len <= window_bytes
+        )
+
+    def sent(self, message_len: int) -> None:
+        self.sent_frames += 1
+        self.sent_bytes += message_len

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use super::*;
 
-/// Every codec, plus an empty frame and a credit. Payloads are fixed bytes,
+/// Every codec, plus an empty frame and an ack. Payloads are fixed bytes,
 /// not real LZ4 output, since this crate only frames them; that keeps the
 /// Python reference able to reproduce them exactly. These are written to
 /// `tests/vectors/` and `python/test_viewcam_proto.py` checks the same files.
@@ -34,7 +34,17 @@ fn vectors() -> Vec<(&'static str, Vec<u8>)> {
             frame(8, 3, 2, DType::U16, Codec::ShuffleLz4, ramp(5)),
         ),
         ("frame_empty", Frame::empty(9, DType::F64).encode()),
-        ("credit", encode_credit(0x1122_3344_5566_7788).to_vec()),
+        (
+            "ack",
+            Ack {
+                acked_frames: 0x1122_3344_5566_7788,
+                acked_bytes: 0x0102_0304_0506_0708,
+                window_frames: 6,
+                window_bytes: 0x0040_0000,
+            }
+            .encode()
+            .to_vec(),
+        ),
     ]
 }
 
@@ -82,48 +92,52 @@ fn header_layout_is_as_specified() {
     assert_eq!(&shuffled[28..32], &5u32.to_le_bytes());
 }
 
-/// Every vector reassembles to the frame it came from, whatever the chunk
-/// boundaries: QUIC delivers a stream in pieces of any size.
+/// Every frame vector decodes to the frame it came from, and no shorter or
+/// longer message does.
 #[test]
-fn reassembles_across_every_split() {
+fn frames_decode_from_whole_messages_only() {
     for (name, bytes) in vectors() {
-        if name == "credit" {
+        if name == "ack" {
             continue;
         }
-        let whole = {
-            let mut r = StreamReader::new(DEFAULT_MAX_PIXELS);
-            r.push(&bytes).unwrap();
-            r.finish().unwrap()
-        };
-        assert_eq!(whole.encode(), bytes);
-        for split in 0..=bytes.len() {
-            let mut r = StreamReader::new(DEFAULT_MAX_PIXELS);
-            r.push(&bytes[..split]).unwrap();
-            r.push(&bytes[split..]).unwrap();
-            assert_eq!(r.finish().unwrap(), whole, "{name} split at {split}");
+        let frame = Frame::decode(&bytes, DEFAULT_MAX_PIXELS).unwrap();
+        assert_eq!(frame.encode(), bytes, "{name}");
+        for len in 0..bytes.len() {
+            assert!(
+                matches!(
+                    Frame::decode(&bytes[..len], DEFAULT_MAX_PIXELS),
+                    Err(ProtoError::Truncated { .. })
+                ),
+                "{name} cut to {len} bytes"
+            );
         }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(matches!(
+            Frame::decode(&longer, DEFAULT_MAX_PIXELS),
+            Err(ProtoError::TrailingBytes { .. })
+        ));
     }
 }
 
 #[test]
-fn header_is_reported_once_and_before_the_payload() {
+fn header_can_be_checked_before_the_payload() {
     let bytes = vectors().remove(0).1;
-    let mut r = StreamReader::new(DEFAULT_MAX_PIXELS);
-    assert_eq!(r.push(&bytes[..FRAME_HEADER_LEN - 1]).unwrap(), None);
-    let header = r
-        .push(&bytes[FRAME_HEADER_LEN - 1..FRAME_HEADER_LEN])
+    assert_eq!(
+        FrameHeader::decode(&bytes[..FRAME_HEADER_LEN - 1], DEFAULT_MAX_PIXELS),
+        Ok(None)
+    );
+    let header = FrameHeader::decode(&bytes[..FRAME_HEADER_LEN], DEFAULT_MAX_PIXELS)
         .unwrap()
         .unwrap();
     assert_eq!(header.seq, 0x0102_0304_0506_0708);
     assert_eq!(header.decoded_len(), 12);
-    assert_eq!(r.push(&bytes[FRAME_HEADER_LEN..]).unwrap(), None);
+    assert_eq!(header.message_len(), bytes.len());
 }
 
 #[test]
 fn empty_frames_mean_no_image() {
-    let mut r = StreamReader::new(DEFAULT_MAX_PIXELS);
-    r.push(&Frame::empty(3, DType::U16).encode()).unwrap();
-    let frame = r.finish().unwrap();
+    let frame = Frame::decode(&Frame::empty(3, DType::U16).encode(), DEFAULT_MAX_PIXELS).unwrap();
     assert!(frame.header.is_empty());
     assert!(frame.payload.is_empty());
     // An empty image cannot carry a payload, whatever the codec.
@@ -153,22 +167,11 @@ fn encoded_lengths_are_checked_per_codec() {
 }
 
 #[test]
-fn malformed_streams_are_rejected() {
+fn malformed_messages_are_rejected() {
     let frame = vectors().remove(0).1;
 
-    let mut r = StreamReader::new(DEFAULT_MAX_PIXELS);
-    r.push(&frame[..frame.len() - 1]).unwrap();
-    assert!(matches!(r.finish(), Err(ProtoError::Truncated { .. })));
-
-    let mut r = StreamReader::new(DEFAULT_MAX_PIXELS);
-    r.push(&frame).unwrap();
-    r.push(&[0]).unwrap();
-    assert!(matches!(r.finish(), Err(ProtoError::TrailingBytes { .. })));
-
-    let mut r = StreamReader::new(DEFAULT_MAX_PIXELS);
-    r.push(&frame[..10]).unwrap();
     assert_eq!(
-        r.finish(),
+        Frame::decode(&frame[..10], DEFAULT_MAX_PIXELS),
         Err(ProtoError::Truncated {
             expected: FRAME_HEADER_LEN,
             got: 10
@@ -177,7 +180,7 @@ fn malformed_streams_are_rejected() {
 
     // A bad magic is caught from the first wrong byte.
     assert_eq!(
-        StreamReader::new(DEFAULT_MAX_PIXELS).push(b"VX"),
+        Frame::decode(b"VX", DEFAULT_MAX_PIXELS),
         Err(ProtoError::BadMagic)
     );
 
@@ -196,10 +199,11 @@ fn malformed_streams_are_rejected() {
         Err(ProtoError::BadEncodedLength { .. })
     ));
 
-    // A credit belongs in a datagram, not on a stream.
+    // Servers don't send ack.
+    let ack = ClientState::new(1, 0).ack().encode();
     assert_eq!(
-        FrameHeader::decode(&encode_credit(1), DEFAULT_MAX_PIXELS),
-        Err(ProtoError::WrongChannel(0x81))
+        Frame::decode(&ack, DEFAULT_MAX_PIXELS),
+        Err(ProtoError::UnexpectedKind(0x81))
     );
 }
 
@@ -214,19 +218,36 @@ fn oversized_images_are_refused_before_allocating() {
         encoded_len: 1,
     }
     .encode();
+    // Refused from the header alone, before any payload is looked at.
     assert!(matches!(
-        StreamReader::new(DEFAULT_MAX_PIXELS).push(&header),
+        FrameHeader::decode(&header, DEFAULT_MAX_PIXELS),
         Err(ProtoError::TooLarge { .. })
     ));
 }
 
 #[test]
-fn credit_round_trips_and_rejects_other_kinds() {
-    assert_eq!(decode_credit(&encode_credit(42)), Ok(42));
-    assert!(decode_credit(&encode_credit(42)[..15]).is_err());
+fn ack_round_trips_and_rejects_other_kinds() {
+    let ack = Ack {
+        acked_frames: 3,
+        acked_bytes: 4096,
+        window_frames: 6,
+        window_bytes: 0,
+    };
+    let bytes = ack.encode();
+    assert_eq!(Ack::decode(&bytes), Ok(ack));
+    assert_eq!(&bytes[24..28], &6u32.to_le_bytes());
+    assert!(matches!(
+        Ack::decode(&bytes[..ACK_LEN - 1]),
+        Err(ProtoError::Truncated { .. })
+    ));
+    assert!(matches!(
+        Ack::decode(&[&bytes[..], &[0]].concat()),
+        Err(ProtoError::TrailingBytes { .. })
+    ));
+    // Clients don't send frames.
     assert_eq!(
-        decode_credit(&Frame::empty(0, DType::U8).encode()),
-        Err(ProtoError::WrongChannel(1))
+        Ack::decode(&Frame::empty(0, DType::U8).encode()),
+        Err(ProtoError::UnexpectedKind(1))
     );
 }
 
@@ -247,21 +268,31 @@ fn dtypes_and_codecs_round_trip_their_codes() {
 }
 
 #[test]
-fn client_state_tracks_credit_and_newest_frame() {
-    let mut s = ClientState::new(6);
-    assert_eq!(s.credit_limit(), 6);
+fn client_state_acknowledges_what_it_received() {
+    let mut s = ClientState::new(6, 1 << 20);
+    let opening = s.ack();
+    assert_eq!((opening.acked_frames, opening.acked_bytes), (0, 0));
+    assert_eq!((opening.window_frames, opening.window_bytes), (6, 1 << 20));
 
-    // Frames complete out of order: 3 first, then 2 (late, dropped), then 5.
+    let ack = s.frame_received(100);
+    assert_eq!((ack.acked_frames, ack.acked_bytes), (1, 100));
+    let ack = s.frame_received(40);
+    assert_eq!((ack.acked_frames, ack.acked_bytes), (2, 140));
+
+    // Pausing changes only the window; the counts carry on.
+    let paused = s.set_window(0, 0);
+    assert_eq!((paused.acked_frames, paused.window_frames), (2, 0));
+}
+
+#[test]
+fn client_state_shows_only_the_newest_frame() {
+    // Decoded off the main thread, frames can finish out of order:
+    // 3 first, then 2 (late, dropped), then 5.
+    let mut s = ClientState::new(6, 0);
     assert!(s.accept(3));
-    assert_eq!(s.frame_stream_finished(), 7);
     assert!(s.is_stale(2));
     assert!(!s.accept(2));
-    assert_eq!(s.frame_stream_finished(), 8);
     assert!(!s.is_stale(5));
     assert!(s.accept(5));
     assert!(!s.accept(5), "the same frame twice is not newer");
-
-    // Abandoned and broken streams still return their credit.
-    assert_eq!(s.frame_stream_finished(), 9);
-    assert_eq!(s.frames_finished(), 3);
 }

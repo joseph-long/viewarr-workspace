@@ -1,8 +1,8 @@
 # viewcam streaming protocol, version 1 (draft)
 
 How an instrument server streams images to viewcam clients (the native app
-and the browser). Still a draft: nothing consumes it yet, so it changes in
-place.
+and the browser) over WebSockets. Still a draft: nothing consumes it yet, so
+it changes in place.
 
 ## Feeds
 
@@ -18,41 +18,62 @@ to three, each on its own connection:
 The protocol does not know which is which: every feed carries the same
 `FRAME` messages, and a client combines them as it sees fit. A server should
 give frames derived from the same camera exposure the same `seq` on every
-feed (the camera's frame counter does this), so a client can pair a
-saturation map with its data frame when it wants to.
+feed, so a client can pair a saturation map with its data frame when it
+wants to.
 
-Each feed is independent: its own `seq` order, its own credit window, its
-own newest-frame-wins.
+Each feed is independent: its own connection, `seq` order, window and
+newest-frame-wins. Separate connections also keep a large data frame from
+delaying the small saturation map queued behind it, as it would on one shared
+TCP connection.
 
 ## Design
 
-Three choices keep video from stalling on a lossy, high-latency link:
+On TCP a lost packet stalls everything behind it until it is retransmitted,
+and an outage of a few seconds stalls the connection for those seconds. What
+matters is what happens next. If the server had kept writing frames into the
+connection, they would be sitting in its socket buffers and the network, and
+the client would have to receive all of them, stale, before anything current.
+The longer the stall, the longer the flood after it.
 
-1. **One stream per frame.** A lost packet holds up only the frame it
-   belongs to; later frames keep arriving on their own streams. (On a single
-   TCP byte stream, one loss blocks everything behind it until it is
-   retransmitted.)
-2. **Newest frame wins.** A client shows a frame only if it is newer than the
-   one on screen, and abandons a frame stream once a newer frame was shown.
-3. **A credit window.** The server keeps at most a client-granted number of
-   frames in flight, so it never builds a backlog behind a slow link, and
-   several frames in flight means throughput does not hinge on the round
-   trip (one-at-a-time request/reply would cap a 150 ms link near 6 fps).
+So the server writes frames only as the client's acknowledgements allow,
+much as TCP itself does with its ACKs and receive window:
+
+1. **The client acknowledges what it has received.** It reports how many
+   frames and bytes it has received, and how many it lets be in flight
+   beyond that (its *window*). The server counts what it has written, so it
+   knows exactly how much is in flight: written to the connection and not yet
+   received, wherever it is (the server's buffers, the kernel's, the network).
+   A send completing locally says nothing about that, which is why the
+   window has to run from the client's acknowledgements, not from the
+   server's own bookkeeping.
+2. **Newest frame wins.** While the window is full, the server holds only
+   the newest frame for the feed, replacing any older one still waiting. It
+   never queues.
+3. **The window bounds the catch-up.** After a stall, the client first
+   receives what was already in flight, at most one window of frames and
+   bytes, all of it from before the stall. The next frame is then the newest
+   the server has. The cost of a stall, once the link is back, is one window.
+
+Several frames in flight keep throughput independent of the round trip
+(one at a time would cap a 150 ms link near 6 fps), so the window trades
+throughput against how much stale data a stall can trap. See
+[Choosing a window](#choosing-a-window).
 
 ## Transport
 
-*Not settled.* The draft binding is WebTransport (HTTP/3): one session per
-feed, at server-chosen URLs such as `https://instrument.example/viewcam/data`,
-with datagrams enabled; each `FRAME` on its own server-initiated
-unidirectional stream, finished after it; `CREDIT` as datagrams.
+Each feed is a WebSocket at a URL of the server's choosing, such as
+`wss://instrument.example/viewcam/camwfs_dark`. Every protocol message is one
+binary WebSocket message, and every WebSocket message is one protocol
+message. A text message, or a binary one that isn't a valid message of a kind
+expected from that side, is a protocol error: close the connection with code
+1002 (protocol error), or 1003 for a text message.
 
-Every message is self-delimiting (its length is in its header), so a
-byte-stream fallback such as a WebSocket can carry the same messages
-back to back.
+Servers should:
 
-For servers on private networks, browsers can pin a self-signed certificate
-by its SHA-256 hash (`serverCertificateHashes`), provided it is ECDSA P-256
-and valid for at most 14 days.
+- disable Nagle's algorithm (`TCP_NODELAY`), so an ack or the tail of a
+  frame isn't held back waiting for more to send;
+- not negotiate `permessage-deflate` on a feed: LZ4 payloads don't deflate
+  further, and the CPU it costs is latency.
 
 ## Encoding
 
@@ -63,7 +84,7 @@ prefix:
 | -----: | ---: | ---------- | ------------------------ |
 |      0 |    4 | `magic`    | ASCII `VCAM`             |
 |      4 |    1 | `version`  | `1`                      |
-|      5 |    1 | `kind`     | `1` = FRAME, `0x81` = CREDIT |
+|      5 |    1 | `kind`     | `1` = FRAME, `0x81` = ACK |
 |      6 |    2 | `reserved` | `0`; receivers ignore it |
 
 A receiver rejects a message with the wrong magic or an unknown version or
@@ -71,7 +92,7 @@ kind.
 
 ### `FRAME` (kind 1, server → client)
 
-32-byte header, then `encoded_len` bytes of payload:
+32-byte header, then `encoded_len` bytes of payload, and nothing after it:
 
 | Offset | Size | Field         | Notes                                     |
 | -----: | ---: | ------------- | ----------------------------------------- |
@@ -92,7 +113,11 @@ the **decoded length**.
 A frame with `width × height = 0` means "no image on this feed", e.g. a
 dark that has been withdrawn. Its `encoded_len` is 0.
 
-`seq` can be the camera's own frame counter; gaps are fine.
+`seq` strictly increases on a connection; gaps are fine, and are what a
+client sees of the frames the server skipped. It can be the camera's own
+frame counter, but if that counter restarts (a camera restarted, a stream
+recreated) the server must keep `seq` increasing, e.g. by offsetting the new
+counter past the last `seq` it sent.
 
 #### Dtypes
 
@@ -124,55 +149,91 @@ codecs, `encoded_len` may not exceed LZ4's worst case for the decoded length,
 
 Which codec suits a feed is the server's call: `raw` costs no CPU,
 `shuffle-lz4` usually compresses multi-byte camera data best, and a mostly
-zero saturation map compresses enormously with either LZ4 codec.
+zero saturation map compresses enormously with either LZ4 codec. Compression
+also shrinks what a stall can trap, since the window counts encoded bytes.
 
-### `CREDIT` (kind 0x81, client → server)
+### `ACK` (kind 0x81, client → server)
 
-16 bytes: the prefix with `kind = 0x81`, then `limit`, a u64 at offset 8.
+32 bytes:
 
-`limit` is the total number of `FRAME` streams the server may have opened on
-this feed so far. It only ever grows, so it is safe to lose or reorder: the
-server keeps the largest `limit` it has seen and ignores the rest. A client
-sends one:
+| Offset | Size | Field           | Notes                                         |
+| -----: | ---: | --------------- | --------------------------------------------- |
+|      0 |    8 | prefix          | `kind = 0x81`                                 |
+|      8 |    8 | `acked_frames`  | u64, `FRAME`s received on this connection     |
+|     16 |    8 | `acked_bytes`   | u64, their total length, headers included     |
+|     24 |    4 | `window_frames` | u32, frames allowed in flight; `0` pauses     |
+|     28 |    4 | `window_bytes`  | u32, bytes allowed in flight; `0` = no limit  |
 
-- as soon as the feed opens (`limit = window`),
-- each time a `FRAME` stream finishes for it, however it ended (`limit =
-  frames finished + window`),
-- and every 100 ms regardless, since datagrams can be lost.
-
-A client picks `window` from the round trip and the frame rate it wants:
-about `rtt × fps`, plus a little slack (6 covers 30 fps over 150 ms). A
-rarely changing feed like the dark needs only 1 or 2.
+The `acked_*` counts are cumulative, so they never decrease, and can never
+exceed what the server has sent; an ack that breaks either rule is a
+protocol error. The window fields replace the previous ack's, so a client
+can resize its window, or pause a feed it isn't showing, at any time.
 
 ## Server behaviour
 
-- Keep only the newest frame waiting to be sent on each feed. When a new one
-  arrives before the waiting one was sent, replace it.
-- Send the waiting frame as soon as `frames opened < limit`.
-- On `STOP_SENDING` for a frame stream, reset it (`RESET_STREAM`); the client
-  no longer wants that frame.
-- A server may also reset an unfinished older frame stream itself once it
-  has sent a newer one, to save bandwidth.
-- A rarely changing feed (the dark) sends its current frame when the feed
-  opens, then only when it changes.
+For each connection the server counts `sent_frames` and `sent_bytes`, the
+`FRAME`s it has written and their total length. With the latest ack:
+
+    in_flight_frames = sent_frames - acked_frames
+    in_flight_bytes  = sent_bytes  - acked_bytes
+
+It may write a frame of `n` bytes (header included) when
+
+    window_frames > 0
+    and in_flight_frames < window_frames
+    and (window_bytes = 0 or in_flight_frames = 0
+         or in_flight_bytes + n <= window_bytes)
+
+The `in_flight_frames = 0` case lets a frame larger than the byte window go
+alone, rather than never.
+
+- Write nothing until the first ack arrives: the initial window is zero.
+- Keep only the newest frame waiting on each feed. When a new one arrives
+  before the waiting one was written, replace it.
+- Write the waiting frame as soon as the rule above allows, which is either
+  when it arrives or when an ack frees room.
+- When a feed opens, send its current frame, so a rarely changing feed (the
+  dark) needs nothing else until it changes. If the feed has no image, send
+  an empty frame so the client knows.
+- When a feed's image goes away, send an empty frame.
 
 ## Client behaviour
 
-- Read each stream's header as soon as it arrives. If `seq` is not newer
-  than the newest frame shown on that feed, send `STOP_SENDING` and move on.
-- When a frame completes, show it only if it is still the newest; otherwise
-  drop it.
-- Count every `FRAME` stream that ends, however it ends (completed, stopped,
-  reset, malformed), towards "frames finished" for credit.
-- Reject headers that are inconsistent (a `raw` payload not exactly the
-  decoded length, an LZ4 payload over the bound, a nonzero payload for an
-  empty frame) and bound what it accepts (e.g. at most 2²⁸ pixels), so a
-  corrupt header cannot ask it to allocate gigabytes.
+- Send an ack as soon as the connection opens (`acked_* = 0`, with the
+  window), again after every `FRAME` received, and whenever the window
+  changes. Acknowledge a frame when it arrives, before decoding it: decoding
+  time shouldn't count against the window, and the client can drop frames
+  it hasn't the time to decode itself.
+- Check a frame's header before trusting its payload. Reject headers that are
+  inconsistent (a `raw` payload not exactly the decoded length, an LZ4 payload
+  over the bound, a nonzero payload for an empty frame, a message longer or
+  shorter than its header says) and bound what it accepts (e.g. at most 2²⁸
+  pixels), so a corrupt header cannot ask it to allocate gigabytes.
+- Frames arrive in `seq` order, but a client that decodes off its main
+  thread can finish them out of order: show a frame only if its `seq` is
+  newer than the newest shown on that feed, and drop it otherwise.
 - Decoding the LZ4 codecs is up to the client; the `viewcam-codec` crate does
   it in Rust and WASM.
+
+### Choosing a window
+
+A window of `F` frames and `B` bytes, over a round trip `rtt`, allows at most
+`F / rtt` frames and `B / rtt` bytes per second, and a stall can leave at most
+`F` frames and `max(B, one frame)` bytes to receive before anything fresh.
+
+- `window_frames` of about `rtt × fps` plus one or two reaches a frame rate
+  `fps` (6 covers 30 fps over 150 ms). Larger buys nothing but a longer
+  catch-up.
+- `window_bytes` matters when frames are large compared with the link: set
+  it to about what the link carries in a round trip, and the catch-up after
+  a stall is about one round trip's worth of data. `0` leaves the frame count
+  as the only bound.
+- A rarely changing feed like the dark needs a window of 1.
+- `window_frames = 0` pauses a feed (a hidden tab, a collapsed panel) without
+  closing it; reopening the window gets the newest frame straight away.
 
 ## Test vectors
 
 `tests/vectors/` holds encoded examples of each message. The Rust crate and
-the Python reference encoder (`python/viewcam_proto.py`) are both tested
-against them, byte for byte.
+the Python reference (`python/viewcam_proto.py`) are both tested against
+them, byte for byte.

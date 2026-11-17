@@ -2,61 +2,38 @@ use std::path::PathBuf;
 
 use super::*;
 
-/// Every message kind, with planes whose bytes are distinct enough that a
-/// misplaced byte shows. These are written to `tests/vectors/` and the Python
-/// reference encoder is checked against the same files.
+/// Every codec, plus an empty frame and a credit. Payloads are fixed bytes,
+/// not real LZ4 output, since this crate only frames them; that keeps the
+/// Python reference able to reproduce them exactly. These are written to
+/// `tests/vectors/` and `python/test_viewcam_proto.py` checks the same files.
 fn vectors() -> Vec<(&'static str, Vec<u8>)> {
     let ramp = |n: usize| (0..n).map(|i| (i * 37 + 11) as u8).collect::<Vec<u8>>();
+    let frame = |seq, w, h, dtype, codec, payload| {
+        Frame::new(seq, w, h, dtype, codec, payload)
+            .unwrap()
+            .encode()
+    };
     vec![
         (
-            "frame_u16_with_saturation",
-            Message::Frame {
-                header: FrameHeader {
-                    seq: 0x0102_0304_0506_0708,
-                    width: 3,
-                    height: 2,
-                    data_dtype: DType::U16,
-                    sat_dtype: Some(DType::U8),
-                },
-                data: ramp(3 * 2 * 2),
-                saturation: Some(vec![0, 1, 0, 0, 0, 1]),
-            }
-            .encode(),
+            "frame_u16_raw",
+            frame(
+                0x0102_0304_0506_0708,
+                3,
+                2,
+                DType::U16,
+                Codec::Raw,
+                ramp(12),
+            ),
         ),
         (
-            "frame_f32_no_saturation",
-            Message::Frame {
-                header: FrameHeader {
-                    seq: 7,
-                    width: 2,
-                    height: 2,
-                    data_dtype: DType::F32,
-                    sat_dtype: None,
-                },
-                data: [1.5f32, -2.0, 0.0, 65535.0]
-                    .iter()
-                    .flat_map(|v| v.to_le_bytes())
-                    .collect(),
-                saturation: None,
-            }
-            .encode(),
+            "frame_f32_lz4",
+            frame(7, 2, 2, DType::F32, Codec::Lz4, ramp(9)),
         ),
         (
-            "dark_f64",
-            Message::Dark {
-                header: DarkHeader {
-                    width: 2,
-                    height: 1,
-                    dtype: DType::F64,
-                },
-                data: [1000.25f64, -0.5]
-                    .iter()
-                    .flat_map(|v| v.to_le_bytes())
-                    .collect(),
-            }
-            .encode(),
+            "frame_u16_shuffle_lz4",
+            frame(8, 3, 2, DType::U16, Codec::ShuffleLz4, ramp(5)),
         ),
-        ("clear_dark", Message::ClearDark.encode()),
+        ("frame_empty", Frame::empty(9, DType::F64).encode()),
         ("credit", encode_credit(0x1122_3344_5566_7788).to_vec()),
     ]
 }
@@ -92,16 +69,20 @@ fn encoding_matches_test_vectors() {
 fn header_layout_is_as_specified() {
     let frame = vectors().remove(0).1;
     assert_eq!(&frame[..4], b"VCAM");
-    assert_eq!(frame[4], 1);
-    assert_eq!(frame[5], 1);
+    assert_eq!((frame[4], frame[5]), (1, 1));
     assert_eq!(&frame[8..16], &0x0102_0304_0506_0708u64.to_le_bytes());
     assert_eq!(&frame[16..20], &3u32.to_le_bytes());
     assert_eq!(&frame[20..24], &2u32.to_le_bytes());
-    assert_eq!((frame[24], frame[25]), (3, 1));
-    assert_eq!(frame.len(), FRAME_HEADER_LEN + 12 + 6);
+    assert_eq!((frame[24], frame[25]), (3, 0)); // u16, raw
+    assert_eq!(&frame[28..32], &12u32.to_le_bytes());
+    assert_eq!(frame.len(), FRAME_HEADER_LEN + 12);
+
+    let shuffled = &vectors()[2].1;
+    assert_eq!(shuffled[25], 2);
+    assert_eq!(&shuffled[28..32], &5u32.to_le_bytes());
 }
 
-/// Every vector reassembles to the message it came from, whatever the chunk
+/// Every vector reassembles to the frame it came from, whatever the chunk
 /// boundaries: QUIC delivers a stream in pieces of any size.
 #[test]
 fn reassembles_across_every_split() {
@@ -131,23 +112,44 @@ fn header_is_reported_once_and_before_the_payload() {
     assert_eq!(r.push(&bytes[..FRAME_HEADER_LEN - 1]).unwrap(), None);
     let header = r
         .push(&bytes[FRAME_HEADER_LEN - 1..FRAME_HEADER_LEN])
+        .unwrap()
         .unwrap();
-    assert!(matches!(header, Some(Header::Frame(h)) if h.seq == 0x0102_0304_0506_0708));
+    assert_eq!(header.seq, 0x0102_0304_0506_0708);
+    assert_eq!(header.decoded_len(), 12);
     assert_eq!(r.push(&bytes[FRAME_HEADER_LEN..]).unwrap(), None);
 }
 
 #[test]
-fn frame_planes_split_correctly() {
+fn empty_frames_mean_no_image() {
     let mut r = StreamReader::new(DEFAULT_MAX_PIXELS);
-    r.push(&vectors().remove(0).1).unwrap();
-    let Message::Frame {
-        data, saturation, ..
-    } = r.finish().unwrap()
-    else {
-        panic!("not a frame");
+    r.push(&Frame::empty(3, DType::U16).encode()).unwrap();
+    let frame = r.finish().unwrap();
+    assert!(frame.header.is_empty());
+    assert!(frame.payload.is_empty());
+    // An empty image cannot carry a payload, whatever the codec.
+    assert!(Frame::new(0, 0, 5, DType::U8, Codec::Lz4, vec![1]).is_err());
+    assert!(Frame::new(0, 0, 0, DType::U8, Codec::Lz4, vec![]).is_ok());
+}
+
+#[test]
+fn encoded_lengths_are_checked_per_codec() {
+    let bad = |codec, len| {
+        matches!(
+            Frame::new(0, 4, 4, DType::U16, codec, vec![0; len]),
+            Err(ProtoError::BadEncodedLength { .. })
+        )
     };
-    assert_eq!(data.len(), 12);
-    assert_eq!(saturation, Some(vec![0, 1, 0, 0, 0, 1]));
+    // Raw must be exactly the image: 4 x 4 x 2 = 32 bytes.
+    assert!(!bad(Codec::Raw, 32));
+    assert!(bad(Codec::Raw, 31));
+    assert!(bad(Codec::Raw, 33));
+    // LZ4 may be anything from one byte up to its worst case, 32 + 0 + 16.
+    for codec in [Codec::Lz4, Codec::ShuffleLz4] {
+        assert!(bad(codec, 0));
+        assert!(!bad(codec, 1));
+        assert!(!bad(codec, 48));
+        assert!(bad(codec, 49));
+    }
 }
 
 #[test]
@@ -179,41 +181,38 @@ fn malformed_streams_are_rejected() {
         Err(ProtoError::BadMagic)
     );
 
-    let mut bad = frame.clone();
-    bad[4] = 2;
-    assert_eq!(
-        Header::decode(&bad, DEFAULT_MAX_PIXELS),
-        Err(ProtoError::UnsupportedVersion(2))
-    );
-    let mut bad = frame.clone();
-    bad[5] = 9;
-    assert_eq!(
-        Header::decode(&bad, DEFAULT_MAX_PIXELS),
-        Err(ProtoError::UnknownKind(9))
-    );
-    let mut bad = frame.clone();
-    bad[24] = 11;
-    assert_eq!(
-        Header::decode(&bad, DEFAULT_MAX_PIXELS),
-        Err(ProtoError::UnknownDtype(11))
-    );
+    let decode = |at: usize, value: u8| {
+        let mut bad = frame.clone();
+        bad[at] = value;
+        FrameHeader::decode(&bad, DEFAULT_MAX_PIXELS)
+    };
+    assert_eq!(decode(4, 2), Err(ProtoError::UnsupportedVersion(2)));
+    assert_eq!(decode(5, 9), Err(ProtoError::UnknownKind(9)));
+    assert_eq!(decode(24, 11), Err(ProtoError::UnknownDtype(11)));
+    assert_eq!(decode(25, 3), Err(ProtoError::UnknownCodec(3)));
+    // A raw frame whose length field disagrees with its dimensions.
+    assert!(matches!(
+        decode(28, 13),
+        Err(ProtoError::BadEncodedLength { .. })
+    ));
 
     // A credit belongs in a datagram, not on a stream.
     assert_eq!(
-        Header::decode(&encode_credit(1), DEFAULT_MAX_PIXELS),
+        FrameHeader::decode(&encode_credit(1), DEFAULT_MAX_PIXELS),
         Err(ProtoError::WrongChannel(0x81))
     );
 }
 
 #[test]
-fn oversized_planes_are_refused_before_allocating() {
-    let header = Header::Frame(FrameHeader {
+fn oversized_images_are_refused_before_allocating() {
+    let header = FrameHeader {
         seq: 0,
         width: 100_000,
         height: 100_000,
-        data_dtype: DType::F64,
-        sat_dtype: None,
-    })
+        dtype: DType::U8,
+        codec: Codec::Lz4,
+        encoded_len: 1,
+    }
     .encode();
     assert!(matches!(
         StreamReader::new(DEFAULT_MAX_PIXELS).push(&header),
@@ -226,13 +225,13 @@ fn credit_round_trips_and_rejects_other_kinds() {
     assert_eq!(decode_credit(&encode_credit(42)), Ok(42));
     assert!(decode_credit(&encode_credit(42)[..15]).is_err());
     assert_eq!(
-        decode_credit(&Message::ClearDark.encode()),
-        Err(ProtoError::WrongChannel(3))
+        decode_credit(&Frame::empty(0, DType::U8).encode()),
+        Err(ProtoError::WrongChannel(1))
     );
 }
 
 #[test]
-fn dtypes_convert_little_endian() {
+fn dtypes_and_codecs_round_trip_their_codes() {
     assert_eq!(
         DType::U16.to_f64(&[0x34, 0x12, 0xff, 0xff]),
         vec![4660.0, 65535.0]
@@ -241,6 +240,9 @@ fn dtypes_convert_little_endian() {
     assert_eq!(DType::F32.to_f64(&1.5f32.to_le_bytes()), vec![1.5]);
     for d in DType::ALL {
         assert_eq!(DType::from_code(d.code()), Ok(d));
+    }
+    for c in Codec::ALL {
+        assert_eq!(Codec::from_code(c.code()), Ok(c));
     }
 }
 

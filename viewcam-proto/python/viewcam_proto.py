@@ -4,10 +4,12 @@ Standard library only, so an instrument server can vendor this one file.
 See ../PROTOCOL.md for the specification; the Rust crate in this directory's
 parent is the client side, and both are checked against ../tests/vectors/.
 
-A server writes ``encode_frame(...)`` / ``encode_dark(...)`` /
-``encode_clear_dark()`` to a fresh unidirectional WebTransport stream per
-message, finishing the stream after it, and reads client credit datagrams
-with ``decode_credit``.
+Every feed (data, dark, saturation) carries the same FRAME messages. A server
+writes ``encode_frame(...)`` to a fresh unidirectional stream per frame,
+finishing the stream after it, and reads client credit datagrams with
+``decode_credit``. Payloads are passed in already encoded; for the LZ4
+codecs, the ``viewcam_codec`` extension (``viewcam-codec/python``)
+produces them.
 """
 
 from __future__ import annotations
@@ -18,9 +20,12 @@ MAGIC = b"VCAM"
 VERSION = 1
 
 KIND_FRAME = 1
-KIND_DARK = 2
-KIND_CLEAR_DARK = 3
 KIND_CREDIT = 0x81
+
+CODEC_RAW = 0
+CODEC_LZ4 = 1
+CODEC_SHUFFLE_LZ4 = 2
+CODECS = (CODEC_RAW, CODEC_LZ4, CODEC_SHUFFLE_LZ4)
 
 # dtype code -> (numpy-style name, bytes per element)
 DTYPES = {
@@ -36,13 +41,12 @@ DTYPES = {
     10: ("<f8", 8),
 }
 
-_PREFIX = struct.Struct("<4sBBH")  # magic, version, kind, reserved
-_FRAME = struct.Struct("<4sBBHQIIBBH")  # prefix, seq, width, height, data, sat, reserved
-_DARK = struct.Struct("<4sBBHIIB3x")  # prefix, width, height, dtype, reserved
+# prefix (magic, version, kind, reserved), seq, width, height, dtype, codec,
+# reserved, encoded_len
+_FRAME = struct.Struct("<4sBBHQIIBBHI")
 _CREDIT = struct.Struct("<4sBBHQ")  # prefix, limit
 
-FRAME_HEADER_LEN = _FRAME.size  # 28
-DARK_HEADER_LEN = _DARK.size  # 20
+FRAME_HEADER_LEN = _FRAME.size  # 32
 CREDIT_LEN = _CREDIT.size  # 16
 
 
@@ -62,50 +66,45 @@ def dtype_code(dtype) -> int:
     raise ProtocolError(f"dtype {name!r} has no protocol code (little-endian only)")
 
 
-def _plane_bytes(plane, width: int, height: int, code: int) -> bytes:
-    data = bytes(plane) if not hasattr(plane, "tobytes") else plane.tobytes(order="C")
-    expected = width * height * DTYPES[code][1]
-    if len(data) != expected:
-        raise ProtocolError(f"plane is {len(data)} bytes, expected {expected}")
-    return data
+def max_encoded_len(codec: int, decoded: int) -> int:
+    """The largest payload ``codec`` can produce for a ``decoded``-byte image."""
+    if codec == CODEC_RAW:
+        return decoded
+    return decoded + decoded // 255 + 16  # LZ4's worst case
 
 
-def encode_frame(
-    seq: int,
-    width: int,
-    height: int,
-    data,
-    data_dtype: int,
-    saturation=None,
-    sat_dtype: int = 0,
-) -> bytes:
-    """A FRAME message: header, data plane, optional saturation plane.
+def encode_frame(seq: int, width: int, height: int, dtype: int, payload, codec: int = CODEC_RAW) -> bytes:
+    """A FRAME message: the header, then ``payload``.
 
-    ``data``/``saturation`` are bytes-like or C-contiguous numpy arrays whose
-    rows run from y = 0 upward; ``*_dtype`` are protocol codes (see
-    ``dtype_code``). Pass ``saturation=None`` for a frame without one.
+    ``payload`` is bytes-like (or a C-contiguous numpy array, for ``raw``),
+    already encoded with ``codec``. Images are little-endian, row-major, with
+    row 0 at the bottom. ``width = height = 0`` with an empty payload means
+    "no image on this feed".
     """
-    if (saturation is None) != (sat_dtype == 0):
-        raise ProtocolError("give saturation and sat_dtype together, or neither")
-    parts = [
-        _FRAME.pack(MAGIC, VERSION, KIND_FRAME, 0, seq, width, height, data_dtype, sat_dtype, 0),
-        _plane_bytes(data, width, height, data_dtype),
-    ]
-    if saturation is not None:
-        parts.append(_plane_bytes(saturation, width, height, sat_dtype))
-    return b"".join(parts)
+    if dtype not in DTYPES:
+        raise ProtocolError(f"unknown dtype code {dtype}")
+    if codec not in CODECS:
+        raise ProtocolError(f"unknown codec code {codec}")
+    payload = payload.tobytes(order="C") if hasattr(payload, "tobytes") else bytes(payload)
+    decoded = width * height * DTYPES[dtype][1]
+    encoded = len(payload)
+    if codec == CODEC_RAW:
+        ok = encoded == decoded
+    elif decoded == 0:
+        ok = encoded == 0
+    else:
+        ok = 0 < encoded <= max_encoded_len(codec, decoded)
+    if not ok:
+        raise ProtocolError(
+            f"codec {codec} payload of {encoded} bytes cannot decode to {decoded} bytes"
+        )
+    header = _FRAME.pack(MAGIC, VERSION, KIND_FRAME, 0, seq, width, height, dtype, codec, 0, encoded)
+    return header + payload
 
 
-def encode_dark(width: int, height: int, data, dtype: int) -> bytes:
-    """A DARK message."""
-    return _DARK.pack(MAGIC, VERSION, KIND_DARK, 0, width, height, dtype) + _plane_bytes(
-        data, width, height, dtype
-    )
-
-
-def encode_clear_dark() -> bytes:
-    """A CLEAR_DARK message."""
-    return _PREFIX.pack(MAGIC, VERSION, KIND_CLEAR_DARK, 0)
+def encode_empty_frame(seq: int, dtype: int) -> bytes:
+    """A frame meaning "no image on this feed", e.g. a withdrawn dark."""
+    return encode_frame(seq, 0, 0, dtype, b"")
 
 
 def encode_credit(limit: int) -> bytes:
@@ -128,7 +127,7 @@ def decode_credit(datagram: bytes) -> int:
 
 
 class CreditGate:
-    """The server's side of the credit window, for one session.
+    """The server's side of the credit window, for one feed.
 
     Call ``on_credit`` with each datagram's limit, ``may_send`` before opening
     a FRAME stream, and ``sent`` after opening one.

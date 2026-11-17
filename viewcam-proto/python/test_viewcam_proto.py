@@ -3,7 +3,6 @@
     python3 -m unittest discover viewcam-proto/python
 """
 
-import struct
 import unittest
 from pathlib import Path
 
@@ -22,23 +21,20 @@ class TestVectors(unittest.TestCase):
     def check(self, name, encoded):
         self.assertEqual(encoded, (VECTORS / f"{name}.bin").read_bytes(), name)
 
-    def test_frame_u16_with_saturation(self):
+    def test_frame_u16_raw(self):
+        self.check("frame_u16_raw", vp.encode_frame(0x0102030405060708, 3, 2, 3, ramp(12)))
+
+    def test_frame_f32_lz4(self):
+        self.check("frame_f32_lz4", vp.encode_frame(7, 2, 2, 9, ramp(9), vp.CODEC_LZ4))
+
+    def test_frame_u16_shuffle_lz4(self):
         self.check(
-            "frame_u16_with_saturation",
-            vp.encode_frame(
-                0x0102030405060708, 3, 2, ramp(12), 3, bytes([0, 1, 0, 0, 0, 1]), 1
-            ),
+            "frame_u16_shuffle_lz4",
+            vp.encode_frame(8, 3, 2, 3, ramp(5), vp.CODEC_SHUFFLE_LZ4),
         )
 
-    def test_frame_f32_no_saturation(self):
-        data = struct.pack("<4f", 1.5, -2.0, 0.0, 65535.0)
-        self.check("frame_f32_no_saturation", vp.encode_frame(7, 2, 2, data, 9))
-
-    def test_dark_f64(self):
-        self.check("dark_f64", vp.encode_dark(2, 1, struct.pack("<2d", 1000.25, -0.5), 10))
-
-    def test_clear_dark(self):
-        self.check("clear_dark", vp.encode_clear_dark())
+    def test_frame_empty(self):
+        self.check("frame_empty", vp.encode_empty_frame(9, 10))
 
     def test_credit(self):
         self.check("credit", vp.encode_credit(0x1122334455667788))
@@ -46,17 +42,27 @@ class TestVectors(unittest.TestCase):
 
 
 class TestValidation(unittest.TestCase):
-    def test_plane_length_is_checked(self):
+    def test_raw_payload_must_be_the_image(self):
         with self.assertRaises(vp.ProtocolError):
-            vp.encode_frame(0, 2, 2, b"\0" * 7, 3)
+            vp.encode_frame(0, 2, 2, 3, b"\0" * 7)
 
-    def test_saturation_needs_its_dtype(self):
+    def test_lz4_payload_bounds(self):
+        # 4 x 4 u16 = 32 bytes decoded; LZ4 allows 1 to 32 + 0 + 16 bytes.
+        vp.encode_frame(0, 4, 4, 3, b"\0", vp.CODEC_LZ4)
+        vp.encode_frame(0, 4, 4, 3, b"\0" * 48, vp.CODEC_SHUFFLE_LZ4)
+        for bad in (b"", b"\0" * 49):
+            with self.assertRaises(vp.ProtocolError):
+                vp.encode_frame(0, 4, 4, 3, bad, vp.CODEC_LZ4)
+
+    def test_unknown_codes(self):
         with self.assertRaises(vp.ProtocolError):
-            vp.encode_frame(0, 1, 1, b"\0", 1, saturation=b"\0")
+            vp.encode_frame(0, 1, 1, 3, b"\0\0", codec=3)
+        with self.assertRaises(vp.ProtocolError):
+            vp.encode_frame(0, 1, 1, 11, b"\0")
 
     def test_bad_credit_rejected(self):
         with self.assertRaises(vp.ProtocolError):
-            vp.decode_credit(vp.encode_clear_dark() + b"\0" * 8)
+            vp.decode_credit(vp.encode_empty_frame(0, 1)[:16])
 
     def test_dtype_codes(self):
         self.assertEqual(vp.dtype_code("<u2"), 3)

@@ -135,11 +135,11 @@ impl ViewerApp {
         let (current_state, bounds_data) = {
             let widget = self.widget.borrow();
             let state = CachedState::from_widget(&widget);
-            
+
             // Calculate bounds data if we have an image
-            let bounds = if self.last_viewport_size.x > 0.0 
-                && self.last_viewport_size.y > 0.0 
-                && widget.has_image() 
+            let bounds = if self.last_viewport_size.x > 0.0
+                && self.last_viewport_size.y > 0.0
+                && widget.has_image()
             {
                 let (img_width, img_height) = widget.dimensions();
                 let viewport_size = self.last_viewport_size;
@@ -154,14 +154,18 @@ impl ViewerApp {
                     egui::vec2(viewport_size.y * img_aspect, viewport_size.y)
                 };
 
-                let image_rect = widget.transform().calculate_image_rect(viewport_rect, base_display_size);
+                let image_rect = widget
+                    .transform()
+                    .calculate_image_rect(viewport_rect, base_display_size);
                 let visible_screen = viewport_rect.intersect(image_rect);
 
                 if visible_screen.width() > 0.0 && visible_screen.height() > 0.0 {
                     let rel_x_min = (visible_screen.min.x - image_rect.min.x) / image_rect.width();
                     let rel_x_max = (visible_screen.max.x - image_rect.min.x) / image_rect.width();
-                    let rel_y_max = 1.0 - (visible_screen.min.y - image_rect.min.y) / image_rect.height();
-                    let rel_y_min = 1.0 - (visible_screen.max.y - image_rect.min.y) / image_rect.height();
+                    let rel_y_max =
+                        1.0 - (visible_screen.min.y - image_rect.min.y) / image_rect.height();
+                    let rel_y_min =
+                        1.0 - (visible_screen.max.y - image_rect.min.y) / image_rect.height();
 
                     Some((
                         (rel_x_min * img_width as f32).max(0.0) as f64,
@@ -175,7 +179,7 @@ impl ViewerApp {
             } else {
                 None
             };
-            
+
             (state, bounds)
         }; // Widget borrow is dropped here
 
@@ -184,22 +188,49 @@ impl ViewerApp {
             if let Some(ref callback) = self.callbacks.borrow().on_state_change {
                 // Build the state object to pass to JavaScript
                 let state = js_sys::Object::new();
-                js_sys::Reflect::set(&state, &"contrast".into(), &current_state.contrast.into()).ok();
+                js_sys::Reflect::set(&state, &"contrast".into(), &current_state.contrast.into())
+                    .ok();
                 js_sys::Reflect::set(&state, &"bias".into(), &current_state.bias.into()).ok();
-                js_sys::Reflect::set(&state, &"stretchMode".into(), &current_state.stretch_mode.clone().into()).ok();
-                js_sys::Reflect::set(&state, &"zoom".into(), &(current_state.zoom as f64).into()).ok();
-                js_sys::Reflect::set(&state, &"colormap".into(), &current_state.colormap.clone().into()).ok();
-                js_sys::Reflect::set(&state, &"colormapReversed".into(), &current_state.colormap_reversed.into()).ok();
+                js_sys::Reflect::set(
+                    &state,
+                    &"stretchMode".into(),
+                    &current_state.stretch_mode.clone().into(),
+                )
+                .ok();
+                js_sys::Reflect::set(&state, &"zoom".into(), &(current_state.zoom as f64).into())
+                    .ok();
+                js_sys::Reflect::set(
+                    &state,
+                    &"colormap".into(),
+                    &current_state.colormap.clone().into(),
+                )
+                .ok();
+                js_sys::Reflect::set(
+                    &state,
+                    &"colormapReversed".into(),
+                    &current_state.colormap_reversed.into(),
+                )
+                .ok();
                 js_sys::Reflect::set(&state, &"vmin".into(), &current_state.vmin.into()).ok();
                 js_sys::Reflect::set(&state, &"vmax".into(), &current_state.vmax.into()).ok();
-                
+
                 // Include rotation state
-                js_sys::Reflect::set(&state, &"rotation".into(), &(current_state.rotation as f64).into()).ok();
+                js_sys::Reflect::set(
+                    &state,
+                    &"rotation".into(),
+                    &(current_state.rotation as f64).into(),
+                )
+                .ok();
                 let pivot = js_sys::Array::new();
                 pivot.push(&(current_state.pivot_x as f64).into());
                 pivot.push(&(current_state.pivot_y as f64).into());
                 js_sys::Reflect::set(&state, &"pivot".into(), &pivot).ok();
-                js_sys::Reflect::set(&state, &"showPivotMarker".into(), &current_state.show_pivot_marker.into()).ok();
+                js_sys::Reflect::set(
+                    &state,
+                    &"showPivotMarker".into(),
+                    &current_state.show_pivot_marker.into(),
+                )
+                .ok();
 
                 // Include view bounds if available
                 if let Some((x_min, x_max, y_min, y_max)) = bounds_data {
@@ -267,14 +298,13 @@ impl eframe::App for ViewerApp {
             // Even out the vertical fill: the default top-panel margin is
             // symmetric (2px), but the panel's bottom separator line eats 1px of
             // the lower fill, so add 1px to the bottom to balance it visually.
-            let slice_frame = egui::Frame::side_top_panel(&ctx.style()).inner_margin(
-                egui::Margin {
+            let slice_frame =
+                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
                     left: 8,
                     right: 8,
                     top: 2,
                     bottom: 3,
-                },
-            );
+                });
             egui::TopBottomPanel::top("slice_controls")
                 .frame(slice_frame)
                 .show(ctx, |ui| {

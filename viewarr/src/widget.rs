@@ -4,7 +4,9 @@
 //! including pan/zoom, stretch functions, colormaps, and overlays. Multiple instances
 //! can be used side-by-side without sharing state.
 
-use egui::{Color32, ColorImage, Key, PointerButton, Response, TextureHandle, TextureOptions, Ui, Vec2};
+use egui::{
+    Color32, ColorImage, Key, PointerButton, Response, TextureHandle, TextureOptions, Ui, Vec2,
+};
 use egui_phosphor::regular as phosphor;
 
 use crate::colormap::Colormap;
@@ -108,10 +110,10 @@ enum ZoomAction {
     ZoomOut,
     Reset,
     ResetRotation,
-    RotateBy(f32),        // Rotate by delta degrees
-    SetRotation(f32),     // Rotate to an absolute angle (any value; wrapped)
-    TogglePivotMarker,    // Toggle pivot marker visibility
-    ResetPivot,           // Reset pivot to image center
+    RotateBy(f32),           // Rotate by delta degrees
+    SetRotation(f32),        // Rotate to an absolute angle (any value; wrapped)
+    TogglePivotMarker,       // Toggle pivot marker visibility
+    ResetPivot,              // Reset pivot to image center
     CenterOnPoint(f32, f32), // Center view on image point (x, y)
 }
 
@@ -219,8 +221,7 @@ impl Default for ContrastBias {
 
 impl ContrastBias {
     pub fn is_default(&self) -> bool {
-        (self.contrast - DEFAULT_CONTRAST).abs() < 0.001
-            && (self.bias - DEFAULT_BIAS).abs() < 0.001
+        (self.contrast - DEFAULT_CONTRAST).abs() < 0.001 && (self.bias - DEFAULT_BIAS).abs() < 0.001
     }
 }
 
@@ -564,7 +565,11 @@ impl ArrayViewerWidget {
             );
             return;
         }
-        self.mask_overlay = Some(MaskOverlay { mask, width, height });
+        self.mask_overlay = Some(MaskOverlay {
+            mask,
+            width,
+            height,
+        });
         self.mask_texture_dirty = true;
     }
 
@@ -729,8 +734,8 @@ impl ArrayViewerWidget {
         is_integer: bool,
         value_decimals: usize,
     ) {
-        let is_prefetch = self.playing_axis.is_some()
-            && self.requested_indices.as_ref() == Some(&indices);
+        let is_prefetch =
+            self.playing_axis.is_some() && self.requested_indices.as_ref() == Some(&indices);
         if is_prefetch {
             self.pending_slice = Some(PendingSlice {
                 indices,
@@ -1070,10 +1075,8 @@ impl ArrayViewerWidget {
                 self.min_limit_input_text =
                     Self::format_limit_value(-self.max_val.abs(), self.is_integer);
             } else {
-                self.max_limit_input_text =
-                    Self::format_limit_value(self.max_val, self.is_integer);
-                self.min_limit_input_text =
-                    Self::format_limit_value(self.min_val, self.is_integer);
+                self.max_limit_input_text = Self::format_limit_value(self.max_val, self.is_integer);
+                self.min_limit_input_text = Self::format_limit_value(self.min_val, self.is_integer);
             }
             self.texture_dirty = true;
         }
@@ -1259,7 +1262,8 @@ impl ArrayViewerWidget {
         let rgba: Vec<Color32> = pixels
             .iter()
             .map(|&v| {
-                let mut adjusted = self.apply_full_stretch(v, scale_min, scale_max, cb, stretch_type);
+                let mut adjusted =
+                    self.apply_full_stretch(v, scale_min, scale_max, cb, stretch_type);
                 if reversed {
                     adjusted = 1.0 - adjusted;
                 }
@@ -1288,11 +1292,7 @@ impl ArrayViewerWidget {
             }
         }
         if let Some(color_image) = self.build_color_image() {
-            self.texture = Some(ctx.load_texture(
-                "image",
-                color_image,
-                TextureOptions::NEAREST,
-            ));
+            self.texture = Some(ctx.load_texture("image", color_image, TextureOptions::NEAREST));
         }
     }
 
@@ -1303,7 +1303,13 @@ impl ArrayViewerWidget {
             let pixels = overlay
                 .mask
                 .iter()
-                .map(|&set| if set { Color32::WHITE } else { Color32::TRANSPARENT })
+                .map(|&set| {
+                    if set {
+                        Color32::WHITE
+                    } else {
+                        Color32::TRANSPARENT
+                    }
+                })
                 .collect();
             let image = ColorImage {
                 size: [overlay.width as usize, overlay.height as usize],
@@ -1336,7 +1342,9 @@ impl ArrayViewerWidget {
             );
         } else {
             // With rotation - use mesh with rotated vertices
-            let pivot_screen = self.transform.pivot_to_screen(image_rect, (img_width, img_height));
+            let pivot_screen = self
+                .transform
+                .pivot_to_screen(image_rect, (img_width, img_height));
             // Screen +Y points downward; negate so positive rotation stays CCW
             // in image/math convention.
             let rotation_rad = -self.transform.rotation().to_radians();
@@ -1368,10 +1376,26 @@ impl ArrayViewerWidget {
             // Build mesh with two triangles using Vertex struct
             let mut mesh = egui::Mesh::with_texture(texture_id);
             let color = tint;
-            mesh.vertices.push(egui::epaint::Vertex { pos: tl, uv: uv_tl, color });
-            mesh.vertices.push(egui::epaint::Vertex { pos: tr, uv: uv_tr, color });
-            mesh.vertices.push(egui::epaint::Vertex { pos: br, uv: uv_br, color });
-            mesh.vertices.push(egui::epaint::Vertex { pos: bl, uv: uv_bl, color });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: tl,
+                uv: uv_tl,
+                color,
+            });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: tr,
+                uv: uv_tr,
+                color,
+            });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: br,
+                uv: uv_br,
+                color,
+            });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: bl,
+                uv: uv_bl,
+                color,
+            });
             mesh.add_triangle(0, 1, 2);
             mesh.add_triangle(0, 2, 3);
 
@@ -1408,7 +1432,8 @@ impl ArrayViewerWidget {
         self.handle_keyboard_input(&ctx);
 
         // Allocate space for the widget
-        let (rect, response) = ui.allocate_exact_size(container_size, egui::Sense::click_and_drag());
+        let (rect, response) =
+            ui.allocate_exact_size(container_size, egui::Sense::click_and_drag());
 
         if !self.has_image() {
             // Draw "no image" message
@@ -1423,7 +1448,8 @@ impl ArrayViewerWidget {
             return response;
         }
 
-        ui.painter_at(rect).rect_filled(rect, 0.0, CANVAS_BACKGROUND);
+        ui.painter_at(rect)
+            .rect_filled(rect, 0.0, CANVAS_BACKGROUND);
 
         let (img_width, img_height) = self.dimensions();
 
@@ -1440,7 +1466,9 @@ impl ArrayViewerWidget {
 
         // Calculate the actual image rect with zoom and pan applied
         let viewport_rect = rect;
-        let image_rect = self.transform.calculate_image_rect(viewport_rect, base_display_size);
+        let image_rect = self
+            .transform
+            .calculate_image_rect(viewport_rect, base_display_size);
         let viewport_center = viewport_rect.center();
 
         // Draw the image with rotation
@@ -1454,12 +1482,19 @@ impl ArrayViewerWidget {
                 .as_ref()
                 .is_some_and(|m| (m.width, m.height) == (img_width, img_height));
             if let (true, Some(mask_texture)) = (mask_fits, &self.mask_texture) {
-                self.paint_image_layer(&painter, mask_texture.id(), image_rect, self.mask_overlay_color);
+                self.paint_image_layer(
+                    &painter,
+                    mask_texture.id(),
+                    image_rect,
+                    self.mask_overlay_color,
+                );
             }
 
             // Draw pivot marker whenever the pivot is off-center, or while in pivot-placement mode.
             if self.transform.show_pivot_marker || !self.is_pivot_at_center() {
-                let pivot_screen = self.transform.pivot_to_screen(image_rect, (img_width, img_height));
+                let pivot_screen = self
+                    .transform
+                    .pivot_to_screen(image_rect, (img_width, img_height));
                 self.render_pivot_marker(&painter, pivot_screen);
             }
 
@@ -1490,7 +1525,8 @@ impl ArrayViewerWidget {
         let zoom_delta = ui.input(|i| i.zoom_delta());
         if zoom_delta != 1.0 {
             if let Some(pointer_pos) = zoom_anchor {
-                self.transform.zoom_around_point(zoom_delta, pointer_pos, viewport_center);
+                self.transform
+                    .zoom_around_point(zoom_delta, pointer_pos, viewport_center);
             }
         }
 
@@ -1503,7 +1539,8 @@ impl ArrayViewerWidget {
                 } else {
                     1.0 / transform::SCROLL_ZOOM_STEP
                 };
-                self.transform.zoom_around_point(zoom_factor, pointer_pos, viewport_center);
+                self.transform
+                    .zoom_around_point(zoom_factor, pointer_pos, viewport_center);
             }
         }
 
@@ -1554,7 +1591,7 @@ impl ArrayViewerWidget {
                 }
             }
         }
-        
+
         if response.clicked() && has_cmd_or_ctrl {
             if let Some(click_pos) = response.interact_pointer_pos() {
                 if modifiers.shift {
@@ -1623,7 +1660,8 @@ impl ArrayViewerWidget {
 
         // Render overlays using Areas (they render at screen coordinates)
         // We collect actions from overlays and apply them after rendering
-        let (control_action, zoom_controls_rect) = self.render_zoom_controls(&ctx, viewport_center, rect);
+        let (control_action, zoom_controls_rect) =
+            self.render_zoom_controls(&ctx, viewport_center, rect);
         let stretch_action = self.render_stretch_controls(&ctx, rect);
         self.render_colorbar(&ctx, rect);
         self.render_stretch_info_overlay(&ctx, rect);
@@ -1659,9 +1697,7 @@ impl ArrayViewerWidget {
             }
             StretchAction::SetColormap(cmap) => self.set_colormap(cmap),
             StretchAction::ToggleReverse => self.toggle_reverse(),
-            StretchAction::ToggleSmoothing => {
-                self.set_smoothing_enabled(!self.smoothing_enabled)
-            }
+            StretchAction::ToggleSmoothing => self.set_smoothing_enabled(!self.smoothing_enabled),
             StretchAction::SetSmoothingFwhm(fwhm) => {
                 // Typing a width is a request to see it, so it switches
                 // smoothing on rather than silently waiting for the toggle.
@@ -1683,46 +1719,46 @@ impl ArrayViewerWidget {
     /// without standing up the whole widget.
     fn apply_zoom_action(&mut self, action: ZoomAction, viewport_center: egui::Pos2) {
         match action {
-        ZoomAction::None => {}
-        ZoomAction::ZoomIn => self.zoom_in(None, viewport_center),
-        ZoomAction::ZoomOut => self.zoom_out(None, viewport_center),
-        ZoomAction::Reset => self.zoom_to_fit(),
-        ZoomAction::ResetRotation => {
-            let current = self.transform.rotation();
-            if current.abs() > 0.001 {
-                self.transform.set_rotation(0.0);
-                if !self.rotation_input_focused {
-                    self.rotation_input_text = "0.0".to_string();
+            ZoomAction::None => {}
+            ZoomAction::ZoomIn => self.zoom_in(None, viewport_center),
+            ZoomAction::ZoomOut => self.zoom_out(None, viewport_center),
+            ZoomAction::Reset => self.zoom_to_fit(),
+            ZoomAction::ResetRotation => {
+                let current = self.transform.rotation();
+                if current.abs() > 0.001 {
+                    self.transform.set_rotation(0.0);
+                    if !self.rotation_input_focused {
+                        self.rotation_input_text = "0.0".to_string();
+                    }
                 }
             }
-        }
-        ZoomAction::RotateBy(delta) => {
-            self.transform.rotate_by(delta);
-            // Only update text if user is not currently editing
-            if !self.rotation_input_focused {
-                self.rotation_input_text = format!("{:.1}", self.transform.rotation());
+            ZoomAction::RotateBy(delta) => {
+                self.transform.rotate_by(delta);
+                // Only update text if user is not currently editing
+                if !self.rotation_input_focused {
+                    self.rotation_input_text = format!("{:.1}", self.transform.rotation());
+                }
             }
-        }
-        ZoomAction::SetRotation(degrees) => {
-            self.transform.set_rotation(degrees);
-            if !self.rotation_input_focused {
-                self.rotation_input_text = format!("{:.1}", self.transform.rotation());
+            ZoomAction::SetRotation(degrees) => {
+                self.transform.set_rotation(degrees);
+                if !self.rotation_input_focused {
+                    self.rotation_input_text = format!("{:.1}", self.transform.rotation());
+                }
             }
-        }
-        ZoomAction::TogglePivotMarker => {
-            self.transform.show_pivot_marker = !self.transform.show_pivot_marker;
-        }
-        ZoomAction::ResetPivot => {
-            self.transform.set_pivot_to_center(self.width, self.height);
-        }
-        ZoomAction::CenterOnPoint(x, y) => {
-            self.transform.center_on_image_point(
-                egui::pos2(x, y),
-                egui::vec2(self.width as f32, self.height as f32),
-                egui::vec2(0.0, 0.0), // Will be computed
-                egui::Rect::NOTHING,
-            );
-        }
+            ZoomAction::TogglePivotMarker => {
+                self.transform.show_pivot_marker = !self.transform.show_pivot_marker;
+            }
+            ZoomAction::ResetPivot => {
+                self.transform.set_pivot_to_center(self.width, self.height);
+            }
+            ZoomAction::CenterOnPoint(x, y) => {
+                self.transform.center_on_image_point(
+                    egui::pos2(x, y),
+                    egui::vec2(self.width as f32, self.height as f32),
+                    egui::vec2(0.0, 0.0), // Will be computed
+                    egui::Rect::NOTHING,
+                );
+            }
         }
     }
 
@@ -1806,7 +1842,12 @@ impl ArrayViewerWidget {
 
     /// Render bottom controls (rotation + zoom) as one container at bottom-right.
     /// Returns an action to be applied after rendering.
-    fn render_zoom_controls(&mut self, ctx: &egui::Context, _viewport_center: egui::Pos2, widget_rect: egui::Rect) -> (ZoomAction, egui::Rect) {
+    fn render_zoom_controls(
+        &mut self,
+        ctx: &egui::Context,
+        _viewport_center: egui::Pos2,
+        widget_rect: egui::Rect,
+    ) -> (ZoomAction, egui::Rect) {
         let button_size = egui::vec2(28.0, 28.0);
         let small_button_size = egui::vec2(24.0, 28.0);
         let margin = 10.0;
@@ -1832,13 +1873,18 @@ impl ArrayViewerWidget {
                             phosphor::GPS
                         };
                         let pivot_btn = egui::Button::new(
-                            egui::RichText::new(pivot_label).color(text_color).size(16.0)
-                        ).fill(Color32::TRANSPARENT);
+                            egui::RichText::new(pivot_label)
+                                .color(text_color)
+                                .size(16.0),
+                        )
+                        .fill(Color32::TRANSPARENT);
                         let pivot_response = ui.add_sized(button_size, pivot_btn);
                         if pivot_response.clicked() {
                             action = ZoomAction::TogglePivotMarker;
                         }
-                        pivot_response.on_hover_text("Toggle rotation pivot marker (Cmd/Ctrl+Shift+click to set)");
+                        pivot_response.on_hover_text(
+                            "Toggle rotation pivot marker (Cmd/Ctrl+Shift+click to set)",
+                        );
 
                         let pivot_at_center = self.is_pivot_at_center();
                         let reset_pivot_btn = egui::Button::new(
@@ -1846,8 +1892,9 @@ impl ArrayViewerWidget {
                                 text_color.gamma_multiply(0.4)
                             } else {
                                 text_color
-                            })
-                        ).fill(Color32::TRANSPARENT);
+                            }),
+                        )
+                        .fill(Color32::TRANSPARENT);
                         let reset_response = ui.add_sized(small_button_size, reset_pivot_btn);
                         if !pivot_at_center && reset_response.clicked() {
                             action = ZoomAction::ResetPivot;
@@ -1864,9 +1911,11 @@ impl ArrayViewerWidget {
                                 text_color.gamma_multiply(0.4)
                             } else {
                                 text_color
-                            })
-                        ).fill(Color32::TRANSPARENT);
-                        let reset_rotation_response = ui.add_sized(small_button_size, reset_rotation_btn);
+                            }),
+                        )
+                        .fill(Color32::TRANSPARENT);
+                        let reset_rotation_response =
+                            ui.add_sized(small_button_size, reset_rotation_btn);
                         let mut rotation_section = reset_rotation_response.rect;
                         if !rotation_zero && reset_rotation_response.clicked() {
                             action = ZoomAction::ResetRotation;
@@ -1878,8 +1927,10 @@ impl ArrayViewerWidget {
                         });
 
                         let ccw_btn = egui::Button::new(
-                            egui::RichText::new(phosphor::ARROW_COUNTER_CLOCKWISE).color(text_color)
-                        ).fill(Color32::TRANSPARENT);
+                            egui::RichText::new(phosphor::ARROW_COUNTER_CLOCKWISE)
+                                .color(text_color),
+                        )
+                        .fill(Color32::TRANSPARENT);
                         let ccw_response = ui.add_sized(small_button_size, ccw_btn);
                         rotation_section = rotation_section.union(ccw_response.rect);
                         if ccw_response.on_hover_text("Rotate 15° CCW").clicked() {
@@ -1897,7 +1948,10 @@ impl ArrayViewerWidget {
                         if response.gained_focus() {
                             self.rotation_input_focused = true;
                         }
-                        if response.lost_focus() || (self.rotation_input_focused && ui.input(|i| i.key_pressed(Key::Enter))) {
+                        if response.lost_focus()
+                            || (self.rotation_input_focused
+                                && ui.input(|i| i.key_pressed(Key::Enter)))
+                        {
                             self.rotation_input_focused = false;
                             if let Ok(degrees) = self.rotation_input_text.parse::<f32>() {
                                 let current = self.transform.rotation();
@@ -1905,14 +1959,16 @@ impl ArrayViewerWidget {
                                     action = ZoomAction::RotateBy(degrees - current);
                                 }
                             } else {
-                                self.rotation_input_text = format!("{:.1}", self.transform.rotation());
+                                self.rotation_input_text =
+                                    format!("{:.1}", self.transform.rotation());
                             }
                         }
                         response.on_hover_text("Rotation angle in degrees (CCW)");
 
                         let cw_btn = egui::Button::new(
-                            egui::RichText::new(phosphor::ARROW_CLOCKWISE).color(text_color)
-                        ).fill(Color32::TRANSPARENT);
+                            egui::RichText::new(phosphor::ARROW_CLOCKWISE).color(text_color),
+                        )
+                        .fill(Color32::TRANSPARENT);
                         let cw_response = ui.add_sized(small_button_size, cw_btn);
                         rotation_section = rotation_section.union(cw_response.rect);
                         if cw_response.on_hover_text("Rotate 15° CW").clicked() {
@@ -1929,11 +1985,15 @@ impl ArrayViewerWidget {
 
                         // Always show reset button, but disable when at default view
                         let can_reset = !self.is_default_view();
-                        let reset_color = if can_reset { text_color } else { text_color.gamma_multiply(0.3) };
+                        let reset_color = if can_reset {
+                            text_color
+                        } else {
+                            text_color.gamma_multiply(0.3)
+                        };
                         let reset_btn = egui::Button::new(
-                            egui::RichText::new(phosphor::ARROWS_OUT)
-                                .color(reset_color)
-                        ).fill(Color32::TRANSPARENT);
+                            egui::RichText::new(phosphor::ARROWS_OUT).color(reset_color),
+                        )
+                        .fill(Color32::TRANSPARENT);
                         let reset_response = ui.add_sized(button_size, reset_btn);
                         if can_reset && reset_response.clicked() {
                             action = ZoomAction::Reset;
@@ -1941,16 +2001,26 @@ impl ArrayViewerWidget {
                         reset_response.on_hover_text("Reset zoom to fit");
 
                         let minus_btn = egui::Button::new(
-                            egui::RichText::new(phosphor::MINUS).color(text_color)
-                        ).fill(Color32::TRANSPARENT);
-                        if ui.add_sized(button_size, minus_btn).on_hover_text("Zoom out").clicked() {
+                            egui::RichText::new(phosphor::MINUS).color(text_color),
+                        )
+                        .fill(Color32::TRANSPARENT);
+                        if ui
+                            .add_sized(button_size, minus_btn)
+                            .on_hover_text("Zoom out")
+                            .clicked()
+                        {
                             action = ZoomAction::ZoomOut;
                         }
 
                         let plus_btn = egui::Button::new(
-                            egui::RichText::new(phosphor::PLUS).color(text_color)
-                        ).fill(Color32::TRANSPARENT);
-                        if ui.add_sized(button_size, plus_btn).on_hover_text("Zoom in").clicked() {
+                            egui::RichText::new(phosphor::PLUS).color(text_color),
+                        )
+                        .fill(Color32::TRANSPARENT);
+                        if ui
+                            .add_sized(button_size, plus_btn)
+                            .on_hover_text("Zoom in")
+                            .clicked()
+                        {
                             action = ZoomAction::ZoomIn;
                         }
                     });
@@ -1992,7 +2062,13 @@ impl ArrayViewerWidget {
             _ => section,
         };
         let (pointer, held_from) = ctx.input(|i| {
-            (i.pointer.hover_pos(), i.pointer.primary_down().then(|| i.pointer.press_origin()).flatten())
+            (
+                i.pointer.hover_pos(),
+                i.pointer
+                    .primary_down()
+                    .then(|| i.pointer.press_origin())
+                    .flatten(),
+            )
         });
         // A press made in the zone holds the slider open too: egui only
         // reports a drag once the pointer has moved, and a quick flick can
@@ -2008,7 +2084,10 @@ impl ArrayViewerWidget {
         let mut action = None;
         egui::Area::new(id)
             .pivot(egui::Align2::CENTER_BOTTOM)
-            .fixed_pos(egui::pos2(self.rotation_input_center_x, toolbar_rect.top() - ROTATION_SLIDER_GAP))
+            .fixed_pos(egui::pos2(
+                self.rotation_input_center_x,
+                toolbar_rect.top() - ROTATION_SLIDER_GAP,
+            ))
             .constrain_to(widget_rect)
             .show(ctx, |ui| {
                 let text_color = get_overlay_text_color(ui);
@@ -2031,15 +2110,15 @@ impl ArrayViewerWidget {
                         ROTATION_SLIDER_TRACK_W + 2.0 * inset,
                         2.0 * ROTATION_SLIDER_HANDLE_R + 14.0,
                     );
-                    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                    let (rect, response) =
+                        ui.allocate_exact_size(size, egui::Sense::click_and_drag());
                     let track = egui::Rangef::new(rect.left() + inset, rect.right() - inset);
                     let track_y = rect.top() + ROTATION_SLIDER_HANDLE_R;
                     let deg_per_pt = 360.0 / track.span();
                     // +180° at the left end, -180° at the right.
                     let x_of = |angle: f32| track.min + (180.0 - angle) / deg_per_pt;
-                    let angle_at = |x: f32| {
-                        snap_rotation(180.0 - (x - track.min) * deg_per_pt, deg_per_pt)
-                    };
+                    let angle_at =
+                        |x: f32| snap_rotation(180.0 - (x - track.min) * deg_per_pt, deg_per_pt);
 
                     if response.drag_started() {
                         // Grabbing the handle keeps it where it was under the
@@ -2070,7 +2149,10 @@ impl ArrayViewerWidget {
                     let painter = ui.painter().with_clip_rect(widget_rect);
                     let dim = text_color.gamma_multiply(0.5);
                     painter.line_segment(
-                        [egui::pos2(track.min, track_y), egui::pos2(track.max, track_y)],
+                        [
+                            egui::pos2(track.min, track_y),
+                            egui::pos2(track.max, track_y),
+                        ],
                         egui::Stroke::new(2.0_f32, dim),
                     );
                     for tick in [-180, -90, 0, 90, 180] {
@@ -2107,7 +2189,11 @@ impl ArrayViewerWidget {
 
     /// Render stretch controls at top-right of widget.
     /// Returns an action to be applied after rendering.
-    fn render_stretch_controls(&mut self, ctx: &egui::Context, widget_rect: egui::Rect) -> StretchAction {
+    fn render_stretch_controls(
+        &mut self,
+        ctx: &egui::Context,
+        widget_rect: egui::Rect,
+    ) -> StretchAction {
         let margin = 10.0;
 
         let mut action = StretchAction::None;
@@ -2280,7 +2366,11 @@ impl ArrayViewerWidget {
                     // the live axis.
                     ui.add_enabled_ui(is_active, |ui| {
                         let playing = self.playing_axis == Some(axis);
-                        let icon = if playing { phosphor::PAUSE } else { phosphor::PLAY };
+                        let icon = if playing {
+                            phosphor::PAUSE
+                        } else {
+                            phosphor::PLAY
+                        };
                         let play_resp = ui.add_sized(
                             egui::vec2(side, side),
                             egui::Button::new(egui::RichText::new(icon).size(13.0)),
@@ -2428,7 +2518,11 @@ impl ArrayViewerWidget {
             None => true,
         };
         let axis = self.colorbar_axis();
-        let stale = stale || self.colorbar_histogram.as_ref().is_some_and(|h| h.axis != axis);
+        let stale = stale
+            || self
+                .colorbar_histogram
+                .as_ref()
+                .is_some_and(|h| h.axis != axis);
 
         if stale {
             let mut bins = vec![0.0_f32; bin_count];
@@ -2470,7 +2564,11 @@ impl ArrayViewerWidget {
             self.colorbar_histogram = Some(ColorbarHistogram { span, axis, bins });
         }
 
-        &self.colorbar_histogram.as_ref().expect("just populated").bins
+        &self
+            .colorbar_histogram
+            .as_ref()
+            .expect("just populated")
+            .bins
     }
 
     /// Trace the histogram beside the bar as a stepped hairline.
@@ -2564,8 +2662,8 @@ impl ArrayViewerWidget {
         .expand(4.0);
         // The same condition reveals the grips: the overlay stays quiet until
         // the user actually reaches for it.
-        let show_histogram = self.colorbar_drag.is_some()
-            || pointer.is_some_and(|p| hover_zone.contains(p));
+        let show_histogram =
+            self.colorbar_drag.is_some() || pointer.is_some_and(|p| hover_zone.contains(p));
         if show_histogram {
             let bin_count = (bar_rect.height().round() as usize).clamp(16, 512);
             // Borrow ends before painting, which needs &self.
@@ -2790,9 +2888,7 @@ impl ArrayViewerWidget {
                                 };
                                 self.set_max_val(value.max(floor))
                             }
-                            LimitHandle::Min => {
-                                self.set_min_val(value.min(self.max_val - epsilon))
-                            }
+                            LimitHandle::Min => self.set_min_val(value.min(self.max_val - epsilon)),
                         }
                     }
                 }
@@ -2876,8 +2972,7 @@ impl ArrayViewerWidget {
                                 } else {
                                     self.max_val
                                 };
-                                self.max_limit_input_text =
-                                    Self::format_limit_value(shown, is_int);
+                                self.max_limit_input_text = Self::format_limit_value(shown, is_int);
                             }
                         }
                         LimitHandle::Min => {
@@ -2906,7 +3001,12 @@ impl ArrayViewerWidget {
         let spacing = 4.0_f32;
         let size = COLORBAR_BAR_WIDTH;
         // Stacked under the bar, in the order they are most often wanted.
-        let slot = |n: f32| egui::pos2(bar_rect.min.x, bar_rect.max.y + (spacing + size) * n + spacing);
+        let slot = |n: f32| {
+            egui::pos2(
+                bar_rect.min.x,
+                bar_rect.max.y + (spacing + size) * n + spacing,
+            )
+        };
 
         if Self::colorbar_button(
             ctx,
@@ -3014,27 +3114,28 @@ impl ArrayViewerWidget {
         let stretch_type = self.stretch_type();
 
         egui::Area::new(egui::Id::new("stretch_info_overlay"))
-            .fixed_pos(egui::pos2(widget_rect.center().x - 80.0, widget_rect.min.y + 50.0))
+            .fixed_pos(egui::pos2(
+                widget_rect.center().x - 80.0,
+                widget_rect.min.y + 50.0,
+            ))
             .interactable(false)
             .show(ctx, |ui| {
                 let text_color = get_overlay_text_color(ui);
                 let bg = get_overlay_bg(ui);
-                egui::Frame::popup(ui.style())
-                    .fill(bg)
-                    .show(ui, |ui| {
-                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                        let mode_str = match stretch_type {
-                            StretchType::Linear => "Linear",
-                            StretchType::Log => "Log",
-                        };
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} | Contrast: {:.2} | Bias: {:.2}",
-                                mode_str, cb.contrast, cb.bias
-                            ))
-                            .color(text_color),
-                        );
-                    });
+                egui::Frame::popup(ui.style()).fill(bg).show(ui, |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    let mode_str = match stretch_type {
+                        StretchType::Linear => "Linear",
+                        StretchType::Log => "Log",
+                    };
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} | Contrast: {:.2} | Bias: {:.2}",
+                            mode_str, cb.contrast, cb.bias
+                        ))
+                        .color(text_color),
+                    );
+                });
             });
     }
 
@@ -3076,7 +3177,12 @@ impl ArrayViewerWidget {
     }
 
     /// Render zoom level overlay while zooming (similar to contrast adjustment overlay)
-    fn render_zoom_info_overlay(&self, ctx: &egui::Context, widget_rect: egui::Rect, current_time: f64) {
+    fn render_zoom_info_overlay(
+        &self,
+        ctx: &egui::Context,
+        widget_rect: egui::Rect,
+        current_time: f64,
+    ) {
         // Check if we should show the overlay (during and shortly after zoom changes)
         let should_show = if let Some(changed_time) = self.zoom_changed_time {
             (current_time - changed_time) < ZOOM_OVERLAY_DURATION
@@ -3095,7 +3201,10 @@ impl ArrayViewerWidget {
         // centre would be: an interactable Area there would claim the pointer
         // and stop the very scroll that summoned it.
         egui::Area::new(egui::Id::new("zoom_info_overlay"))
-            .fixed_pos(egui::pos2(widget_rect.center().x - 50.0, widget_rect.center().y - 20.0))
+            .fixed_pos(egui::pos2(
+                widget_rect.center().x - 50.0,
+                widget_rect.center().y - 20.0,
+            ))
             .interactable(false)
             .show(ctx, |ui| {
                 let text_color = get_overlay_text_color(ui);
@@ -3106,11 +3215,7 @@ impl ArrayViewerWidget {
                     .inner_margin(egui::Margin::symmetric(16, 8))
                     .show(ui, |ui| {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                        ui.label(
-                            egui::RichText::new(zoom_text)
-                                .color(text_color)
-                                .size(24.0),
-                        );
+                        ui.label(egui::RichText::new(zoom_text).color(text_color).size(24.0));
                     });
             });
     }
@@ -3230,7 +3335,7 @@ impl ArrayViewerWidget {
         let size = 12.0;
         let stroke_color = egui::Color32::from_rgba_unmultiplied(255, 100, 100, 200);
         let stroke = egui::Stroke::new(2.0_f32, stroke_color);
-        
+
         // Draw crosshair
         painter.line_segment(
             [
@@ -3246,7 +3351,7 @@ impl ArrayViewerWidget {
             ],
             stroke,
         );
-        
+
         // Draw circle around crosshair
         painter.circle_stroke(screen_pos, size * 0.7, stroke);
     }
@@ -3274,9 +3379,9 @@ impl ArrayViewerWidget {
         let fill = egui::Stroke::new(2.0_f32, marker_color);
 
         for &(x, y) in &self.markers {
-            let screen_pos = self
-                .transform
-                .image_to_screen_continuous_rotated((x, y), image_rect, image_size);
+            let screen_pos =
+                self.transform
+                    .image_to_screen_continuous_rotated((x, y), image_rect, image_size);
             let h0 = egui::pos2(screen_pos.x - half_size, screen_pos.y);
             let h1 = egui::pos2(screen_pos.x + half_size, screen_pos.y);
             let v0 = egui::pos2(screen_pos.x, screen_pos.y - half_size);
@@ -3331,14 +3436,18 @@ impl ArrayViewerWidget {
                                 ui.spacing_mut().item_spacing.x = 6.0;
                                 ui.add_sized(
                                     [label_width, 18.0],
-                                    egui::Label::new(egui::RichText::new(label).monospace().color(text_color))
-                                        .selectable(false)
-                                        .sense(egui::Sense::hover()),
+                                    egui::Label::new(
+                                        egui::RichText::new(label).monospace().color(text_color),
+                                    )
+                                    .selectable(false)
+                                    .sense(egui::Sense::hover()),
                                 );
                                 ui.add(
-                                    egui::Label::new(egui::RichText::new(value).monospace().color(text_color))
-                                        .selectable(false)
-                                        .sense(egui::Sense::hover()),
+                                    egui::Label::new(
+                                        egui::RichText::new(value).monospace().color(text_color),
+                                    )
+                                    .selectable(false)
+                                    .sense(egui::Sense::hover()),
                                 );
                             });
                         };
@@ -3743,7 +3852,10 @@ mod slice_tests {
         assert_eq!(w.take_slice_request(), Some(vec![1]));
 
         w.fail_slice_request(&[1]);
-        assert_eq!(w.playing_axis, None, "do not keep looping on unreadable data");
+        assert_eq!(
+            w.playing_axis, None,
+            "do not keep looping on unreadable data"
+        );
         assert_eq!(w.requested_indices, None);
     }
 
@@ -3830,7 +3942,11 @@ mod slice_tests {
         w.apply_slice_action(SliceAction::SetIndex(0, 20), 0.0);
         w.apply_slice_action(SliceAction::SetIndex(0, 99), 0.0);
         assert_eq!(w.current_indices, vec![99], "handle follows the drag");
-        assert_eq!(w.take_slice_request(), None, "no extra requests while one is in flight");
+        assert_eq!(
+            w.take_slice_request(),
+            None,
+            "no extra requests while one is in flight"
+        );
 
         // The in-flight slice (10) arrives; the handle is now at 99, so it jumps
         // straight there (skipping 20).
@@ -4172,7 +4288,8 @@ mod colorbar_tests {
         // neutral colour sits where the data's zero is.
         let bar = harness_bar();
         assert!(
-            (colorbar_value_to_y(bar, (lo, hi), StretchType::Linear, 0.0) - bar.center().y).abs() < 1e-3,
+            (colorbar_value_to_y(bar, (lo, hi), StretchType::Linear, 0.0) - bar.center().y).abs()
+                < 1e-3,
             "zero is not at the centre of the bar"
         );
     }
@@ -4203,8 +4320,12 @@ mod colorbar_tests {
         // out early while vmax still has room.
         w.set_max_val(100.0);
         let (vmin, vmax) = w.scaling_range();
-        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, vmax) - bar.min.y).abs() < 1e-3);
-        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, vmin) - bar.max.y).abs() < 1e-3);
+        assert!(
+            (colorbar_value_to_y(bar, span, StretchType::Linear, vmax) - bar.min.y).abs() < 1e-3
+        );
+        assert!(
+            (colorbar_value_to_y(bar, span, StretchType::Linear, vmin) - bar.max.y).abs() < 1e-3
+        );
     }
 
     #[test]
@@ -4400,9 +4521,14 @@ mod colorbar_tests {
         run_colorbar_frame(&mut w, &ctx, None);
 
         // Hover the bar so the histogram is up, then look at paint order.
-        let shapes = run_colorbar_shapes(&mut w, &ctx, vec![egui::Event::PointerMoved(
-            egui::pos2(COLORBAR_MARGIN + 2.0, COLORBAR_MARGIN + 20.0),
-        )]);
+        let shapes = run_colorbar_shapes(
+            &mut w,
+            &ctx,
+            vec![egui::Event::PointerMoved(egui::pos2(
+                COLORBAR_MARGIN + 2.0,
+                COLORBAR_MARGIN + 20.0,
+            ))],
+        );
 
         let histogram_at = shapes
             .iter()
@@ -4522,9 +4648,16 @@ mod colorbar_tests {
         let span = (-10.0, 30.0);
 
         // The span's ends land on the bar's ends, low at the bottom.
-        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, -10.0) - bar.max.y).abs() < 1e-3);
-        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, 30.0) - bar.min.y).abs() < 1e-3);
-        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, 10.0) - bar.center().y).abs() < 1e-3);
+        assert!(
+            (colorbar_value_to_y(bar, span, StretchType::Linear, -10.0) - bar.max.y).abs() < 1e-3
+        );
+        assert!(
+            (colorbar_value_to_y(bar, span, StretchType::Linear, 30.0) - bar.min.y).abs() < 1e-3
+        );
+        assert!(
+            (colorbar_value_to_y(bar, span, StretchType::Linear, 10.0) - bar.center().y).abs()
+                < 1e-3
+        );
 
         for value in [-10.0, -3.5, 0.0, 12.25, 30.0] {
             let y = colorbar_value_to_y(bar, span, StretchType::Linear, value);
@@ -4557,7 +4690,10 @@ mod colorbar_tests {
             let back = colorbar_y_to_value(bar, span, log, y);
             // y is an f32, and near the top a log bar packs many values into
             // each of its pixels, so allow for that.
-            assert!((back - value).abs() < 1e-6 * value.max(1.0) * 1e3, "{value} -> {y} -> {back}");
+            assert!(
+                (back - value).abs() < 1e-6 * value.max(1.0) * 1e3,
+                "{value} -> {y} -> {back}"
+            );
         }
     }
 
@@ -4571,14 +4707,21 @@ mod colorbar_tests {
         let bar = bar();
         let span = w.colorbar_span();
         let (vmin, vmax) = w.scaling_range();
-        assert_eq!(span, (vmin, vmax), "test assumes the limits sit at the ends");
+        assert_eq!(
+            span,
+            (vmin, vmax),
+            "test assumes the limits sit at the ends"
+        );
 
         for i in 0..=10 {
             let t = i as f64 / 10.0;
             let y = bar.max.y - t as f32 * bar.height();
             let v = colorbar_y_to_value(bar, span, w.colorbar_axis(), y);
             let reached = apply_stretch((v - vmin) / (vmax - vmin), StretchType::Log);
-            assert!((reached - t).abs() < 1e-4, "at {t} up the bar the ramp is at {reached}");
+            assert!(
+                (reached - t).abs() < 1e-4,
+                "at {t} up the bar the ramp is at {reached}"
+            );
         }
     }
 
@@ -4601,23 +4744,39 @@ mod colorbar_tests {
         w.set_stretch_type(StretchType::Log);
         let span = w.colorbar_span();
         let bins = w.colorbar_histogram_bins(span, 30).to_vec();
-        assert!((bins[3] - 1.0).abs() < 1e-6, "the ten 1.0s should be bin 3: {bins:?}");
+        assert!(
+            (bins[3] - 1.0).abs() < 1e-6,
+            "the ten 1.0s should be bin 3: {bins:?}"
+        );
 
         // Leaving log for linear lays the bins out afresh.
         w.set_stretch_type(StretchType::Linear);
         let bins = w.colorbar_histogram_bins(span, 30).to_vec();
-        assert!((bins[0] - 1.0).abs() < 1e-6, "linear puts them back in bin 0: {bins:?}");
+        assert!(
+            (bins[0] - 1.0).abs() < 1e-6,
+            "linear puts them back in bin 0: {bins:?}"
+        );
     }
 
     #[test]
     fn positions_clamp_to_the_bar() {
         let bar = bar();
         let span = (0.0, 1.0);
-        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, 99.0) - bar.min.y).abs() < 1e-3);
-        assert!((colorbar_value_to_y(bar, span, StretchType::Linear, -99.0) - bar.max.y).abs() < 1e-3);
+        assert!(
+            (colorbar_value_to_y(bar, span, StretchType::Linear, 99.0) - bar.min.y).abs() < 1e-3
+        );
+        assert!(
+            (colorbar_value_to_y(bar, span, StretchType::Linear, -99.0) - bar.max.y).abs() < 1e-3
+        );
         // Dragging past either end of the bar pins to that end's value.
-        assert!((colorbar_y_to_value(bar, span, StretchType::Linear, bar.min.y - 40.0) - 1.0).abs() < 1e-9);
-        assert!((colorbar_y_to_value(bar, span, StretchType::Linear, bar.max.y + 40.0) - 0.0).abs() < 1e-9);
+        assert!(
+            (colorbar_y_to_value(bar, span, StretchType::Linear, bar.min.y - 40.0) - 1.0).abs()
+                < 1e-9
+        );
+        assert!(
+            (colorbar_y_to_value(bar, span, StretchType::Linear, bar.max.y + 40.0) - 0.0).abs()
+                < 1e-9
+        );
     }
 
     #[test]
@@ -4717,7 +4876,10 @@ mod colorbar_tests {
         let bins = w.colorbar_histogram_bins(span, 4).to_vec();
         let total: f32 = bins.iter().sum();
         // Two finite pixels, each alone in its bin, so both normalise to 1.0.
-        assert!((total - 2.0).abs() < 1e-6, "NaN leaked into the bins: {bins:?}");
+        assert!(
+            (total - 2.0).abs() < 1e-6,
+            "NaN leaked into the bins: {bins:?}"
+        );
     }
 
     #[test]
@@ -4776,7 +4938,10 @@ mod colorbar_tests {
 
         w.reset_current_stretch();
 
-        assert!(!w.is_stretch_modified(), "contrast/bias should be back to default");
+        assert!(
+            !w.is_stretch_modified(),
+            "contrast/bias should be back to default"
+        );
         assert_eq!(
             w.value_range(),
             (5.0, 25.0),
@@ -4794,7 +4959,11 @@ mod colorbar_tests {
 
         w.reset_limits_and_unlock();
 
-        assert_eq!(w.value_range(), original, "limits should be back on the data");
+        assert_eq!(
+            w.value_range(),
+            original,
+            "limits should be back on the data"
+        );
         assert!(
             w.is_stretch_modified(),
             "a contrast/bias dialled in by hand must survive a limits reset"
@@ -4856,7 +5025,11 @@ mod colorbar_tests {
         tops.sort_by(f32::total_cmp);
         tops.dedup_by(|a, b| (*a - *b).abs() < 0.5);
 
-        assert_eq!(tops.len(), 3, "expected three buttons under the bar: {tops:?}");
+        assert_eq!(
+            tops.len(),
+            3,
+            "expected three buttons under the bar: {tops:?}"
+        );
         for pair in tops.windows(2) {
             assert!(
                 pair[1] - pair[0] >= COLORBAR_BAR_WIDTH,
@@ -4881,8 +5054,14 @@ mod colorbar_tests {
         assert_eq!(w.value_range(), (orig_min, orig_max));
         assert!(!w.is_limits_modified());
         // The boxes follow the limits, not the other way round.
-        assert_eq!(w.max_limit_input_text, ArrayViewerWidget::format_limit_value(orig_max, false));
-        assert_eq!(w.min_limit_input_text, ArrayViewerWidget::format_limit_value(orig_min, false));
+        assert_eq!(
+            w.max_limit_input_text,
+            ArrayViewerWidget::format_limit_value(orig_max, false)
+        );
+        assert_eq!(
+            w.min_limit_input_text,
+            ArrayViewerWidget::format_limit_value(orig_min, false)
+        );
     }
 }
 
@@ -4950,7 +5129,10 @@ mod hover_overlay_tests {
         // An empty rect, but a finite one: the message bar does arithmetic on
         // its right edge and Rect::NOTHING would hand it an infinity.
         assert!(rect.right().is_finite(), "rect must stay usable: {rect:?}");
-        assert!(rect.width() <= 0.01, "nothing is drawn, so it takes no width");
+        assert!(
+            rect.width() <= 0.01,
+            "nothing is drawn, so it takes no width"
+        );
     }
 
     #[test]
@@ -5043,7 +5225,10 @@ mod rotation_slider_tests {
         run_controls(w, ctx, Vec::new());
         run_controls(w, ctx, Vec::new());
         let section = w.rotation_section_rect;
-        assert!(section.is_positive(), "the rotation section should be laid out");
+        assert!(
+            section.is_positive(),
+            "the rotation section should be laid out"
+        );
         run_controls(w, ctx, vec![egui::Event::PointerMoved(section.center())]);
         run_controls(w, ctx, Vec::new()).expect("hovering the section should open the slider")
     }
@@ -5078,8 +5263,15 @@ mod rotation_slider_tests {
 
         open_slider(&mut w, &ctx);
 
-        run_controls(&mut w, &ctx, vec![egui::Event::PointerMoved(egui::pos2(10.0, 10.0))]);
-        assert!(run_controls(&mut w, &ctx, Vec::new()).is_none(), "leaving should close it");
+        run_controls(
+            &mut w,
+            &ctx,
+            vec![egui::Event::PointerMoved(egui::pos2(10.0, 10.0))],
+        );
+        assert!(
+            run_controls(&mut w, &ctx, Vec::new()).is_none(),
+            "leaving should close it"
+        );
     }
 
     #[test]
@@ -5118,7 +5310,11 @@ mod rotation_slider_tests {
         drag_handle(&mut w, &ctx, handle, -30.0);
 
         let expected = 30.0 * deg_per_pt();
-        assert!((w.rotation() - expected).abs() < 0.5, "expected ~{expected}, got {}", w.rotation());
+        assert!(
+            (w.rotation() - expected).abs() < 0.5,
+            "expected ~{expected}, got {}",
+            w.rotation()
+        );
         assert_eq!(w.rotation_input_text, format!("{:.1}", w.rotation()));
     }
 
@@ -5145,16 +5341,30 @@ mod rotation_slider_tests {
         let dx = 225.0 / deg_per_pt();
         let held = drag_handle(&mut w, &ctx, handle, dx);
 
-        assert!(held.x > track_end + 20.0, "handle {held:?} should be past the end at {track_end}");
-        assert!((w.rotation() - 135.0).abs() < 0.5, "expected 135, got {}", w.rotation());
+        assert!(
+            held.x > track_end + 20.0,
+            "handle {held:?} should be past the end at {track_end}"
+        );
+        assert!(
+            (w.rotation() - 135.0).abs() < 0.5,
+            "expected 135, got {}",
+            w.rotation()
+        );
 
         // Released (and closed, the pointer having left), the slider reopens
         // with the handle back on the track at the wrapped angle.
         let section = w.rotation_section_rect;
-        run_controls(&mut w, &ctx, vec![egui::Event::PointerMoved(section.center())]);
+        run_controls(
+            &mut w,
+            &ctx,
+            vec![egui::Event::PointerMoved(section.center())],
+        );
         let after = run_controls(&mut w, &ctx, Vec::new()).expect("hovered again");
         let expected_x = handle.x - 135.0 / deg_per_pt();
-        assert!((after.x - expected_x).abs() < 1.0, "handle at {after:?}, expected x {expected_x}");
+        assert!(
+            (after.x - expected_x).abs() < 1.0,
+            "handle at {after:?}, expected x {expected_x}"
+        );
     }
 
     #[test]
@@ -5181,7 +5391,12 @@ mod scroll_zoom_tests {
     }
 
     /// One whole frame of the widget, hosted the way app.rs hosts it.
-    fn run_frame(w: &mut ArrayViewerWidget, ctx: &egui::Context, time: f64, events: Vec<egui::Event>) {
+    fn run_frame(
+        w: &mut ArrayViewerWidget,
+        ctx: &egui::Context,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) {
         let _ = ctx.run(
             egui::RawInput {
                 screen_rect: Some(SCREEN),
@@ -5229,7 +5444,10 @@ mod scroll_zoom_tests {
         let readout = ctx
             .memory(|m| m.area_rect(egui::Id::new("zoom_info_overlay")))
             .expect("the zoom readout should be showing");
-        assert!(readout.contains(pointer), "readout {readout:?} is not under {pointer:?}");
+        assert!(
+            readout.contains(pointer),
+            "readout {readout:?} is not under {pointer:?}"
+        );
 
         run_frame(&mut w, &ctx, 0.15, vec![wheel_up()]);
         assert!(
@@ -5312,12 +5530,18 @@ mod smoothing_tests {
     fn entering_zero_turns_smoothing_off_and_restores_the_default_width() {
         let mut w = ArrayViewerWidget::new();
         w.apply_stretch_action(StretchAction::SetSmoothingFwhm(5.0));
-        assert_eq!(smoothing_commit_action("0", 5.0), StretchAction::ClearSmoothing);
+        assert_eq!(
+            smoothing_commit_action("0", 5.0),
+            StretchAction::ClearSmoothing
+        );
         w.smoothing_input_text = "0".to_string();
         w.apply_stretch_action(StretchAction::ClearSmoothing);
         assert_eq!(w.smoothing_fwhm(), None);
         assert_eq!(w.smoothing_fwhm, DEFAULT_SMOOTHING_FWHM);
-        assert_eq!(w.smoothing_input_text, format_smoothing_fwhm(DEFAULT_SMOOTHING_FWHM));
+        assert_eq!(
+            w.smoothing_input_text,
+            format_smoothing_fwhm(DEFAULT_SMOOTHING_FWHM)
+        );
     }
 
     #[test]
@@ -5383,10 +5607,17 @@ mod canvas_tests {
         let mut w = ArrayViewerWidget::new();
         w.set_image(vec![0.0, 1.0, 2.0, 3.0], 2, 2, false, 6);
         let ctx = egui::Context::default();
-        ctx.set_visuals(if dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() });
+        ctx.set_visuals(if dark_mode {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
         let output = ctx.run(
-            egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
             |ctx| {
                 let frame = egui::Frame::central_panel(&ctx.style()).inner_margin(0.0);
                 egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
@@ -5395,11 +5626,19 @@ mod canvas_tests {
                 });
             },
         );
-        output.shapes.iter().find_map(|clipped| match &clipped.shape {
-            egui::Shape::Rect(r) if r.rect == screen && r.fill != Color32::TRANSPARENT
-                && r.fill != ctx.style().visuals.panel_fill => Some(r.fill),
-            _ => None,
-        })
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(r)
+                    if r.rect == screen
+                        && r.fill != Color32::TRANSPARENT
+                        && r.fill != ctx.style().visuals.panel_fill =>
+                {
+                    Some(r.fill)
+                }
+                _ => None,
+            })
     }
 
     #[test]

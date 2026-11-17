@@ -24,7 +24,10 @@ pub fn dtype_meta(array_type: &str) -> (bool, usize) {
 /// Convert a JavaScript ArrayBuffer to Vec<f64> based on ArrayType string.
 /// ArrayType values are Rust-style type specifiers (i8, u8, i16, etc.).
 #[cfg(target_arch = "wasm32")]
-pub fn convert_buffer_to_f64(buffer: &js_sys::ArrayBuffer, array_type: &str) -> Result<Vec<f64>, JsValue> {
+pub fn convert_buffer_to_f64(
+    buffer: &js_sys::ArrayBuffer,
+    array_type: &str,
+) -> Result<Vec<f64>, JsValue> {
     match array_type {
         "i8" => {
             let view = js_sys::Int8Array::new(buffer);

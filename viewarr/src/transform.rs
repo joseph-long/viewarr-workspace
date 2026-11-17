@@ -75,7 +75,7 @@ impl ViewTransform {
 
     /// Check if transform is at default state (for showing/hiding reset button)
     pub fn is_default(&self) -> bool {
-        (self.zoom - 1.0).abs() < 0.001 
+        (self.zoom - 1.0).abs() < 0.001
             && self.pan_offset.length() < 0.5
             && self.rotation_degrees.abs() < 0.001
     }
@@ -164,7 +164,7 @@ impl ViewTransform {
 
     /// Apply a zoom delta centered on a specific screen position.
     /// This preserves the point under the cursor while zooming.
-    /// 
+    ///
     /// The math: pan_offset is defined relative to viewport_center (see calculate_image_rect).
     /// To keep screen_pos showing the same image content after zoom:
     ///   pan_new = (screen_pos - viewport_center) * (1 - zoom_ratio) + pan_old * zoom_ratio
@@ -181,10 +181,10 @@ impl ViewTransform {
         }
 
         let zoom_ratio = new_zoom / old_zoom;
-        
+
         // d = position relative to viewport center
         let d = screen_pos - viewport_center;
-        
+
         // New pan offset to keep the point under cursor fixed
         self.pan_offset = d * (1.0 - zoom_ratio) + self.pan_offset * zoom_ratio;
         self.zoom = new_zoom;
@@ -269,7 +269,12 @@ impl ViewTransform {
 
     /// Convert image coordinates to screen position
     /// Note: Y is flipped for FITS convention (Y=0 at bottom of displayed image)
-    pub fn image_to_screen(&self, image_pos: (u32, u32), image_rect: Rect, image_size: (u32, u32)) -> Pos2 {
+    pub fn image_to_screen(
+        &self,
+        image_pos: (u32, u32),
+        image_rect: Rect,
+        image_size: (u32, u32),
+    ) -> Pos2 {
         let rel_x = (image_pos.0 as f32 + 0.5) / image_size.0 as f32;
         // Flip Y: image Y=0 is at bottom, but screen Y increases downward
         let rel_y = 1.0 - (image_pos.1 as f32 + 0.5) / image_size.1 as f32;
@@ -281,11 +286,11 @@ impl ViewTransform {
     }
 
     /// Convert screen position to image coordinates for setting the pivot point.
-    /// 
+    ///
     /// This is similar to screen_to_image but does NOT account for current rotation.
     /// When setting a new pivot point via alt-click, we want the marker to appear
     /// exactly where the user clicked, regardless of current rotation state.
-    /// 
+    ///
     /// The key difference from screen_to_image_rotated: we don't unrotate the
     /// Convert a screen position to the continuous image coordinates to use as
     /// a rotation pivot, or `None` if the click missed the image.
@@ -333,10 +338,10 @@ impl ViewTransform {
         let angle_rad = -angle_degrees.to_radians();
         let cos_a = angle_rad.cos();
         let sin_a = angle_rad.sin();
-        
+
         let dx = point.x - center.x;
         let dy = point.y - center.y;
-        
+
         Pos2::new(
             center.x + dx * cos_a - dy * sin_a,
             center.y + dx * sin_a + dy * cos_a,
@@ -350,21 +355,17 @@ impl ViewTransform {
 
     /// Calculate the four corners of the rotated image in screen coordinates
     /// Returns corners in order: top-left, top-right, bottom-right, bottom-left
-    pub fn calculate_rotated_corners(
-        &self,
-        image_rect: Rect,
-        image_size: (u32, u32),
-    ) -> [Pos2; 4] {
+    pub fn calculate_rotated_corners(&self, image_rect: Rect, image_size: (u32, u32)) -> [Pos2; 4] {
         // Get pivot point in screen coordinates
         let pivot_screen = self.pivot_to_screen(image_rect, image_size);
-        
+
         let corners = [
             image_rect.left_top(),
             image_rect.right_top(),
             image_rect.right_bottom(),
             image_rect.left_bottom(),
         ];
-        
+
         corners.map(|corner| Self::rotate_point(corner, pivot_screen, self.rotation_degrees))
     }
 
@@ -373,7 +374,7 @@ impl ViewTransform {
         let rel_x = (self.pivot_point.0 + 0.5) / image_size.0 as f32;
         // Flip Y for FITS convention
         let rel_y = 1.0 - (self.pivot_point.1 + 0.5) / image_size.1 as f32;
-        
+
         Pos2::new(
             image_rect.min.x + rel_x * image_rect.width(),
             image_rect.min.y + rel_y * image_rect.height(),
@@ -558,7 +559,12 @@ mod tests {
         // Center of image rect should map to center of image
         let center = Pos2::new(200.0, 200.0);
         let result = t.screen_to_image(center, image_rect, image_size);
-        assert!(result.is_some(), "Center {:?} should be inside rect {:?}", center, image_rect);
+        assert!(
+            result.is_some(),
+            "Center {:?} should be inside rect {:?}",
+            center,
+            image_rect
+        );
         let (x, y) = result.unwrap();
         assert_eq!(x, 50);
         assert_eq!(y, 50); // Center is still center with Y-flip
@@ -566,7 +572,13 @@ mod tests {
         // Top-left corner of screen maps to bottom-left of image (FITS convention)
         let top_left = Pos2::new(100.0, 100.0);
         let result = t.screen_to_image(top_left, image_rect, image_size);
-        assert!(result.is_some(), "Top-left {:?} should be inside rect {:?}, contains={}", top_left, image_rect, image_rect.contains(top_left));
+        assert!(
+            result.is_some(),
+            "Top-left {:?} should be inside rect {:?}, contains={}",
+            top_left,
+            image_rect,
+            image_rect.contains(top_left)
+        );
         let (x, y) = result.unwrap();
         assert_eq!(x, 0);
         assert_eq!(y, 99); // Y is flipped: top of screen = Y=99 in image
@@ -574,7 +586,12 @@ mod tests {
         // Bottom-left corner of screen maps to top-left of image (FITS convention)
         let bottom_left = Pos2::new(100.0, 299.0);
         let result = t.screen_to_image(bottom_left, image_rect, image_size);
-        assert!(result.is_some(), "Bottom-left {:?} should be inside rect {:?}", bottom_left, image_rect);
+        assert!(
+            result.is_some(),
+            "Bottom-left {:?} should be inside rect {:?}",
+            bottom_left,
+            image_rect
+        );
         let (x, y) = result.unwrap();
         assert_eq!(x, 0);
         assert_eq!(y, 0); // Y is flipped: bottom of screen = Y=0 in image
@@ -615,7 +632,8 @@ mod tests {
         );
 
         let image_rect_after = t.calculate_image_rect(viewport_rect, base_size);
-        let centered_pixel_pos = t.image_to_screen_rotated((img_x, img_y), image_rect_after, image_size);
+        let centered_pixel_pos =
+            t.image_to_screen_rotated((img_x, img_y), image_rect_after, image_size);
         let viewport_center = viewport_rect.center();
 
         assert!((centered_pixel_pos.x - viewport_center.x).abs() < 0.01);
@@ -655,7 +673,7 @@ mod tests {
 
     /// Test that setting a pivot point via click and then displaying the marker
     /// results in the marker appearing at the click location.
-    /// 
+    ///
     /// This simulates the alt-click workflow:
     /// 1. User clicks at screen position
     /// 2. Convert screen position to image coordinates
@@ -670,30 +688,34 @@ mod tests {
 
         // Click at center of the image on screen
         let click_pos = Pos2::new(200.0, 200.0);
-        
+
         // Convert click to image coordinates (simulating alt-click)
         let img_coords = t.screen_to_image_rotated(click_pos, image_rect, image_size);
         assert!(img_coords.is_some(), "Click should be within image bounds");
         let (img_x, img_y) = img_coords.unwrap();
-        
+
         // Set as pivot point
         let mut t2 = t.clone();
         t2.set_pivot_point(img_x as f32, img_y as f32);
-        
+
         // Convert pivot back to screen coordinates
         let marker_pos = t2.pivot_to_screen(image_rect, image_size);
-        
+
         // Marker should be at the click location (within 1 pixel tolerance due to discretization)
         let tolerance = image_rect.width() / image_size.0 as f32; // 1 image pixel in screen coords
         assert!(
             (marker_pos.x - click_pos.x).abs() < tolerance,
             "Marker X ({}) should be near click X ({}), diff={}",
-            marker_pos.x, click_pos.x, (marker_pos.x - click_pos.x).abs()
+            marker_pos.x,
+            click_pos.x,
+            (marker_pos.x - click_pos.x).abs()
         );
         assert!(
             (marker_pos.y - click_pos.y).abs() < tolerance,
             "Marker Y ({}) should be near click Y ({}), diff={}",
-            marker_pos.y, click_pos.y, (marker_pos.y - click_pos.y).abs()
+            marker_pos.y,
+            click_pos.y,
+            (marker_pos.y - click_pos.y).abs()
         );
     }
 
@@ -752,7 +774,13 @@ mod tests {
         t.pivot_point = (49.5, 49.5);
 
         let rect_before = t.calculate_image_rect(viewport, base);
-        let probes = [(0.0, 0.0), (99.0, 0.0), (0.0, 99.0), (99.0, 99.0), (12.0, 73.0)];
+        let probes = [
+            (0.0, 0.0),
+            (99.0, 0.0),
+            (0.0, 99.0),
+            (99.0, 99.0),
+            (12.0, 73.0),
+        ];
         let was: Vec<Pos2> = probes
             .iter()
             .map(|&p| t.image_to_screen_continuous_rotated(p, rect_before, image_size))
@@ -787,9 +815,13 @@ mod tests {
         // A corner of the unrotated rect: at 45 degrees the image has swung
         // away from it, so there are no pixels there to pick.
         let corner = Pos2::new(rect.min.x + 2.0, rect.min.y + 2.0);
-        assert!(rect.contains(corner), "the probe must be inside the plain rect");
         assert!(
-            t.screen_to_image_for_pivot(corner, rect, image_size).is_none(),
+            rect.contains(corner),
+            "the probe must be inside the plain rect"
+        );
+        assert!(
+            t.screen_to_image_for_pivot(corner, rect, image_size)
+                .is_none(),
             "a click on the background must not land a pivot inside the image"
         );
 
@@ -805,94 +837,136 @@ mod tests {
     #[test]
     fn test_reset_zoom_and_pan_preserves_rotation() {
         let mut t = ViewTransform::new();
-        
+
         // Set up some state
         t.zoom = 2.5;
         t.pan_offset = Vec2::new(100.0, -50.0);
         t.rotation_degrees = 45.0;
         t.pivot_point = (25.0, 75.0);
         t.show_pivot_marker = true;
-        
+
         // Reset zoom and pan only
         t.reset_zoom_and_pan();
-        
+
         // Zoom and pan should be reset
         assert!((t.zoom - 1.0).abs() < 0.001, "Zoom should be reset to 1.0");
         assert!(t.pan_offset.length() < 0.001, "Pan should be reset to zero");
-        
+
         // Rotation and pivot should be preserved
-        assert!((t.rotation_degrees - 45.0).abs() < 0.001, "Rotation should be preserved");
-        assert!((t.pivot_point.0 - 25.0).abs() < 0.001, "Pivot X should be preserved");
-        assert!((t.pivot_point.1 - 75.0).abs() < 0.001, "Pivot Y should be preserved");
-        assert!(t.show_pivot_marker, "Pivot marker visibility should be preserved");
+        assert!(
+            (t.rotation_degrees - 45.0).abs() < 0.001,
+            "Rotation should be preserved"
+        );
+        assert!(
+            (t.pivot_point.0 - 25.0).abs() < 0.001,
+            "Pivot X should be preserved"
+        );
+        assert!(
+            (t.pivot_point.1 - 75.0).abs() < 0.001,
+            "Pivot Y should be preserved"
+        );
+        assert!(
+            t.show_pivot_marker,
+            "Pivot marker visibility should be preserved"
+        );
     }
 
     /// Test full reset clears rotation as well
     #[test]
     fn test_full_reset_clears_rotation() {
         let mut t = ViewTransform::new();
-        
+
         // Set up some state
         t.zoom = 2.5;
         t.pan_offset = Vec2::new(100.0, -50.0);
         t.rotation_degrees = 45.0;
         t.pivot_point = (25.0, 75.0);
-        
+
         // Full reset
         t.reset();
-        
+
         // Everything should be reset (except pivot which is preserved)
         assert!((t.zoom - 1.0).abs() < 0.001, "Zoom should be reset to 1.0");
         assert!(t.pan_offset.length() < 0.001, "Pan should be reset to zero");
-        assert!(t.rotation_degrees.abs() < 0.001, "Rotation should be reset to 0");
+        assert!(
+            t.rotation_degrees.abs() < 0.001,
+            "Rotation should be reset to 0"
+        );
         // Pivot is preserved even in full reset
-        assert!((t.pivot_point.0 - 25.0).abs() < 0.001, "Pivot X should be preserved");
-        assert!((t.pivot_point.1 - 75.0).abs() < 0.001, "Pivot Y should be preserved");
+        assert!(
+            (t.pivot_point.0 - 25.0).abs() < 0.001,
+            "Pivot X should be preserved"
+        );
+        assert!(
+            (t.pivot_point.1 - 75.0).abs() < 0.001,
+            "Pivot Y should be preserved"
+        );
     }
 
     /// Test rotation angle normalization to -180..180 range
     #[test]
     fn test_rotation_normalization() {
         let mut t = ViewTransform::new();
-        
+
         // Test positive overflow
         t.set_rotation(270.0);
-        assert!((t.rotation() - (-90.0)).abs() < 0.001, "270° should normalize to -90°");
-        
+        assert!(
+            (t.rotation() - (-90.0)).abs() < 0.001,
+            "270° should normalize to -90°"
+        );
+
         // Test negative overflow
         t.set_rotation(-270.0);
-        assert!((t.rotation() - 90.0).abs() < 0.001, "-270° should normalize to 90°");
-        
+        assert!(
+            (t.rotation() - 90.0).abs() < 0.001,
+            "-270° should normalize to 90°"
+        );
+
         // Test large positive
         t.set_rotation(450.0);
-        assert!((t.rotation() - 90.0).abs() < 0.001, "450° should normalize to 90°");
-        
+        assert!(
+            (t.rotation() - 90.0).abs() < 0.001,
+            "450° should normalize to 90°"
+        );
+
         // Test large negative
         t.set_rotation(-450.0);
-        assert!((t.rotation() - (-90.0)).abs() < 0.001, "-450° should normalize to -90°");
-        
+        assert!(
+            (t.rotation() - (-90.0)).abs() < 0.001,
+            "-450° should normalize to -90°"
+        );
+
         // Test exact boundaries
         t.set_rotation(180.0);
-        assert!((t.rotation() - 180.0).abs() < 0.001, "180° should stay 180°");
-        
+        assert!(
+            (t.rotation() - 180.0).abs() < 0.001,
+            "180° should stay 180°"
+        );
+
         t.set_rotation(-180.0);
-        assert!((t.rotation() - (-180.0)).abs() < 0.001, "-180° should stay -180°");
+        assert!(
+            (t.rotation() - (-180.0)).abs() < 0.001,
+            "-180° should stay -180°"
+        );
     }
 
     /// Test rotate_by accumulates correctly with normalization
     #[test]
     fn test_rotate_by() {
         let mut t = ViewTransform::new();
-        
+
         t.rotate_by(45.0);
         assert!((t.rotation() - 45.0).abs() < 0.001);
-        
+
         t.rotate_by(45.0);
         assert!((t.rotation() - 90.0).abs() < 0.001);
-        
+
         // Rotate past 180 should wrap
-        t.rotate_by(100.0);  // 90 + 100 = 190 -> -170
-        assert!((t.rotation() - (-170.0)).abs() < 0.001, "190° should wrap to -170°");
+        t.rotate_by(100.0); // 90 + 100 = 190 -> -170
+        assert!(
+            (t.rotation() - (-170.0)).abs() < 0.001,
+            "190° should wrap to -170°"
+        );
     }
 
     /// Test boundary condition: clicking exactly at top-left corner of image rect
@@ -906,7 +980,7 @@ mod tests {
         // Click exactly at top-left corner
         let corner = Pos2::new(100.0, 100.0);
         let result = t.screen_to_image(corner, image_rect, image_size);
-        
+
         assert!(result.is_some(), "Top-left corner should be valid");
         let (x, y) = result.unwrap();
         assert_eq!(x, 0, "X should be 0");
@@ -924,7 +998,8 @@ mod tests {
         // that half-open range: the image's outer edge is the exclusive bound.
         let corner = Pos2::new(100.0, 100.0);
         assert!(
-            t.screen_to_image_for_pivot(corner, image_rect, image_size).is_none(),
+            t.screen_to_image_for_pivot(corner, image_rect, image_size)
+                .is_none(),
             "the top edge is the exclusive bound, as it is for hover"
         );
 
@@ -948,13 +1023,13 @@ mod tests {
     fn test_is_default_with_rotation() {
         let mut t = ViewTransform::new();
         assert!(t.is_default(), "Fresh transform should be default");
-        
+
         t.rotation_degrees = 15.0;
         assert!(!t.is_default(), "Rotated transform should not be default");
-        
+
         t.rotation_degrees = 0.0;
         assert!(t.is_default(), "Zero rotation should be default again");
-        
+
         t.pan_offset = Vec2::new(10.0, 0.0);
         assert!(!t.is_default(), "Panned transform should not be default");
     }

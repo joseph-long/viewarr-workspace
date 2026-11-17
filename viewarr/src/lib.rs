@@ -25,12 +25,15 @@ mod colormap_luts;
 
 // Public so native front-ends (e.g. the `viewarr-native` desktop app) can host
 // the same widget the WASM build exposes to JavaScript.
+pub mod buffer;
 pub mod colormap;
 pub mod transform;
 pub mod widget;
 
 #[cfg(target_arch = "wasm32")]
 use app::ViewerApp;
+#[cfg(target_arch = "wasm32")]
+use buffer::{convert_buffer_to_f64, dtype_meta};
 #[cfg(target_arch = "wasm32")]
 use colormap::Colormap;
 #[cfg(target_arch = "wasm32")]
@@ -618,83 +621,5 @@ impl ViewerHandle {
         callbacks.on_state_change = None;
         callbacks.on_click = None;
         callbacks.on_slice_request = None;
-    }
-}
-
-/// Display metadata for a dtype: (is_integer, value_decimals for hover readout).
-#[cfg(target_arch = "wasm32")]
-fn dtype_meta(array_type: &str) -> (bool, usize) {
-    let is_integer = matches!(
-        array_type,
-        "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "i64" | "u64"
-    );
-    let value_decimals = match array_type {
-        "f32" => 4,
-        "f64" => 6,
-        _ => 0,
-    };
-    (is_integer, value_decimals)
-}
-
-/// Convert a JavaScript ArrayBuffer to Vec<f64> based on ArrayType string.
-/// ArrayType values are Rust-style type specifiers (i8, u8, i16, etc.).
-#[cfg(target_arch = "wasm32")]
-fn convert_buffer_to_f64(buffer: &js_sys::ArrayBuffer, array_type: &str) -> Result<Vec<f64>, JsValue> {
-    match array_type {
-        "i8" => {
-            let view = js_sys::Int8Array::new(buffer);
-            Ok(view.to_vec().into_iter().map(|v| v as f64).collect())
-        }
-        "u8" => {
-            let view = js_sys::Uint8Array::new(buffer);
-            Ok(view.to_vec().into_iter().map(|v| v as f64).collect())
-        }
-        "i16" => {
-            let view = js_sys::Int16Array::new(buffer);
-            Ok(view.to_vec().into_iter().map(|v| v as f64).collect())
-        }
-        "u16" => {
-            let view = js_sys::Uint16Array::new(buffer);
-            Ok(view.to_vec().into_iter().map(|v| v as f64).collect())
-        }
-        "i32" => {
-            let view = js_sys::Int32Array::new(buffer);
-            Ok(view.to_vec().into_iter().map(|v| v as f64).collect())
-        }
-        "u32" => {
-            let view = js_sys::Uint32Array::new(buffer);
-            Ok(view.to_vec().into_iter().map(|v| v as f64).collect())
-        }
-        "i64" => {
-            let view = js_sys::BigInt64Array::new(buffer);
-            let len = view.length() as usize;
-            let mut result = Vec::with_capacity(len);
-            for i in 0..len {
-                let val = view.get_index(i as u32);
-                // i64 converts to f64 directly (may lose precision for very large values)
-                result.push(val as f64);
-            }
-            Ok(result)
-        }
-        "u64" => {
-            let view = js_sys::BigUint64Array::new(buffer);
-            let len = view.length() as usize;
-            let mut result = Vec::with_capacity(len);
-            for i in 0..len {
-                let val = view.get_index(i as u32);
-                // u64 converts to f64 directly (may lose precision for very large values)
-                result.push(val as f64);
-            }
-            Ok(result)
-        }
-        "f32" => {
-            let view = js_sys::Float32Array::new(buffer);
-            Ok(view.to_vec().into_iter().map(|v| v as f64).collect())
-        }
-        "f64" | _ => {
-            // Default to Float64
-            let view = js_sys::Float64Array::new(buffer);
-            Ok(view.to_vec())
-        }
     }
 }

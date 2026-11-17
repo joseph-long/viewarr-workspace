@@ -171,6 +171,16 @@ struct ColorbarHistogram {
     bins: Vec<f32>,
 }
 
+/// A per-pixel boolean mask painted in one solid colour over the image, for
+/// flagging pixels (saturated, bad, masked out) in a colour the colormap does
+/// not use.
+struct MaskOverlay {
+    /// Row-major like the image's pixels; `true` pixels are painted.
+    mask: Vec<bool>,
+    width: u32,
+    height: u32,
+}
+
 /// Which of the two colorbar limits a handle drives.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LimitHandle {
@@ -316,6 +326,17 @@ pub struct ArrayViewerWidget {
     hover_info: Option<(f64, f64, f64)>,
     /// Main image texture
     texture: Option<TextureHandle>,
+    /// Mask painted over the image, if any. Only drawn while its size matches
+    /// the image's, so a mask left over from a differently-sized image is
+    /// never stretched across a new one.
+    mask_overlay: Option<MaskOverlay>,
+    /// Colour the mask is painted in. Applied as a tint when drawing, so
+    /// changing it does not rebuild the mask texture.
+    mask_overlay_color: Color32,
+    /// The mask as a texture: white where set, transparent elsewhere.
+    mask_texture: Option<TextureHandle>,
+    /// Flag indicating the mask texture needs rebuild
+    mask_texture_dirty: bool,
     /// While a limit handle is being dragged, the value span the bar covered
     /// when the drag began.
     ///
@@ -461,6 +482,10 @@ impl ArrayViewerWidget {
             texture_dirty: false,
             hover_info: None,
             texture: None,
+            mask_overlay: None,
+            mask_overlay_color: Color32::RED,
+            mask_texture: None,
+            mask_texture_dirty: false,
             colorbar_drag: None,
             colorbar_histogram: None,
             stretch_drag_active: false,
@@ -521,6 +546,48 @@ impl ArrayViewerWidget {
             // Initialize pivot point to image center when dimensions change
             self.transform.set_pivot_to_center(width, height);
         }
+    }
+
+    /// Paint `mask` (row-major, `width * height` long) over the image in the
+    /// mask colour, transparent wherever it is `false`.
+    ///
+    /// The mask is independent of the image: it survives `set_image`, and is
+    /// drawn only while its size matches the image's. A mask of the wrong
+    /// length is ignored.
+    pub fn set_mask_overlay(&mut self, mask: Vec<bool>, width: u32, height: u32) {
+        if mask.len() != (width as usize) * (height as usize) {
+            log::warn!(
+                "Ignoring mask overlay: {} values for a {}x{} mask",
+                mask.len(),
+                width,
+                height
+            );
+            return;
+        }
+        self.mask_overlay = Some(MaskOverlay { mask, width, height });
+        self.mask_texture_dirty = true;
+    }
+
+    /// Remove the mask overlay.
+    pub fn clear_mask_overlay(&mut self) {
+        self.mask_overlay = None;
+        self.mask_texture = None;
+        self.mask_texture_dirty = false;
+    }
+
+    /// Whether a mask overlay is set (whether or not its size fits the image).
+    pub fn has_mask_overlay(&self) -> bool {
+        self.mask_overlay.is_some()
+    }
+
+    /// Colour the mask overlay is painted in.
+    pub fn mask_overlay_color(&self) -> Color32 {
+        self.mask_overlay_color
+    }
+
+    /// Set the colour the mask overlay is painted in.
+    pub fn set_mask_overlay_color(&mut self, color: Color32) {
+        self.mask_overlay_color = color;
     }
 
     /// Check if we have image data
@@ -1229,6 +1296,89 @@ impl ArrayViewerWidget {
         }
     }
 
+    /// Rebuild the mask overlay texture. White where the mask is set so the
+    /// colour can be applied as a tint at draw time.
+    fn rebuild_mask_texture(&mut self, ctx: &egui::Context) {
+        self.mask_texture = self.mask_overlay.as_ref().map(|overlay| {
+            let pixels = overlay
+                .mask
+                .iter()
+                .map(|&set| if set { Color32::WHITE } else { Color32::TRANSPARENT })
+                .collect();
+            let image = ColorImage {
+                size: [overlay.width as usize, overlay.height as usize],
+                pixels,
+                source_size: egui::Vec2::new(overlay.width as f32, overlay.height as f32),
+            };
+            ctx.load_texture("mask_overlay", image, TextureOptions::NEAREST)
+        });
+    }
+
+    /// Paint a texture covering the image, honouring rotation and the
+    /// FITS-convention Y flip. Used for the image itself and for the layers
+    /// drawn over it, so they stay pixel-aligned.
+    fn paint_image_layer(
+        &self,
+        painter: &egui::Painter,
+        texture_id: egui::TextureId,
+        image_rect: egui::Rect,
+        tint: Color32,
+    ) {
+        let (img_width, img_height) = self.dimensions();
+        if self.transform.rotation().abs() < 0.001 {
+            // No rotation - use simple image draw (faster)
+            // Flip Y-axis for FITS convention: Y=0 at bottom
+            painter.image(
+                texture_id,
+                image_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 1.0), egui::pos2(1.0, 0.0)),
+                tint,
+            );
+        } else {
+            // With rotation - use mesh with rotated vertices
+            let pivot_screen = self.transform.pivot_to_screen(image_rect, (img_width, img_height));
+            // Screen +Y points downward; negate so positive rotation stays CCW
+            // in image/math convention.
+            let rotation_rad = -self.transform.rotation().to_radians();
+            let cos_r = rotation_rad.cos();
+            let sin_r = rotation_rad.sin();
+
+            // Helper to rotate a point around pivot
+            let rotate = |p: egui::Pos2| -> egui::Pos2 {
+                let dx = p.x - pivot_screen.x;
+                let dy = p.y - pivot_screen.y;
+                egui::pos2(
+                    pivot_screen.x + dx * cos_r - dy * sin_r,
+                    pivot_screen.y + dx * sin_r + dy * cos_r,
+                )
+            };
+
+            // Calculate rotated corners
+            let tl = rotate(image_rect.left_top());
+            let tr = rotate(image_rect.right_top());
+            let br = rotate(image_rect.right_bottom());
+            let bl = rotate(image_rect.left_bottom());
+
+            // UV coordinates (Y-flipped for FITS convention)
+            let uv_tl = egui::pos2(0.0, 1.0);
+            let uv_tr = egui::pos2(1.0, 1.0);
+            let uv_br = egui::pos2(1.0, 0.0);
+            let uv_bl = egui::pos2(0.0, 0.0);
+
+            // Build mesh with two triangles using Vertex struct
+            let mut mesh = egui::Mesh::with_texture(texture_id);
+            let color = tint;
+            mesh.vertices.push(egui::epaint::Vertex { pos: tl, uv: uv_tl, color });
+            mesh.vertices.push(egui::epaint::Vertex { pos: tr, uv: uv_tr, color });
+            mesh.vertices.push(egui::epaint::Vertex { pos: br, uv: uv_br, color });
+            mesh.vertices.push(egui::epaint::Vertex { pos: bl, uv: uv_bl, color });
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(0, 2, 3);
+
+            painter.add(egui::Shape::mesh(mesh));
+        }
+    }
+
     // =========================================================================
     // Main rendering - called via egui::Widget trait
     // =========================================================================
@@ -1248,6 +1398,10 @@ impl ArrayViewerWidget {
         if self.texture_dirty {
             self.texture_dirty = false;
             self.rebuild_texture(&ctx);
+        }
+        if self.mask_texture_dirty {
+            self.mask_texture_dirty = false;
+            self.rebuild_mask_texture(&ctx);
         }
 
         // Handle keyboard shortcuts
@@ -1292,60 +1446,17 @@ impl ArrayViewerWidget {
         // Draw the image with rotation
         if let Some(texture) = &self.texture {
             let painter = ui.painter_at(rect);
-            
-            if self.transform.rotation().abs() < 0.001 {
-                // No rotation - use simple image draw (faster)
-                // Flip Y-axis for FITS convention: Y=0 at bottom
-                painter.image(
-                    texture.id(),
-                    image_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 1.0), egui::pos2(1.0, 0.0)),
-                    egui::Color32::WHITE,
-                );
-            } else {
-                // With rotation - use mesh with rotated vertices
-                let pivot_screen = self.transform.pivot_to_screen(image_rect, (img_width, img_height));
-                // Screen +Y points downward; negate so positive rotation stays CCW
-                // in image/math convention.
-                let rotation_rad = -self.transform.rotation().to_radians();
-                let cos_r = rotation_rad.cos();
-                let sin_r = rotation_rad.sin();
-                
-                // Helper to rotate a point around pivot
-                let rotate = |p: egui::Pos2| -> egui::Pos2 {
-                    let dx = p.x - pivot_screen.x;
-                    let dy = p.y - pivot_screen.y;
-                    egui::pos2(
-                        pivot_screen.x + dx * cos_r - dy * sin_r,
-                        pivot_screen.y + dx * sin_r + dy * cos_r,
-                    )
-                };
-                
-                // Calculate rotated corners
-                let tl = rotate(image_rect.left_top());
-                let tr = rotate(image_rect.right_top());
-                let br = rotate(image_rect.right_bottom());
-                let bl = rotate(image_rect.left_bottom());
-                
-                // UV coordinates (Y-flipped for FITS convention)
-                let uv_tl = egui::pos2(0.0, 1.0);
-                let uv_tr = egui::pos2(1.0, 1.0);
-                let uv_br = egui::pos2(1.0, 0.0);
-                let uv_bl = egui::pos2(0.0, 0.0);
-                
-                // Build mesh with two triangles using Vertex struct
-                let mut mesh = egui::Mesh::with_texture(texture.id());
-                let color = egui::Color32::WHITE;
-                mesh.vertices.push(egui::epaint::Vertex { pos: tl, uv: uv_tl, color });
-                mesh.vertices.push(egui::epaint::Vertex { pos: tr, uv: uv_tr, color });
-                mesh.vertices.push(egui::epaint::Vertex { pos: br, uv: uv_br, color });
-                mesh.vertices.push(egui::epaint::Vertex { pos: bl, uv: uv_bl, color });
-                mesh.add_triangle(0, 1, 2);
-                mesh.add_triangle(0, 2, 3);
-                
-                painter.add(egui::Shape::mesh(mesh));
+            self.paint_image_layer(&painter, texture.id(), image_rect, Color32::WHITE);
+
+            // Mask overlay above the image, below the markers that annotate it.
+            let mask_fits = self
+                .mask_overlay
+                .as_ref()
+                .is_some_and(|m| (m.width, m.height) == (img_width, img_height));
+            if let (true, Some(mask_texture)) = (mask_fits, &self.mask_texture) {
+                self.paint_image_layer(&painter, mask_texture.id(), image_rect, self.mask_overlay_color);
             }
-            
+
             // Draw pivot marker whenever the pivot is off-center, or while in pivot-placement mode.
             if self.transform.show_pivot_marker || !self.is_pivot_at_center() {
                 let pivot_screen = self.transform.pivot_to_screen(image_rect, (img_width, img_height));

@@ -125,6 +125,8 @@ This package is designed to be used as the image viewer backend for [jupyterlab-
 
 ### Since last release
 
+- Added a solid-colour mask overlay to `ArrayViewerWidget` (`set_mask_overlay`, `set_mask_overlay_color`) for flagging pixels in a colour outside the colormap; `viewcam` uses it for saturated pixels.
+- Made the typed-array conversion public as `viewarr::buffer`, so wrappers accept the same dtypes.
 - Added shift-click event callbacks with continuous (fractional) data-space coordinates via `onClick(...)`.
 - Added marker coordinate APIs: `getMarkers(...)` and `setMarkers(...)`.
 - Added generic overlay text APIs: `getOverlayMessage(...)` and `setOverlayMessage(...)`.

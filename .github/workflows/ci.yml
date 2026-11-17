@@ -364,8 +364,12 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
+      # viewarr is checked here too: this job builds it from source anyway,
+      # and it has no Rust-only job of its own.
       - name: Check formatting
-        run: cargo fmt --check
+        run: |
+          cargo fmt --check
+          cargo fmt --check --manifest-path ../viewarr/Cargo.toml
 
       # Every release artifact ships these files; a dependency added or bumped
       # without regenerating them would ship stale notices.
@@ -525,6 +529,94 @@ jobs:
           name: native-linux-${{ matrix.arch }}
           path: viewarr-native/dist/*.tar.gz
           if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # viewcam: the camera viewer (viewcam), its streaming protocol
+  # (viewcam-proto) and its frame codec (viewcam-codec). Nothing here is
+  # released yet, so these jobs only check that it all builds and passes its
+  # tests. Like viewarr-native, independent of build-viewarr: viewcam takes
+  # viewarr as a Rust path dependency rather than as the WASM bundle.
+  # ---------------------------------------------------------------------------
+  viewcam:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      # viewcam's native tests link eframe, which needs what viewarr-native's
+      # build does.
+      - name: Install Linux windowing libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libssl-dev
+
+      - name: Install Rust and wasm-pack
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/cargo" install wasm-pack
+
+      - name: Check formatting
+        run: |
+          for crate in viewcam viewcam-proto viewcam-codec viewcam-codec/python; do
+            cargo fmt --check --manifest-path "$crate/Cargo.toml"
+          done
+
+      # The arithmetic and toolbar logic, the protocol (vectors, framing,
+      # acks) and the codec (round trips, corrupt input, reference vectors).
+      - name: Test
+        run: |
+          for crate in viewcam viewcam-proto viewcam-codec; do
+            cargo test --manifest-path "$crate/Cargo.toml"
+          done
+
+      - name: Build viewcam (WASM)
+        working-directory: viewcam
+        run: npm run build
+
+      # The WASM build itself, under Node: decodes the reference-encoded
+      # vectors and rejects corrupt input.
+      - name: Build and smoke-test viewcam-codec (WASM)
+        working-directory: viewcam-codec
+        run: |
+          npm run build
+          npm run test:wasm
+
+  viewcam-python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      # The oldest Python the codec's abi3 extension supports.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # Standard library only: the byte-for-byte vectors, the send window,
+      # and the simulated stall it is there to survive.
+      - name: Test the protocol's Python reference
+        run: python -m unittest discover -s viewcam-proto/python -v
+
+      # pip builds the extension through maturin; the tests check it against
+      # numpy + the C liblz4 in both directions.
+      - name: Build and test the codec extension
+        run: |
+          python -m pip install "./viewcam-codec/python[test]"
+          python -m pytest viewcam-codec/python/tests -v
 
   # ---------------------------------------------------------------------------
   # Publish BOTH packages to PyPI on a published GitHub release.

@@ -153,28 +153,43 @@ impl ViewcamWidget {
     // Rendering
     // =========================================================================
 
-    /// The camera toolbar: one toggle per correction, each disabled (with the
-    /// reason on hover) while its input is missing or the wrong shape.
+    /// Whether there is a toolbar to show. A camera with no dark or no
+    /// saturation image is normal, not a fault, so a toggle appears only once
+    /// its image has arrived, and with neither there is no toolbar at all.
+    pub fn has_toolbar(&self) -> bool {
+        self.frames.dark_status() != Availability::Missing
+            || self.frames.saturation_status() != Availability::Missing
+    }
+
+    /// The camera toolbar: one toggle per correction whose image has arrived,
+    /// disabled (with the reason on hover) while that image is the wrong
+    /// shape for the data.
     pub fn show_toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             let dark = self.frames.dark_status();
-            let resp = ui
-                .add_enabled(
-                    dark.is_ready(),
-                    egui::Button::selectable(
-                        self.dark_subtraction && dark.is_ready(),
-                        "Subtract dark",
-                    ),
-                )
-                .on_hover_text("Subtract the dark frame from the image (hover values too)")
-                .on_disabled_hover_text(unavailable_reason("dark frame", dark));
-            if resp.clicked() {
-                self.set_dark_subtraction(!self.dark_subtraction);
+            if dark != Availability::Missing {
+                let resp = ui
+                    .add_enabled(
+                        dark.is_ready(),
+                        egui::Button::selectable(
+                            self.dark_subtraction && dark.is_ready(),
+                            "Subtract dark",
+                        ),
+                    )
+                    .on_hover_text("Subtract the dark frame from the image (hover values too)")
+                    .on_disabled_hover_text(unavailable_reason("dark frame", dark));
+                if resp.clicked() {
+                    self.set_dark_subtraction(!self.dark_subtraction);
+                }
             }
 
-            ui.separator();
-
             let sat = self.frames.saturation_status();
+            if sat == Availability::Missing {
+                return;
+            }
+            if dark != Availability::Missing {
+                ui.separator();
+            }
             let resp = ui
                 .add_enabled(
                     sat.is_ready(),
@@ -289,5 +304,21 @@ mod tests {
         // New data of another shape: the mask no longer fits, so it goes.
         w.set_data(frame(&[0.0; 6], 3, 2));
         assert!(!w.viewer().has_mask_overlay());
+    }
+
+    #[test]
+    fn toolbar_appears_once_a_dark_or_saturation_image_does() {
+        let mut w = ViewcamWidget::new();
+        w.set_data(frame(&[0.0; 4], 2, 2));
+        assert!(!w.has_toolbar());
+
+        w.set_saturation(Some(frame(&[0.0; 4], 2, 2)));
+        assert!(w.has_toolbar());
+        w.set_saturation(None);
+        assert!(!w.has_toolbar());
+
+        // One of the wrong shape still shows, disabled, to say why.
+        w.set_dark(Some(frame(&[0.0; 6], 3, 2)));
+        assert!(w.has_toolbar());
     }
 }

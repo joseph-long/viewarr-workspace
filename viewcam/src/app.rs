@@ -100,11 +100,14 @@ impl eframe::App for ViewcamApp {
             top: 2,
             bottom: 3,
         });
-        egui::TopBottomPanel::top("camera_toolbar")
-            .frame(toolbar_frame)
-            .show(ctx, |ui| {
-                self.widget.borrow_mut().show_toolbar(ui);
-            });
+        let has_toolbar = self.widget.borrow().has_toolbar();
+        if has_toolbar {
+            egui::TopBottomPanel::top("camera_toolbar")
+                .frame(toolbar_frame)
+                .show(ctx, |ui| {
+                    self.widget.borrow_mut().show_toolbar(ui);
+                });
+        }
 
         let frame = egui::Frame::central_panel(&ctx.style()).inner_margin(0.0);
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {

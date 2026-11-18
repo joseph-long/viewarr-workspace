@@ -14,9 +14,11 @@ handing the result to an embedded viewarr viewer:
   saturation colour (red by default, adjustable from the toolbar) while
   **Saturation** is on, and is transparent elsewhere.
 
-The toolbar above the viewer holds the two toggles. Each one is greyed out,
-with the reason on hover, while its image is missing or does not match the
-data's shape. A dark or saturation image is kept until it is replaced or
+The toolbar above the viewer holds the two toggles. Many cameras have no
+dark or no saturation image, and that is not a fault: each toggle appears
+only once its image has been set, and with neither set there is no toolbar.
+A toggle whose image does not match the data's shape is greyed out, with the
+reason on hover. A dark or saturation image is kept until it is replaced or
 cleared, so a stream of data frames needs the dark sent only once, and an
 image that arrives before data of its shape applies as soon as that data does.
 

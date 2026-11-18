@@ -586,6 +586,11 @@ jobs:
         working-directory: viewcam
         run: npm run build
 
+      # The browser client: the byte-for-byte vectors, header checks, and the
+      # feed's acks and newest-wins decoding against a fake WebSocket.
+      - name: Test the protocol's JavaScript client
+        run: node --test viewcam-proto/js/test_viewcam_proto.mjs
+
       # The WASM build itself, under Node: decodes the reference-encoded
       # vectors and rejects corrupt input.
       - name: Build and smoke-test viewcam-codec (WASM)

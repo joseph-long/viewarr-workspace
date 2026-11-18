@@ -7,7 +7,7 @@ A monorepo for the `viewarr` Rust/WASM array viewer and the two packages that bu
 | `viewarr/`            | The Rust/WASM array+image viewer (egui). **Single source of truth.**  |
 | `viewarr-native/`     | Native desktop app — the `viewarr` CLI, opens FITS files in a window.  |
 | `viewcam/`            | Camera-frame viewer wrapping viewarr: dark subtraction, saturation overlay. |
-| `viewcam-proto/`      | viewcam frame-streaming protocol: spec, Rust core (no I/O), Python encoder. |
+| `viewcam-proto/`      | viewcam frame-streaming protocol: spec, Rust core (no I/O), Python encoder, browser client. |
 | `viewcam-codec/`      | Byte-shuffle + LZ4 frame decoder, as a small WASM module for web workers. |
 | `pyviewarr/`          | `pyviewarr` anywidget — PyPI package `pyviewarr`.                      |
 | `jupyterlab-fitsview/`| FITS viewer JupyterLab extension — PyPI package `fitsview`.            |

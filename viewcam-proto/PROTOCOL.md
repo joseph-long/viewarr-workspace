@@ -215,6 +215,10 @@ alone, rather than never.
 - Decoding the LZ4 codecs is up to the client; the `viewcam-codec` crate does
   it in Rust and WASM.
 
+`js/viewcam_proto.js` is a browser client that does all of this:
+`ViewcamFeed` handles one feed, and decodes in `viewcam-codec`'s web worker
+when given `workerDecoder(worker)`.
+
 ### Choosing a window
 
 A window of `F` frames and `B` bytes, over a round trip `rtt`, allows at most
@@ -234,6 +238,6 @@ A window of `F` frames and `B` bytes, over a round trip `rtt`, allows at most
 
 ## Test vectors
 
-`tests/vectors/` holds encoded examples of each message. The Rust crate and
-the Python reference (`python/viewcam_proto.py`) are both tested against
-them, byte for byte.
+`tests/vectors/` holds encoded examples of each message. The Rust crate, the
+Python reference (`python/viewcam_proto.py`) and the browser client
+(`js/viewcam_proto.js`) are all tested against them, byte for byte.

@@ -3,7 +3,9 @@
 //! Holds the camera inputs in a [`CameraFrames`] and keeps the embedded
 //! [`ArrayViewerWidget`] showing what they add up to: the data (dark-subtracted
 //! while that toggle is on) as the image, and the saturation mask as a
-//! mask overlay in a colour the colormap does not use. Because the viewer is
+//! mask overlay in a colour the colormap does not use (the saturation mask
+//! being either given as an image or derived from each frame at a saturation
+//! level). Because the viewer is
 //! handed the subtracted pixels, its hover readout, limits and histogram all
 //! describe the dark-subtracted image too.
 
@@ -67,10 +69,11 @@ impl ViewcamWidget {
         let new_shape = (frame.width, frame.height);
         self.frames.set_data(frame);
         self.refresh_image();
-        // Whether the saturation mask fits depends on the data's shape, so it
-        // only needs revisiting when that changes. Skipping it otherwise keeps
-        // a stream of frames from re-uploading an unchanged mask every time.
-        if old_shape != Some(new_shape) {
+        // A given saturation mask only needs revisiting when the data's shape
+        // changes, since that decides whether it fits. Skipping it otherwise
+        // keeps a stream of frames from re-uploading an unchanged mask every
+        // time. One derived from a saturation level is new with every frame.
+        if old_shape != Some(new_shape) || self.frames.saturation_level().is_some() {
             self.refresh_mask();
         }
     }
@@ -84,8 +87,17 @@ impl ViewcamWidget {
     }
 
     /// Set (or with `None`, clear) the saturation image; nonzero = saturated.
+    /// Replaces any saturation level.
     pub fn set_saturation(&mut self, frame: Option<Frame>) {
         self.frames.set_saturation(frame);
+        self.refresh_mask();
+    }
+
+    /// Set (or with `None`, clear) the level at and above which a data pixel
+    /// is saturated, for a camera with no saturation image. Replaces any
+    /// saturation image.
+    pub fn set_saturation_level(&mut self, level: Option<f64>) {
+        self.frames.set_saturation_level(level);
         self.refresh_mask();
     }
 
@@ -155,7 +167,8 @@ impl ViewcamWidget {
 
     /// Whether there is a toolbar to show. A camera with no dark or no
     /// saturation image is normal, not a fault, so a toggle appears only once
-    /// its image has arrived, and with neither there is no toolbar at all.
+    /// its image has arrived (or, for saturation, a level and a data frame
+    /// to apply it to), and with neither there is no toolbar at all.
     pub fn has_toolbar(&self) -> bool {
         self.frames.dark_status() != Availability::Missing
             || self.frames.saturation_status() != Availability::Missing
@@ -304,6 +317,28 @@ mod tests {
         // New data of another shape: the mask no longer fits, so it goes.
         w.set_data(frame(&[0.0; 6], 3, 2));
         assert!(!w.viewer().has_mask_overlay());
+    }
+
+    #[test]
+    fn mask_from_a_level_follows_every_frame() {
+        let mut w = ViewcamWidget::new();
+        w.set_saturation_level(Some(100.0));
+        w.set_data(frame(&[0.0; 4], 2, 2));
+        assert!(w.has_toolbar());
+        assert!(w.viewer().has_mask_overlay());
+
+        // Same shape, new pixels: the overlay is the new frame's.
+        w.set_data(frame(&[0.0, 100.0, 0.0, 0.0], 2, 2));
+        assert!(w.viewer().has_mask_overlay());
+        w.set_saturation_overlay(false);
+        assert!(!w.viewer().has_mask_overlay());
+        w.set_data(frame(&[100.0; 4], 2, 2));
+        assert!(!w.viewer().has_mask_overlay());
+
+        w.set_saturation_overlay(true);
+        w.set_saturation_level(None);
+        assert!(!w.viewer().has_mask_overlay());
+        assert!(!w.has_toolbar());
     }
 
     #[test]

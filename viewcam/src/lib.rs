@@ -147,10 +147,22 @@ impl ViewcamHandle {
         Ok(())
     }
 
-    /// Remove the saturation image.
+    /// Remove the saturation image, or the saturation level.
     #[wasm_bindgen(js_name = clearSaturation)]
     pub fn clear_saturation(&self) {
         self.widget.borrow_mut().set_saturation(None);
+    }
+
+    /// For a camera without a saturation image: flag each data frame's
+    /// pixels at or above `level` (in the data's units, before any dark is
+    /// subtracted). Replaces any saturation image, as setting one replaces this.
+    #[wasm_bindgen(js_name = setSaturationLevel)]
+    pub fn set_saturation_level(&self, level: f64) -> Result<(), JsValue> {
+        if level.is_nan() {
+            return Err(JsValue::from_str("The saturation level must be a number"));
+        }
+        self.widget.borrow_mut().set_saturation_level(Some(level));
+        Ok(())
     }
 
     /// Whether dark subtraction is switched on (it applies only while a

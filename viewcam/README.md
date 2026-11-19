@@ -12,7 +12,11 @@ handing the result to an embedded viewarr viewer:
   wrapping.
 - **saturation**: any nonzero pixel is painted over the image in the
   saturation colour (red by default, adjustable from the toolbar) while
-  **Saturation** is on, and is transparent elsewhere.
+  **Saturation** is on, and is transparent elsewhere. A camera without a
+  saturation image can give a **saturation level** instead: each data
+  frame's pixels at or above it are painted. The level is compared with the
+  data as sent, before dark subtraction, since that is what the detector
+  clipped. A level and an image replace each other.
 
 The toolbar above the viewer holds the two toggles. Many cameras have no
 dark or no saturation image, and that is not a fault: each toggle appears
@@ -56,6 +60,7 @@ await viewcam.createViewer('cam');            // container must have an ID
 viewcam.setDark('cam', dark.buffer, w, h, 'u16');        // once
 viewcam.setData('cam', frame.buffer, w, h, 'u16');       // per frame
 viewcam.setSaturation('cam', sat.buffer, w, h, 'u8');    // nonzero = saturated
+viewcam.setSaturationLevel('cam', 65535);     // or: data >= level = saturated
 
 viewcam.setDarkSubtraction('cam', false);     // the toolbar toggles
 viewcam.setSaturationOverlay('cam', true);
@@ -64,7 +69,7 @@ viewcam.setSaturationColor('cam', '#00ff00');
 viewcam.onStateChange('cam', ({ darkSubtraction, saturationOverlay, saturationColor }) => {});
 
 viewcam.clearDark('cam');
-viewcam.clearSaturation('cam');
+viewcam.clearSaturation('cam');               // the image or the level
 viewcam.destroyViewer('cam');
 ```
 

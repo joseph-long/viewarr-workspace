@@ -42,7 +42,15 @@ export function setSaturation(
   dtype: string
 ): void;
 
+/** Remove the saturation image, or the saturation level. */
 export function clearSaturation(containerId: string): void;
+
+/**
+ * For a camera without a saturation image: paint each data frame's pixels at
+ * or above `level` (in the data's units, before dark subtraction). Replaces
+ * any saturation image, as {@link setSaturation} replaces the level.
+ */
+export function setSaturationLevel(containerId: string, level: number): void;
 
 export function getDarkSubtraction(containerId: string): boolean;
 export function setDarkSubtraction(containerId: string, enabled: boolean): void;
@@ -68,6 +76,7 @@ declare const viewcam: {
   clearDark: typeof clearDark;
   setSaturation: typeof setSaturation;
   clearSaturation: typeof clearSaturation;
+  setSaturationLevel: typeof setSaturationLevel;
   getDarkSubtraction: typeof getDarkSubtraction;
   setDarkSubtraction: typeof setDarkSubtraction;
   getSaturationOverlay: typeof getSaturationOverlay;

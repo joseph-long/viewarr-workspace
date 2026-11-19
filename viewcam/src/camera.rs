@@ -2,9 +2,11 @@
 //!
 //! A camera hands over up to three images per view: the science `data`, a
 //! `dark` frame to subtract from it, and a `saturation` image flagging pixels
-//! that hit the detector's ceiling. [`CameraFrames`] holds the latest of each
-//! and derives what the viewer should show from them. Each input is kept as it
-//! arrived, so toggling dark subtraction off and on again needs no resend.
+//! that hit the detector's ceiling. A camera without a saturation image can
+//! give a saturation level instead, and each data frame's pixels at or above
+//! it are flagged. [`CameraFrames`] holds the latest of each and derives what
+//! the viewer should show from them. Each input is kept as it arrived, so
+//! toggling dark subtraction off and on again needs no resend.
 
 /// One image as handed to the viewer: `f64` pixels, row-major, plus the
 /// display metadata viewarr derives from the source dtype.
@@ -56,7 +58,10 @@ pub struct Mask {
 pub struct CameraFrames {
     data: Option<Frame>,
     dark: Option<Frame>,
+    /// From a saturation image, or derived from the data at the saturation level.
     saturation: Option<Mask>,
+    /// When set, `saturation` is derived from each data frame rather than given.
+    saturation_level: Option<f64>,
 }
 
 impl CameraFrames {
@@ -70,6 +75,9 @@ impl CameraFrames {
 
     pub fn set_data(&mut self, frame: Frame) {
         self.data = Some(frame);
+        if self.saturation_level.is_some() {
+            self.derive_saturation();
+        }
     }
 
     pub fn dark(&self) -> Option<&Frame> {
@@ -87,11 +95,40 @@ impl CameraFrames {
 
     /// Set (or with `None`, clear) the saturation image. Any nonzero pixel
     /// counts as saturated; NaN does not, since it says nothing either way.
+    /// Replaces any saturation level.
     pub fn set_saturation(&mut self, frame: Option<Frame>) {
+        self.saturation_level = None;
         self.saturation = frame.map(|f| Mask {
             mask: f.pixels.iter().map(|&v| v > 0.0 || v < 0.0).collect(),
             width: f.width,
             height: f.height,
+        });
+    }
+
+    pub fn saturation_level(&self) -> Option<f64> {
+        self.saturation_level
+    }
+
+    /// Set (or with `None`, clear) the saturation level: from now on, each
+    /// data frame's pixels at or above it are saturated. It is compared with
+    /// the data as the camera sent it, before any dark is subtracted, since
+    /// that is what the detector clipped. Replaces any saturation image.
+    pub fn set_saturation_level(&mut self, level: Option<f64>) {
+        self.saturation_level = level;
+        self.saturation = None;
+        if level.is_some() {
+            self.derive_saturation();
+        }
+    }
+
+    fn derive_saturation(&mut self) {
+        let (Some(level), Some(data)) = (self.saturation_level, &self.data) else {
+            return;
+        };
+        self.saturation = Some(Mask {
+            mask: data.pixels.iter().map(|&v| v >= level).collect(),
+            width: data.width,
+            height: data.height,
         });
     }
 
@@ -238,6 +275,46 @@ mod tests {
         frames.set_data(int_frame(&[0.0; 4], 2, 2));
         assert!(frames.applicable_saturation().is_none());
         frames.set_saturation(None);
+        assert_eq!(frames.saturation_status(), Availability::Missing);
+    }
+
+    #[test]
+    fn saturation_level_flags_each_frame_before_dark_subtraction() {
+        let mut frames = CameraFrames::new();
+        frames.set_saturation_level(Some(100.0));
+        // Nothing to flag until data arrives.
+        assert_eq!(frames.saturation_status(), Availability::Missing);
+
+        frames.set_dark(Some(int_frame(&[10.0; 4], 2, 2)));
+        frames.set_data(int_frame(&[99.0, 100.0, 101.0, f64::NAN], 2, 2));
+        assert_eq!(
+            frames.applicable_saturation().unwrap().mask,
+            vec![false, true, true, false]
+        );
+
+        // Each new frame, whatever its shape, brings its own mask.
+        frames.set_data(int_frame(&[100.0, 0.0, 0.0], 3, 1));
+        let mask = frames.applicable_saturation().unwrap();
+        assert_eq!(mask.mask, vec![true, false, false]);
+        assert_eq!((mask.width, mask.height), (3, 1));
+    }
+
+    #[test]
+    fn saturation_level_and_image_replace_each_other() {
+        let mut frames = CameraFrames::new();
+        frames.set_data(int_frame(&[0.0, 200.0], 2, 1));
+        frames.set_saturation(Some(int_frame(&[1.0, 0.0], 2, 1)));
+
+        frames.set_saturation_level(Some(100.0));
+        assert_eq!(frames.saturation().unwrap().mask, vec![false, true]);
+
+        frames.set_saturation(Some(int_frame(&[1.0, 0.0], 2, 1)));
+        assert_eq!(frames.saturation_level(), None);
+        frames.set_data(int_frame(&[0.0, 300.0], 2, 1));
+        assert_eq!(frames.saturation().unwrap().mask, vec![true, false]);
+
+        frames.set_saturation_level(Some(100.0));
+        frames.set_saturation_level(None);
         assert_eq!(frames.saturation_status(), Availability::Missing);
     }
 }

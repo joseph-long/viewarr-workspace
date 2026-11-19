@@ -214,12 +214,27 @@ export function setSaturation(containerId, buffer, width, height, dtype) {
 }
 
 /**
- * Remove the saturation image.
+ * Remove the saturation image, or the saturation level.
  *
  * @param {string} containerId - The ID of the container (viewer instance).
  */
 export function clearSaturation(containerId) {
   getViewer(containerId).handle.clearSaturation();
+}
+
+/**
+ * For a camera without a saturation image: paint each data frame's pixels
+ * at or above this level in the saturation colour. The level is in the
+ * data's units, compared before any dark is subtracted. Replaces any
+ * saturation image, as setSaturation replaces the level; clearSaturation
+ * removes it.
+ *
+ * @param {string} containerId - The ID of the container (viewer instance).
+ * @param {number} level
+ * @throws {Error} If the viewer is not found or level is NaN.
+ */
+export function setSaturationLevel(containerId, level) {
+  getViewer(containerId).handle.setSaturationLevel(level);
 }
 
 /**
@@ -339,6 +354,7 @@ const api = {
   clearDark,
   setSaturation,
   clearSaturation,
+  setSaturationLevel,
   getDarkSubtraction,
   setDarkSubtraction,
   getSaturationOverlay,

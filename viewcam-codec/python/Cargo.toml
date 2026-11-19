@@ -13,7 +13,7 @@ name = "_native"
 crate-type = ["cdylib"]
 
 [dependencies]
-viewcam-codec = { path = ".." }
+viewcam-codec = { path = "..", features = ["encode-zstd"] }
 # abi3: one wheel per platform serves every Python from 3.11 on (the
 # buffer protocol joined the stable ABI in 3.11; 3.10 is end-of-life).
 pyo3 = { version = "0.30", features = ["extension-module", "abi3-py311"] }

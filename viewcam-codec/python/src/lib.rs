@@ -9,7 +9,7 @@ use pyo3::exceptions::{PyBufferError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use viewcam_codec::CodecError;
+use viewcam_codec::{CodecError, Quantizer};
 
 fn to_py(err: CodecError) -> PyErr {
     PyValueError::new_err(err.to_string())
@@ -17,17 +17,19 @@ fn to_py(err: CodecError) -> PyErr {
 
 /// Compress `plane`, any C-contiguous little-endian buffer (a numpy array,
 /// `bytes`, ...), into the payload of the protocol's `shuffle-lz4` codec, or
-/// with `shuffle=False` its plain `lz4` codec. The element size comes from
-/// the buffer's own item size.
+/// with `shuffle=False` its plain `lz4` codec, or with `zstd=True` its
+/// `shuffle-zstd` codec. The element size comes from the buffer's own item
+/// size.
 ///
 /// The GIL is released while compressing, the expensive part, so several
 /// threads can encode at once.
 #[pyfunction]
-#[pyo3(signature = (plane, shuffle = true))]
+#[pyo3(signature = (plane, shuffle = true, zstd = false))]
 fn encode<'py>(
     py: Python<'py>,
     plane: &Bound<'py, PyAny>,
     shuffle: bool,
+    zstd: bool,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let buffer = PyUntypedBuffer::get(plane)?;
     if !buffer.is_c_contiguous() {
@@ -57,30 +59,102 @@ fn encode<'py>(
         bytes.to_vec()
     };
     drop(buffer);
-    let encoded = py.detach(|| viewcam_codec::compress_block(&data));
+    let encoded = if zstd {
+        // Already shuffled (or not), so zstd sees it as single bytes.
+        py.detach(|| viewcam_codec::encode_zstd(&data, 1))
+            .map_err(to_py)?
+    } else {
+        py.detach(|| viewcam_codec::compress_block(&data))
+    };
     Ok(PyBytes::new(py, &encoded))
 }
 
 /// Decode a `shuffle-lz4` payload (or with `element_size=1`, a plain `lz4`
-/// one) to `decoded_len` bytes. Raises `ValueError` on corrupt input or a
-/// length that does not match.
+/// one, or with `zstd=True` a `shuffle-zstd` one) to `decoded_len` bytes.
+/// Raises `ValueError` on corrupt input or a length that does not match.
 #[pyfunction]
+#[pyo3(signature = (encoded, element_size, decoded_len, zstd = false))]
 fn decode<'py>(
     py: Python<'py>,
     encoded: &[u8],
     element_size: usize,
     decoded_len: usize,
+    zstd: bool,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let encoded = encoded.to_vec();
     let decoded = py
-        .detach(|| viewcam_codec::decode(&encoded, element_size, decoded_len))
+        .detach(|| {
+            if zstd {
+                let mut out = vec![0u8; decoded_len];
+                viewcam_codec::decode_zstd_into(&encoded, element_size, &mut Vec::new(), &mut out)
+                    .map(|()| out)
+            } else {
+                viewcam_codec::decode(&encoded, element_size, decoded_len)
+            }
+        })
         .map_err(to_py)?;
     Ok(PyBytes::new(py, &decoded))
+}
+
+/// Quantize `values`, a C-contiguous buffer of float64, with a noise model
+/// (see `viewcam_codec.Quantizer` in Rust). Returns `(stored, element_size,
+/// code_offset)`: the codes less `code_offset`, as little-endian unsigned
+/// integers of `element_size` bytes.
+#[pyfunction]
+fn quantize<'py>(
+    py: Python<'py>,
+    values: &Bound<'py, PyAny>,
+    bias: f64,
+    read_noise: f64,
+    noise_slope: f64,
+    step: f64,
+) -> PyResult<(Bound<'py, PyBytes>, usize, i64)> {
+    let buffer = pyo3::buffer::PyBuffer::<f64>::get(values)?;
+    let values = buffer.to_vec(py)?;
+    drop(buffer);
+    let quantizer = Quantizer {
+        bias,
+        read_noise,
+        noise_slope,
+        step,
+    };
+    let q = py.detach(|| quantizer.quantize(&values)).map_err(to_py)?;
+    Ok((PyBytes::new(py, &q.stored), q.element_size, q.code_offset))
+}
+
+/// The inverse of `quantize`: the values the stored codes stand for, as
+/// little-endian float32 bytes.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn dequantize<'py>(
+    py: Python<'py>,
+    stored: &[u8],
+    element_size: usize,
+    code_offset: i64,
+    bias: f64,
+    read_noise: f64,
+    noise_slope: f64,
+    step: f64,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let quantizer = Quantizer {
+        bias,
+        read_noise,
+        noise_slope,
+        step,
+    };
+    let mut out = vec![0f32; stored.len() / element_size.max(1)];
+    quantizer
+        .dequantize_into(stored, element_size, code_offset, &mut out)
+        .map_err(to_py)?;
+    let bytes: Vec<u8> = out.iter().flat_map(|v| v.to_le_bytes()).collect();
+    Ok(PyBytes::new(py, &bytes))
 }
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encode, m)?)?;
     m.add_function(wrap_pyfunction!(decode, m)?)?;
+    m.add_function(wrap_pyfunction!(quantize, m)?)?;
+    m.add_function(wrap_pyfunction!(dequantize, m)?)?;
     Ok(())
 }

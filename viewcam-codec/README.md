@@ -27,6 +27,25 @@ These are the payloads of the viewcam protocol's `shuffle-lz4` codec
 shuffle, and decodes here with an element size of 1, since shuffling single
 bytes changes nothing. The `raw` codec needs no decoder.
 
+### zstd
+
+The protocol's `shuffle-zstd` codec is the same shuffle followed by a zstd
+frame (level 1). Camera frames are mostly noise, which has no repeated bytes
+for LZ4 to find, but zstd's entropy coding still spends on each pixel only
+the bits its noise needs. Decoding is pure Rust
+([`ruzstd`](https://crates.io/crates/ruzstd)), so the WASM build needs no C
+toolchain; encoding uses the C libzstd, behind the `encode-zstd` feature,
+which only the Python extension enables.
+
+### Noise-matched quantization
+
+`Quantizer` rounds an image to steps a fraction of its noise, given a noise
+model: variance `read_noise² + noise_slope × max(value − bias, 0)`. Above
+`bias` values go through the square root that evens the noise out (the
+generalized Anscombe transform), so the steps are finest at the faint end;
+at and below it, they are linear. Codes are stored unsigned in as few bytes
+as they need, less an offset. See "Quantization" in `PROTOCOL.md`.
+
 ## Python (servers)
 
 [`python/`](python/) builds this same Rust code as a Python extension with
@@ -39,6 +58,11 @@ import viewcam_codec
 payload = viewcam_codec.encode(frame)                  # shuffle-lz4
 payload = viewcam_codec.encode(satmap, shuffle=False)  # lz4
 image = viewcam_codec.decode(payload, "<u2", (h, w))   # needs numpy
+payload = viewcam_codec.encode(frame, zstd=True)       # shuffle-zstd
+
+# Round to a quarter of the noise; codes are the smallest unsigned type that fits.
+codes, offset = viewcam_codec.quantize(frame, bias, read_noise, noise_slope, 0.25)
+values = viewcam_codec.dequantize(codes, offset, bias, read_noise, noise_slope, 0.25)
 ```
 
 `encode` takes any C-contiguous little-endian buffer (numpy arrays included;
@@ -89,8 +113,13 @@ current under load, post only the newest frame while one is being decoded.
 
 The module can also be used directly: `new Decoder().decode(encoded,
 elementSize, decodedLength)` returns a `Uint8Array` that owns its own buffer
-(not a view into WASM memory), so it can be transferred onwards. A `Decoder`
-reuses one scratch buffer across calls.
+(not a view into WASM memory), so it can be transferred onwards, as does
+`decodeZstd` for zstd. A `Decoder` reuses one scratch buffer across calls.
+`dequantize(stored, elementSize, codeOffset, bias, readNoise, noiseSlope,
+step)` turns quantized codes into a `Float32Array` of values. In the worker,
+a plane with `codec: 'zstd'` and `quantized: { codeOffset, bias, readNoise,
+noiseSlope, step }` does both. A 1024×1024 frame of one-byte codes takes
+about 6 ms to decompress and 6 ms to dequantize.
 
 ## Building and testing
 

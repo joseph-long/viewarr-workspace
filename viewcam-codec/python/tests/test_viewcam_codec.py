@@ -112,6 +112,60 @@ class TestInputs(unittest.TestCase):
         self.assertTrue(all(r == results[0] for r in results))
 
 
+class TestZstd(unittest.TestCase):
+    def test_round_trip(self):
+        for name, plane in planes().items():
+            back = vc.decode(vc.encode(plane, zstd=True), plane.dtype, plane.shape, zstd=True)
+            np.testing.assert_array_equal(back, plane, err_msg=name)
+
+    def test_payload_is_a_standard_zstd_frame_of_the_shuffled_bytes(self):
+        zstandard = __import__("pytest").importorskip("zstandard")
+        plane = planes()["py_camera_u16"]
+        shuffled = plane.view(np.uint8).reshape(-1, 2).T.tobytes()
+        self.assertEqual(zstandard.ZstdDecompressor().decompress(vc.encode(plane, zstd=True)), shuffled)
+
+    def test_corrupt_input_raises(self):
+        encoded = vc.encode(planes()["py_camera_u16"], zstd=True)
+        with self.assertRaises(ValueError):
+            vc.decode(encoded[:-3], "<u2", (24, 32), zstd=True)
+
+
+# A wavefront sensor's noise: read noise 14 ADU above a bias of 432, and
+# photon noise, amplified, above that.
+MODEL = dict(bias=432.0, read_noise=14.0, noise_slope=8.0, step=0.25)
+
+
+def model_noise(values):
+    return np.sqrt(MODEL["read_noise"] ** 2 + MODEL["noise_slope"] * np.maximum(values - MODEL["bias"], 0))
+
+
+class TestQuantize(unittest.TestCase):
+    def test_error_is_within_half_a_step_of_the_local_noise(self):
+        values = np.linspace(300, 16383, 5000)
+        codes, offset = vc.quantize(values, **MODEL)
+        back = vc.dequantize(codes, offset, **MODEL)
+        # float32 output, and the curvature across a step, allow a little over half.
+        self.assertTrue(np.all(np.abs(back - values) <= 0.5 * 0.25 * model_noise(values) * 1.05 + 1e-3))
+
+    def test_codes_are_as_small_as_they_can_be(self):
+        codes, offset = vc.quantize(np.full((3, 4), 432.0) + np.arange(12).reshape(3, 4), **MODEL)
+        self.assertEqual((codes.dtype, codes.shape, codes.min()), (np.uint8, (3, 4), 0))
+        codes, _ = vc.quantize(np.array([0.0, 16383.0]), **MODEL)
+        self.assertEqual(codes.dtype, np.uint16)
+
+    def test_any_numeric_image(self):
+        image = (432 + np.arange(20) * 37).astype("<u2").reshape(4, 5)
+        codes, offset = vc.quantize(image, **MODEL)
+        np.testing.assert_allclose(
+            vc.dequantize(codes, offset, **MODEL), image, atol=0.5 * 0.25 * model_noise(image).max() * 1.05)
+
+    def test_bad_input_raises(self):
+        with self.assertRaises(ValueError):
+            vc.quantize(np.array([1.0, np.nan]), **MODEL)
+        with self.assertRaises(ValueError):
+            vc.quantize(np.array([1.0]), **{**MODEL, "read_noise": 0.0})
+
+
 class TestVectors(unittest.TestCase):
     """Reference-encoded planes the Rust and WASM tests decode
     (``<name>.e<element size>.lz4``; element size 1 is plain lz4), and a
@@ -132,6 +186,19 @@ class TestVectors(unittest.TestCase):
                 self.assertEqual(raw_path.read_bytes(), plane.tobytes(), name)
                 back = vc.decode(lz4_path.read_bytes(), plane.dtype, plane.shape, shuffle)
                 np.testing.assert_array_equal(back, plane, err_msg=lz4_path.name)
+
+    def test_reference_zstd_vectors_are_current(self):
+        # The zstandard package (the C libzstd) encodes; Rust and WASM decode.
+        import zstandard
+
+        for name, plane in planes().items():
+            path = VECTORS / f"{name}.e{plane.itemsize}.zst"
+            if os.environ.get("VIEWCAM_REGEN_VECTORS"):
+                shuffled = plane.view(np.uint8).reshape(-1, plane.itemsize).T.tobytes()
+                path.write_bytes(zstandard.ZstdCompressor(level=1).compress(shuffled))
+            else:
+                back = vc.decode(path.read_bytes(), plane.dtype, plane.shape, zstd=True)
+                np.testing.assert_array_equal(back, plane, err_msg=path.name)
 
     def test_decodes_rust_encoded_vector(self):
         plane = np.frombuffer((VECTORS / "rs_camera_u16.raw").read_bytes(), "<u2")

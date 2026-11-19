@@ -26,6 +26,24 @@
 //! These are the payloads of the viewcam protocol's `shuffle-lz4` codec. Its
 //! plain `lz4` codec (no shuffle) decodes with the same functions and an
 //! element size of 1, since shuffling single bytes changes nothing.
+//!
+//! ## zstd
+//!
+//! The protocol's `shuffle-zstd` codec is the same shuffle followed by a
+//! zstd frame instead of an LZ4 block. Camera frames are mostly noise, which
+//! has no repeats for LZ4 to find; zstd's entropy coding still makes each
+//! pixel cost only the bits its noise needs. Decoding is pure Rust
+//! ([`ruzstd`]), so it builds for wasm32; encoding uses the C library, behind
+//! the `encode-zstd` feature, since only servers encode.
+//!
+//! ## Noise-matched quantization
+//!
+//! A [`Quantizer`] rounds an image to steps a fixed fraction of its noise,
+//! which is all of its precision a display can use. Where noise grows with
+//! the signal, as photon noise does, it first maps values through the
+//! square root that makes the noise the same everywhere (the generalized
+//! Anscombe transform), so the steps are fine at the faint end and coarse
+//! only where bright pixels are noisy anyway.
 
 use std::fmt;
 
@@ -42,6 +60,15 @@ pub enum CodecError {
     Corrupt(String),
     /// The LZ4 block decoded to fewer bytes than expected.
     ShortOutput { expected: usize, got: usize },
+    /// Quantizer parameters that don't describe a noise model: a read noise
+    /// or step that isn't positive, a negative slope, or anything not finite.
+    BadQuantizer,
+    /// An image value a quantizer can't round: NaN or infinite.
+    NotFinite,
+    /// Codes spanning more than a `u32` holds.
+    CodeRangeTooLarge,
+    /// Quantized codes are stored in 1, 2 or 4 bytes.
+    UnsupportedCodeSize(usize),
 }
 
 impl fmt::Display for CodecError {
@@ -58,6 +85,12 @@ impl fmt::Display for CodecError {
                     f,
                     "LZ4 block decoded to {got} of the expected {expected} bytes"
                 )
+            }
+            CodecError::BadQuantizer => write!(f, "quantizer parameters are not a noise model"),
+            CodecError::NotFinite => write!(f, "can't quantize a value that isn't finite"),
+            CodecError::CodeRangeTooLarge => write!(f, "codes span more than 32 bits"),
+            CodecError::UnsupportedCodeSize(size) => {
+                write!(f, "codes are stored in 1, 2 or 4 bytes, not {size}")
             }
         }
     }
@@ -191,6 +224,178 @@ pub fn decode_into(
         });
     }
     unshuffle_into(scratch, out, element_size)
+}
+
+// =============================================================================
+// zstd
+// =============================================================================
+
+/// The zstd level servers use: the fastest, which on noisy frames compresses
+/// nearly as well as any.
+pub const ZSTD_LEVEL: i32 = 1;
+
+/// Shuffle and zstd-compress a plane: the protocol's `shuffle-zstd` payload.
+#[cfg(feature = "encode-zstd")]
+pub fn encode_zstd(plane: &[u8], element_size: usize) -> Result<Vec<u8>, CodecError> {
+    let shuffled = shuffle(plane, element_size)?;
+    zstd::bulk::compress(&shuffled, ZSTD_LEVEL).map_err(|e| CodecError::Corrupt(e.to_string()))
+}
+
+/// Decompress and unshuffle a `shuffle-zstd` plane into `out`, whose length
+/// is the expected decoded length, using `scratch` as [`decode_into`] does.
+pub fn decode_zstd_into(
+    encoded: &[u8],
+    element_size: usize,
+    scratch: &mut Vec<u8>,
+    out: &mut [u8],
+) -> Result<(), CodecError> {
+    check_layout(out.len(), element_size)?;
+    scratch.resize(out.len(), 0);
+    // Decoding into a buffer of exactly the expected length: a frame that
+    // would write more is refused, not allowed to grow it.
+    let got = ruzstd::decoding::FrameDecoder::new()
+        .decode_all(encoded, scratch)
+        .map_err(|e| CodecError::Corrupt(e.to_string()))?;
+    if got != out.len() {
+        return Err(CodecError::ShortOutput {
+            expected: out.len(),
+            got,
+        });
+    }
+    unshuffle_into(scratch, out, element_size)
+}
+
+// =============================================================================
+// Noise-matched quantization
+// =============================================================================
+
+/// Rounds an image to steps of `step` times its noise, given a noise model:
+/// a pixel at `value` has noise variance
+/// `read_noise² + noise_slope × max(value − bias, 0)`.
+///
+/// Values are first mapped to units of noise, `y`: linearly, `(value −
+/// bias) / read_noise`, at and below `bias` (and everywhere when
+/// `noise_slope` is 0), and above it through the square root that keeps the
+/// noise at one unit, `(2 / noise_slope)(√(noise_slope × s + read_noise²) −
+/// read_noise)` for `s = value − bias`. The two meet smoothly at `bias`. The
+/// code is `round(y / step)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Quantizer {
+    pub bias: f64,
+    pub read_noise: f64,
+    pub noise_slope: f64,
+    pub step: f64,
+}
+
+/// A quantized image: codes stored as unsigned integers of `element_size`
+/// (1, 2 or 4) bytes, little-endian, each `code − code_offset`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Quantized {
+    pub stored: Vec<u8>,
+    pub element_size: usize,
+    pub code_offset: i64,
+}
+
+impl Quantizer {
+    pub fn check(&self) -> Result<(), CodecError> {
+        let finite = [self.bias, self.read_noise, self.noise_slope, self.step]
+            .iter()
+            .all(|v| v.is_finite());
+        if finite && self.read_noise > 0.0 && self.step > 0.0 && self.noise_slope >= 0.0 {
+            Ok(())
+        } else {
+            Err(CodecError::BadQuantizer)
+        }
+    }
+
+    /// A value in units of noise.
+    pub fn forward(&self, value: f64) -> f64 {
+        let s = value - self.bias;
+        if self.noise_slope > 0.0 && s > 0.0 {
+            let a = self.read_noise * self.read_noise;
+            2.0 / self.noise_slope * ((self.noise_slope * s + a).sqrt() - self.read_noise)
+        } else {
+            s / self.read_noise
+        }
+    }
+
+    /// The value at `y` units of noise.
+    pub fn inverse(&self, y: f64) -> f64 {
+        if self.noise_slope > 0.0 && y > 0.0 {
+            let r = self.noise_slope * y / 2.0 + self.read_noise;
+            self.bias + (r * r - self.read_noise * self.read_noise) / self.noise_slope
+        } else {
+            self.bias + y * self.read_noise
+        }
+    }
+
+    pub fn code(&self, value: f64) -> f64 {
+        (self.forward(value) / self.step).round()
+    }
+
+    /// The value a code stands for.
+    pub fn value(&self, code: i64) -> f64 {
+        self.inverse(code as f64 * self.step)
+    }
+
+    /// Quantize `values`, storing the codes in the fewest bytes that hold
+    /// their range.
+    pub fn quantize(&self, values: &[f64]) -> Result<Quantized, CodecError> {
+        self.check()?;
+        let mut codes = Vec::with_capacity(values.len());
+        for &v in values {
+            if !v.is_finite() {
+                return Err(CodecError::NotFinite);
+            }
+            codes.push(self.code(v) as i64);
+        }
+        let code_offset = codes.iter().copied().min().unwrap_or(0);
+        let range = codes.iter().copied().max().unwrap_or(0) - code_offset;
+        let element_size = match range {
+            0..=0xff => 1,
+            0x100..=0xffff => 2,
+            0x1_0000..=0xffff_ffff => 4,
+            _ => return Err(CodecError::CodeRangeTooLarge),
+        };
+        let mut stored = Vec::with_capacity(codes.len() * element_size);
+        for code in codes {
+            let c = (code - code_offset) as u32;
+            stored.extend_from_slice(&c.to_le_bytes()[..element_size]);
+        }
+        Ok(Quantized {
+            stored,
+            element_size,
+            code_offset,
+        })
+    }
+
+    /// Turn stored codes back into values, into `out`, one per code.
+    pub fn dequantize_into(
+        &self,
+        stored: &[u8],
+        element_size: usize,
+        code_offset: i64,
+        out: &mut [f32],
+    ) -> Result<(), CodecError> {
+        self.check()?;
+        if !matches!(element_size, 1 | 2 | 4) {
+            return Err(CodecError::UnsupportedCodeSize(element_size));
+        }
+        let n = check_layout(stored.len(), element_size)?;
+        if n != out.len() {
+            return Err(CodecError::ShortOutput {
+                expected: out.len(),
+                got: n,
+            });
+        }
+        for (chunk, o) in stored.chunks_exact(element_size).zip(out.iter_mut()) {
+            let mut bytes = [0u8; 4];
+            bytes[..element_size].copy_from_slice(chunk);
+            let code = u32::from_le_bytes(bytes) as i64 + code_offset;
+            *o = self.value(code) as f32;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

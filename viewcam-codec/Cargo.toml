@@ -22,6 +22,11 @@ lz4_flex = { version = "0.14", default-features = false, features = [
     "safe-decode",
     "checked-decode",
 ] }
+# zstd decoding in pure Rust, for the same reason; no content checksums,
+# which the transport already guards. Encoding uses the C library (the
+# `encode-zstd` feature), which only the Python extension needs.
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+zstd = { version = "0.14", optional = true, default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.108"
@@ -29,6 +34,12 @@ wasm-bindgen = "=0.2.108"
 [profile.release]
 opt-level = 3
 lto = true
+
+[features]
+encode-zstd = ["dep:zstd"]
+
+[dev-dependencies]
+zstd = { version = "0.14", default-features = false }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O3"]

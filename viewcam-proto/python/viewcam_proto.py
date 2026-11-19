@@ -8,12 +8,15 @@ Every feed (data, dark, saturation) is its own WebSocket carrying the same
 FRAME messages, one per WebSocket message. A server sends
 ``encode_frame(...)`` as a binary message whenever its ``SendWindow`` allows,
 and passes each binary message from the client through ``decode_ack``.
-Payloads are passed in already encoded; for the LZ4 codecs, the
-``viewcam_codec`` extension (``viewcam-codec/python``) produces them.
+Payloads are passed in already encoded; for the LZ4 and zstd codecs, the
+``viewcam_codec`` extension (``viewcam-codec/python``) produces them, and for
+a quantized frame its ``quantize`` makes the codes, whose model goes in
+``Quantization``.
 """
 
 from __future__ import annotations
 
+import math
 import struct
 from typing import NamedTuple
 
@@ -26,7 +29,11 @@ KIND_ACK = 0x81
 CODEC_RAW = 0
 CODEC_LZ4 = 1
 CODEC_SHUFFLE_LZ4 = 2
-CODECS = (CODEC_RAW, CODEC_LZ4, CODEC_SHUFFLE_LZ4)
+CODEC_SHUFFLE_ZSTD = 3
+CODECS = (CODEC_RAW, CODEC_LZ4, CODEC_SHUFFLE_LZ4, CODEC_SHUFFLE_ZSTD)
+
+# dtype codes quantized codes may have: u8, u16, u32
+CODE_DTYPES = (1, 3, 5)
 
 # dtype code -> (numpy-style name, bytes per element)
 DTYPES = {
@@ -43,12 +50,13 @@ DTYPES = {
 }
 
 # prefix (magic, version, kind, reserved), seq, width, height, dtype, codec,
-# reserved, encoded_len
-_FRAME = struct.Struct("<4sBBHQIIBBHI")
+# quantization, reserved, encoded_len, code_offset, bias, read_noise,
+# noise_slope, step
+_FRAME = struct.Struct("<4sBBHQIIBBBBIqdddd")
 # prefix, acked_frames, acked_bytes, window_frames, window_bytes
 _ACK = struct.Struct("<4sBBHQQII")
 
-FRAME_HEADER_LEN = _FRAME.size  # 32
+FRAME_HEADER_LEN = _FRAME.size  # 72
 ACK_LEN = _ACK.size  # 32
 
 
@@ -72,16 +80,39 @@ def max_encoded_len(codec: int, decoded: int) -> int:
     """The largest payload ``codec`` can produce for a ``decoded``-byte image."""
     if codec == CODEC_RAW:
         return decoded
+    if codec == CODEC_SHUFFLE_ZSTD:  # ZSTD_COMPRESSBOUND
+        small = 128 << 10
+        return decoded + (decoded >> 8) + ((small - decoded) >> 11 if decoded < small else 0)
     return decoded + decoded // 255 + 16  # LZ4's worst case
 
 
-def encode_frame(seq: int, width: int, height: int, dtype: int, payload, codec: int = CODEC_RAW) -> bytes:
+class Quantization(NamedTuple):
+    """How a quantized frame's codes stand for values (PROTOCOL.md,
+    "Quantization"): each payload element is a code less ``code_offset``,
+    and code ``c`` is the value ``step * c`` units of noise from ``bias``,
+    for noise of variance ``read_noise**2 + noise_slope * max(value - bias,
+    0)``."""
+
+    code_offset: int
+    bias: float
+    read_noise: float
+    noise_slope: float
+    step: float
+
+
+def encode_frame(
+    seq: int, width: int, height: int, dtype: int, payload, codec: int = CODEC_RAW,
+    quantization: Quantization | None = None,
+) -> bytes:
     """A FRAME message: the header, then ``payload``.
 
     ``payload`` is bytes-like (or a C-contiguous numpy array, for ``raw``),
     already encoded with ``codec``. Images are little-endian, row-major, with
     row 0 at the bottom. ``width = height = 0`` with an empty payload means
     "no image on this feed".
+
+    With ``quantization``, the image is quantized codes of ``dtype`` (u8, u16
+    or u32), which the client turns into float32 values.
     """
     if dtype not in DTYPES:
         raise ProtocolError(f"unknown dtype code {dtype}")
@@ -100,7 +131,19 @@ def encode_frame(seq: int, width: int, height: int, dtype: int, payload, codec: 
         raise ProtocolError(
             f"codec {codec} payload of {encoded} bytes cannot decode to {decoded} bytes"
         )
-    header = _FRAME.pack(MAGIC, VERSION, KIND_FRAME, 0, seq, width, height, dtype, codec, 0, encoded)
+    if quantization is None:
+        flag, params = 0, (0, 0.0, 0.0, 0.0, 0.0)
+    else:
+        if dtype not in CODE_DTYPES:
+            raise ProtocolError(f"quantized codes are u8, u16 or u32, not dtype {dtype}")
+        q = quantization
+        model = (q.bias, q.read_noise, q.noise_slope, q.step)
+        if not all(math.isfinite(v) for v in model):
+            raise ProtocolError("a quantization parameter is not finite")
+        if not (q.read_noise > 0 and q.step > 0 and q.noise_slope >= 0):
+            raise ProtocolError("read noise and step must be positive, and the slope not negative")
+        flag, params = 1, (int(q.code_offset), *map(float, model))
+    header = _FRAME.pack(MAGIC, VERSION, KIND_FRAME, 0, seq, width, height, dtype, codec, flag, 0, encoded, *params)
     return header + payload
 
 

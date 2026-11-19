@@ -37,6 +37,13 @@ class TestVectors(unittest.TestCase):
     def test_frame_empty(self):
         self.check("frame_empty", vp.encode_empty_frame(9, 10))
 
+    def test_frame_u8_quantized_zstd(self):
+        q = vp.Quantization(code_offset=-3, bias=432.0, read_noise=14.25, noise_slope=8.5, step=0.25)
+        self.check(
+            "frame_u8_quantized_zstd",
+            vp.encode_frame(12, 3, 2, 1, ramp(4), vp.CODEC_SHUFFLE_ZSTD, quantization=q),
+        )
+
     def test_ack(self):
         ack = vp.Ack(0x1122334455667788, 0x0102030405060708, 6, 0x00400000)
         self.check("ack", vp.encode_ack(ack))
@@ -56,15 +63,34 @@ class TestValidation(unittest.TestCase):
             with self.assertRaises(vp.ProtocolError):
                 vp.encode_frame(0, 4, 4, 3, bad, vp.CODEC_LZ4)
 
+    def test_zstd_payload_bounds(self):
+        # 4 x 4 u16 = 32 bytes decoded; zstd's bound is 32 + 0 + 63.
+        vp.encode_frame(0, 4, 4, 3, b"\0" * 95, vp.CODEC_SHUFFLE_ZSTD)
+        with self.assertRaises(vp.ProtocolError):
+            vp.encode_frame(0, 4, 4, 3, b"\0" * 96, vp.CODEC_SHUFFLE_ZSTD)
+
+    def test_quantized_frames_need_unsigned_codes_and_a_model(self):
+        q = vp.Quantization(0, 432.0, 14.0, 8.0, 0.25)
+        vp.encode_frame(0, 2, 2, 3, b"\0", vp.CODEC_SHUFFLE_ZSTD, quantization=q)
+        bad = [
+            (9, q),  # f32 codes
+            (1, q._replace(read_noise=0.0)),
+            (1, q._replace(step=float("nan"))),
+            (1, q._replace(noise_slope=-1.0)),
+        ]
+        for dtype, quantization in bad:
+            with self.assertRaises(vp.ProtocolError):
+                vp.encode_frame(0, 2, 2, dtype, b"\0", vp.CODEC_SHUFFLE_ZSTD, quantization=quantization)
+
     def test_unknown_codes(self):
         with self.assertRaises(vp.ProtocolError):
-            vp.encode_frame(0, 1, 1, 3, b"\0\0", codec=3)
+            vp.encode_frame(0, 1, 1, 3, b"\0\0", codec=4)
         with self.assertRaises(vp.ProtocolError):
             vp.encode_frame(0, 1, 1, 11, b"\0")
 
     def test_bad_ack_rejected(self):
         with self.assertRaises(vp.ProtocolError):
-            vp.decode_ack(vp.encode_empty_frame(0, 1))  # a frame, also 32 bytes
+            vp.decode_ack(vp.encode_empty_frame(0, 1)[:32])  # a frame cut to an ack's length
         with self.assertRaises(vp.ProtocolError):
             vp.decode_ack(vp.encode_ack(vp.Ack(0, 0, 1, 0))[:31])
 

@@ -18,7 +18,7 @@ pub const VERSION: u8 = 1;
 
 /// Length of the prefix every message starts with.
 pub const PREFIX_LEN: usize = 8;
-pub const FRAME_HEADER_LEN: usize = 32;
+pub const FRAME_HEADER_LEN: usize = 72;
 pub const ACK_LEN: usize = 32;
 
 const KIND_FRAME: u8 = 1;
@@ -39,6 +39,12 @@ pub enum ProtoError {
     UnknownKind(u8),
     UnknownDtype(u8),
     UnknownCodec(u8),
+    /// A quantization other than none (0) or noise-matched (1).
+    UnknownQuantization(u8),
+    /// A quantized frame that can't be one: codes that aren't an unsigned
+    /// integer type, or a noise model that isn't one; or an unquantized
+    /// frame with quantization parameters.
+    BadQuantization(&'static str),
     /// An image larger than the receiver's limit.
     TooLarge {
         pixels: u64,
@@ -75,6 +81,8 @@ impl fmt::Display for ProtoError {
             ProtoError::UnknownKind(k) => write!(f, "unknown message kind {k:#04x}"),
             ProtoError::UnknownDtype(d) => write!(f, "unknown dtype code {d}"),
             ProtoError::UnknownCodec(c) => write!(f, "unknown codec code {c}"),
+            ProtoError::UnknownQuantization(q) => write!(f, "unknown quantization {q}"),
+            ProtoError::BadQuantization(why) => write!(f, "bad quantized frame: {why}"),
             ProtoError::TooLarge { pixels, max } => {
                 write!(f, "image of {pixels} pixels exceeds the limit of {max}")
             }
@@ -221,16 +229,24 @@ pub enum Codec {
     Lz4,
     /// A raw LZ4 block of the image's bytes shuffled by element.
     ShuffleLz4,
+    /// A zstd frame of the image's bytes shuffled by element.
+    ShuffleZstd,
 }
 
 impl Codec {
-    pub const ALL: [Codec; 3] = [Codec::Raw, Codec::Lz4, Codec::ShuffleLz4];
+    pub const ALL: [Codec; 4] = [
+        Codec::Raw,
+        Codec::Lz4,
+        Codec::ShuffleLz4,
+        Codec::ShuffleZstd,
+    ];
 
     pub fn code(self) -> u8 {
         match self {
             Codec::Raw => 0,
             Codec::Lz4 => 1,
             Codec::ShuffleLz4 => 2,
+            Codec::ShuffleZstd => 3,
         }
     }
 
@@ -246,6 +262,7 @@ impl Codec {
             Codec::Raw => "raw",
             Codec::Lz4 => "lz4",
             Codec::ShuffleLz4 => "shuffle-lz4",
+            Codec::ShuffleZstd => "shuffle-zstd",
         }
     }
 
@@ -255,6 +272,16 @@ impl Codec {
             Codec::Raw => decoded,
             // LZ4's worst case for incompressible input.
             Codec::Lz4 | Codec::ShuffleLz4 => decoded + decoded / 255 + 16,
+            // zstd's worst case, ZSTD_COMPRESSBOUND, frame header included.
+            Codec::ShuffleZstd => {
+                let small = 128 << 10;
+                let margin = if decoded < small {
+                    (small - decoded) >> 11
+                } else {
+                    0
+                };
+                decoded + (decoded >> 8) + margin
+            }
         }
     }
 }
@@ -263,7 +290,37 @@ impl Codec {
 // Frames
 // =============================================================================
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How a quantized frame's codes stand for values: rounded to `step` units
+/// of a noise whose variance is `read_noise² + noise_slope × max(value −
+/// bias, 0)`, linearly at and below `bias` and through the square root that
+/// evens out the noise above it. The payload's elements are each a code
+/// less `code_offset`. See PROTOCOL.md, "Quantization", and
+/// `viewcam_codec::Quantizer`, which turns codes back into values.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Quantization {
+    pub code_offset: i64,
+    pub bias: f64,
+    pub read_noise: f64,
+    pub noise_slope: f64,
+    pub step: f64,
+}
+
+impl Quantization {
+    fn validate(&self) -> Result<(), ProtoError> {
+        let model = [self.bias, self.read_noise, self.noise_slope, self.step];
+        if !model.iter().all(|v| v.is_finite()) {
+            return Err(ProtoError::BadQuantization("a parameter is not finite"));
+        }
+        if !(self.read_noise > 0.0 && self.step > 0.0 && self.noise_slope >= 0.0) {
+            return Err(ProtoError::BadQuantization(
+                "read noise and step must be positive, and the slope not negative",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameHeader {
     pub seq: u64,
     pub width: u32,
@@ -272,6 +329,9 @@ pub struct FrameHeader {
     pub codec: Codec,
     /// Payload length in bytes.
     pub encoded_len: u32,
+    /// For a quantized frame, how its codes (of `dtype`, an unsigned integer
+    /// type) stand for values; it decodes to `f32` values.
+    pub quantization: Option<Quantization>,
 }
 
 fn prefix(kind: u8) -> [u8; PREFIX_LEN] {
@@ -353,6 +413,12 @@ impl FrameHeader {
                 decoded,
             });
         }
+        if let Some(q) = &self.quantization {
+            if !matches!(self.dtype, DType::U8 | DType::U16 | DType::U32) {
+                return Err(ProtoError::BadQuantization("codes are u8, u16 or u32"));
+            }
+            q.validate()?;
+        }
         Ok(())
     }
 
@@ -365,6 +431,14 @@ impl FrameHeader {
         out[24] = self.dtype.code();
         out[25] = self.codec.code();
         out[28..32].copy_from_slice(&self.encoded_len.to_le_bytes());
+        if let Some(q) = &self.quantization {
+            out[26] = 1;
+            out[32..40].copy_from_slice(&q.code_offset.to_le_bytes());
+            out[40..48].copy_from_slice(&q.bias.to_le_bytes());
+            out[48..56].copy_from_slice(&q.read_noise.to_le_bytes());
+            out[56..64].copy_from_slice(&q.noise_slope.to_le_bytes());
+            out[64..72].copy_from_slice(&q.step.to_le_bytes());
+        }
         out
     }
 
@@ -381,6 +455,23 @@ impl FrameHeader {
         if buf.len() < FRAME_HEADER_LEN {
             return Ok(None);
         }
+        let read_f64 = |at| f64::from_bits(read_u64(buf, at));
+        let quantization = match buf[26] {
+            0 if buf[32..72].iter().all(|&b| b == 0) => None,
+            0 => {
+                return Err(ProtoError::BadQuantization(
+                    "an exact frame has no parameters",
+                ))
+            }
+            1 => Some(Quantization {
+                code_offset: read_u64(buf, 32) as i64,
+                bias: read_f64(40),
+                read_noise: read_f64(48),
+                noise_slope: read_f64(56),
+                step: read_f64(64),
+            }),
+            other => return Err(ProtoError::UnknownQuantization(other)),
+        };
         let header = FrameHeader {
             seq: read_u64(buf, 8),
             width: read_u32(buf, 16),
@@ -388,6 +479,7 @@ impl FrameHeader {
             dtype: DType::from_code(buf[24])?,
             codec: Codec::from_code(buf[25])?,
             encoded_len: read_u32(buf, 28),
+            quantization,
         };
         header.validate(max_pixels)?;
         Ok(Some(header))
@@ -395,7 +487,7 @@ impl FrameHeader {
 }
 
 /// A complete frame, its payload still encoded.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
     pub header: FrameHeader,
     pub payload: Vec<u8>,
@@ -412,6 +504,20 @@ impl Frame {
         codec: Codec,
         payload: Vec<u8>,
     ) -> Result<Frame, ProtoError> {
+        Frame::quantized(seq, width, height, dtype, codec, payload, None)
+    }
+
+    /// As [`new`](Self::new), for a frame whose payload holds codes
+    /// quantized as `quantization` says.
+    pub fn quantized(
+        seq: u64,
+        width: u32,
+        height: u32,
+        dtype: DType,
+        codec: Codec,
+        payload: Vec<u8>,
+        quantization: Option<Quantization>,
+    ) -> Result<Frame, ProtoError> {
         let encoded_len =
             u32::try_from(payload.len()).map_err(|_| ProtoError::BadEncodedLength {
                 codec,
@@ -425,6 +531,7 @@ impl Frame {
             dtype,
             codec,
             encoded_len,
+            quantization,
         };
         header.validate(DEFAULT_MAX_PIXELS)?;
         Ok(Frame { header, payload })

@@ -31,6 +31,33 @@ test('frames decode as the vectors were written', () => {
 
   const empty = vp.decodeFrame(vector('frame_empty'));
   assert.deepEqual([empty.seq, empty.width * empty.height, empty.dtype, empty.payload.length], [9n, 0, 'f64', 0]);
+  assert.equal(empty.quantization, null);
+
+  const quantized = vp.decodeFrame(vector('frame_u8_quantized_zstd'));
+  assert.deepEqual([quantized.seq, quantized.dtype, quantized.codec], [12n, 'u8', vp.CODEC_SHUFFLE_ZSTD]);
+  assert.deepEqual(quantized.quantization, { codeOffset: -3, bias: 432, readNoise: 14.25, noiseSlope: 8.5, step: 0.25 });
+  assert.deepEqual(quantized.payload, ramp(4));
+});
+
+test('a quantized threshold separates the codes at and above a level from those below', () => {
+  const q = { codeOffset: 0, bias: 432, readNoise: 14, noiseSlope: 8, step: 0.25 };
+  const valueOf = (code) => {
+    const y = code * q.step;
+    if (y <= 0) return q.bias + y * q.readNoise;
+    const r = q.noiseSlope * y / 2 + q.readNoise;
+    return q.bias + (r * r - q.readNoise ** 2) / q.noiseSlope;
+  };
+  for (const level of [432, 440, 1000, 16383]) {
+    const threshold = vp.quantizedThreshold(level, q);
+    // Within a step of the level, and between the level's code's value
+    // (as float32, as a decoded frame holds it) and the one below.
+    const noise = Math.sqrt(14 * 14 + 8 * (level - 432));
+    assert.ok(Math.abs(threshold - level) <= 0.25 * noise * 1.05, `${level} -> ${threshold}`);
+    const values = [...Array(400).keys()].map((code) => Math.fround(valueOf(code - 50)));
+    const above = values.filter((v) => v >= threshold);
+    assert.ok(above.every((v) => v >= Math.fround(vp.quantizedThreshold(level, q))));
+    assert.equal(values.length - above.length, values.filter((v) => v < threshold).length);
+  }
 });
 
 test('acks encode as the vector was written', () => {
@@ -55,12 +82,16 @@ test('inconsistent frames are rejected', () => {
     'unknown version': corrupt('frame_u16_raw', 4, 'setUint8', 2),
     'an ack': vector('ack'),
     'unknown dtype': corrupt('frame_u16_raw', 24, 'setUint8', 11),
-    'unknown codec': corrupt('frame_u16_raw', 25, 'setUint8', 3),
+    'unknown codec': corrupt('frame_u16_raw', 25, 'setUint8', 4),
+    'unknown quantization': corrupt('frame_u16_raw', 26, 'setUint8', 2),
+    'parameters on an exact frame': corrupt('frame_u16_raw', 48, 'setUint8', 1),
+    'quantized f32 codes': corrupt('frame_u8_quantized_zstd', 24, 'setUint8', 9),
+    'no read noise': corrupt('frame_u8_quantized_zstd', 48, 'setFloat64', 0),
     'raw of the wrong length': corrupt('frame_u16_raw', 16, 'setUint32', 4),
     'LZ4 over its bound': corrupt('frame_u16_shuffle_lz4', 16, 'setUint32', 0),
     'too many pixels': corrupt('frame_u16_raw', 20, 'setUint32', 2 ** 31),
     'a header longer than its message': corrupt('frame_u16_raw', 28, 'setUint32', 13),
-    'truncated': vector('frame_u16_raw').slice(0, 40),
+    'truncated': vector('frame_u16_raw').slice(0, 80),
   };
   for (const [what, message] of Object.entries(bad)) {
     assert.throws(() => vp.decodeFrame(message), vp.ProtocolError, what);
@@ -114,7 +145,7 @@ test('the feed acks on arrival, and shows only the newest of what arrived while 
     WebSocket: FakeWebSocket,
     windowFrames: 4,
     onReceive: (bytes) => received.push(bytes),
-    decode: (encoded) => {
+    decode: ({ encoded }) => {
       const d = deferred();
       decodes.push(d);
       return d.promise.then(() => encoded);
@@ -133,9 +164,9 @@ test('the feed acks on arrival, and shows only the newest of what arrived while 
   ws.deliver(lz4(2, 20));
   ws.deliver(lz4(3, 30));
   // Every frame was acknowledged as it arrived, decoded or not.
-  assert.deepEqual(ws.acks(), [[0, 0, 4], [1, 34, 4], [2, 68, 4], [3, 102, 4]]);
+  assert.deepEqual(ws.acks(), [[0, 0, 4], [1, 74, 4], [2, 148, 4], [3, 222, 4]]);
   // Counted as received whether they will be shown or not.
-  assert.deepEqual(received, [34, 34, 34]);
+  assert.deepEqual(received, [74, 74, 74]);
   assert.equal(decodes.length, 1);
   decodes[0].resolve();
   await new Promise((r) => setTimeout(r));
@@ -146,7 +177,7 @@ test('the feed acks on arrival, and shows only the newest of what arrived while 
   assert.deepEqual(shown, [[1n, 10], [3n, 30]]);
 
   feed.setWindow(0);
-  assert.deepEqual(ws.acks().at(-1), [3, 102, 0]);
+  assert.deepEqual(ws.acks().at(-1), [3, 222, 0]);
   feed.close();
 });
 
@@ -165,5 +196,37 @@ test('the feed reports empty frames, and closes on a bad one', () => {
   ws.deliver(vector('ack'));
   assert.equal(ws.closedWith, vp.CLOSE_PROTOCOL_ERROR);
   assert.equal(errors.length, 1);
+  feed.close();
+});
+
+test('a quantized frame is decoded to f32 values, with its quantization', async () => {
+  const requests = [];
+  const frames = [];
+  const feed = new vp.ViewcamFeed('ws://test/feed', {
+    WebSocket: FakeWebSocket,
+    decode: (request) => {
+      requests.push(request);
+      return Promise.resolve(new Float32Array([1.5]).buffer);
+    },
+    onFrame: (frame) => frames.push(frame),
+  });
+  const ws = FakeWebSocket.last;
+  ws.open();
+  // One u8 code, quantized, sent raw: it still needs the decoder.
+  const message = new ArrayBuffer(vp.FRAME_HEADER_LEN + 1);
+  new Uint8Array(message).set(new Uint8Array(vector('frame_u8_quantized_zstd')).subarray(0, vp.FRAME_HEADER_LEN));
+  const view = new DataView(message);
+  view.setUint32(16, 1, true);
+  view.setUint32(20, 1, true);
+  view.setUint8(25, vp.CODEC_RAW);
+  view.setUint32(28, 1, true);
+  ws.deliver(message);
+  await new Promise((r) => setTimeout(r));
+  assert.equal(requests.length, 1);
+  assert.deepEqual(
+    [requests[0].codec, requests[0].elementSize, requests[0].decodedLength, requests[0].quantized.readNoise],
+    ['raw', 1, 1, 14.25]);
+  assert.equal(frames[0].dtype, 'f32');
+  assert.equal(frames[0].quantization.step, 0.25);
   feed.close();
 });

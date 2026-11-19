@@ -35,6 +35,20 @@ fn vectors() -> Vec<(&'static str, Vec<u8>)> {
         ),
         ("frame_empty", Frame::empty(9, DType::F64).encode()),
         (
+            "frame_u8_quantized_zstd",
+            Frame::quantized(
+                12,
+                3,
+                2,
+                DType::U8,
+                Codec::ShuffleZstd,
+                ramp(4),
+                Some(QUANTIZATION),
+            )
+            .unwrap()
+            .encode(),
+        ),
+        (
             "ack",
             Ack {
                 acked_frames: 0x1122_3344_5566_7788,
@@ -47,6 +61,14 @@ fn vectors() -> Vec<(&'static str, Vec<u8>)> {
         ),
     ]
 }
+
+const QUANTIZATION: Quantization = Quantization {
+    code_offset: -3,
+    bias: 432.0,
+    read_noise: 14.25,
+    noise_slope: 8.5,
+    step: 0.25,
+};
 
 fn vectors_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors")
@@ -90,6 +112,67 @@ fn header_layout_is_as_specified() {
     let shuffled = &vectors()[2].1;
     assert_eq!(shuffled[25], 2);
     assert_eq!(&shuffled[28..32], &5u32.to_le_bytes());
+    // Exact: no quantization, and no parameters.
+    assert_eq!(shuffled[26], 0);
+    assert_eq!(&shuffled[32..72], &[0; 40]);
+
+    let quantized = &vectors()[4].1;
+    assert_eq!((quantized[24], quantized[25], quantized[26]), (1, 3, 1)); // u8, shuffle-zstd
+    assert_eq!(&quantized[32..40], &(-3i64).to_le_bytes());
+    assert_eq!(&quantized[40..48], &432.0f64.to_le_bytes());
+    assert_eq!(&quantized[48..56], &14.25f64.to_le_bytes());
+    assert_eq!(&quantized[56..64], &8.5f64.to_le_bytes());
+    assert_eq!(&quantized[64..72], &0.25f64.to_le_bytes());
+    assert_eq!(quantized.len(), FRAME_HEADER_LEN + 4);
+}
+
+#[test]
+fn quantized_frames_need_unsigned_codes_and_a_noise_model() {
+    let frame = |dtype, q| Frame::quantized(1, 2, 2, dtype, Codec::ShuffleZstd, vec![1; 3], q);
+    assert!(frame(DType::U16, Some(QUANTIZATION)).is_ok());
+    assert_eq!(
+        frame(DType::F32, Some(QUANTIZATION)),
+        Err(ProtoError::BadQuantization("codes are u8, u16 or u32"))
+    );
+    for bad in [
+        Quantization {
+            read_noise: 0.0,
+            ..QUANTIZATION
+        },
+        Quantization {
+            step: -1.0,
+            ..QUANTIZATION
+        },
+        Quantization {
+            noise_slope: -0.5,
+            ..QUANTIZATION
+        },
+        Quantization {
+            bias: f64::NAN,
+            ..QUANTIZATION
+        },
+    ] {
+        assert!(matches!(
+            frame(DType::U8, Some(bad)),
+            Err(ProtoError::BadQuantization(_))
+        ));
+    }
+
+    // From the wire: an unknown quantization, and parameters on an exact frame.
+    let mut message = Frame::new(3, 1, 1, DType::U8, Codec::Raw, vec![7])
+        .unwrap()
+        .encode();
+    message[26] = 2;
+    assert_eq!(
+        Frame::decode(&message, DEFAULT_MAX_PIXELS),
+        Err(ProtoError::UnknownQuantization(2))
+    );
+    message[26] = 0;
+    message[50] = 1;
+    assert!(matches!(
+        Frame::decode(&message, DEFAULT_MAX_PIXELS),
+        Err(ProtoError::BadQuantization(_))
+    ));
 }
 
 /// Every frame vector decodes to the frame it came from, and no shorter or
@@ -157,12 +240,17 @@ fn encoded_lengths_are_checked_per_codec() {
     assert!(!bad(Codec::Raw, 32));
     assert!(bad(Codec::Raw, 31));
     assert!(bad(Codec::Raw, 33));
-    // LZ4 may be anything from one byte up to its worst case, 32 + 0 + 16.
-    for codec in [Codec::Lz4, Codec::ShuffleLz4] {
+    // LZ4 may be anything from one byte up to its worst case, 32 + 0 + 16,
+    // and zstd up to its own, 32 + 0 + (128 KiB - 32) / 2048.
+    for (codec, most) in [
+        (Codec::Lz4, 48),
+        (Codec::ShuffleLz4, 48),
+        (Codec::ShuffleZstd, 95),
+    ] {
         assert!(bad(codec, 0));
         assert!(!bad(codec, 1));
-        assert!(!bad(codec, 48));
-        assert!(bad(codec, 49));
+        assert!(!bad(codec, most));
+        assert!(bad(codec, most + 1));
     }
 }
 
@@ -192,7 +280,7 @@ fn malformed_messages_are_rejected() {
     assert_eq!(decode(4, 2), Err(ProtoError::UnsupportedVersion(2)));
     assert_eq!(decode(5, 9), Err(ProtoError::UnknownKind(9)));
     assert_eq!(decode(24, 11), Err(ProtoError::UnknownDtype(11)));
-    assert_eq!(decode(25, 3), Err(ProtoError::UnknownCodec(3)));
+    assert_eq!(decode(25, 4), Err(ProtoError::UnknownCodec(4)));
     // A raw frame whose length field disagrees with its dimensions.
     assert!(matches!(
         decode(28, 13),
@@ -216,6 +304,7 @@ fn oversized_images_are_refused_before_allocating() {
         dtype: DType::U8,
         codec: Codec::Lz4,
         encoded_len: 1,
+        quantization: None,
     }
     .encode();
     // Refused from the header alone, before any payload is looked at.

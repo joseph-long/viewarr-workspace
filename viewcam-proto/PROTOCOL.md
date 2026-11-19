@@ -92,18 +92,24 @@ kind.
 
 ### `FRAME` (kind 1, server → client)
 
-32-byte header, then `encoded_len` bytes of payload, and nothing after it:
+72-byte header, then `encoded_len` bytes of payload, and nothing after it:
 
-| Offset | Size | Field         | Notes                                     |
-| -----: | ---: | ------------- | ----------------------------------------- |
-|      0 |    8 | prefix        | `kind = 1`                                |
-|      8 |    8 | `seq`         | u64, strictly increasing within a feed    |
-|     16 |    4 | `width`       | u32                                       |
-|     20 |    4 | `height`      | u32                                       |
-|     24 |    1 | `dtype`       | element type, below                       |
-|     25 |    1 | `codec`       | payload encoding, below                   |
-|     26 |    2 | `reserved`    | `0`                                       |
-|     28 |    4 | `encoded_len` | u32, payload length in bytes              |
+| Offset | Size | Field          | Notes                                     |
+| -----: | ---: | -------------- | ----------------------------------------- |
+|      0 |    8 | prefix         | `kind = 1`                                |
+|      8 |    8 | `seq`          | u64, strictly increasing within a feed    |
+|     16 |    4 | `width`        | u32                                       |
+|     20 |    4 | `height`       | u32                                       |
+|     24 |    1 | `dtype`        | element type, below                       |
+|     25 |    1 | `codec`        | payload encoding, below                   |
+|     26 |    1 | `quantization` | `0` = exact, `1` = noise-matched, below   |
+|     27 |    1 | `reserved`     | `0`                                       |
+|     28 |    4 | `encoded_len`  | u32, payload length in bytes              |
+|     32 |    8 | `code_offset`  | i64; quantized frames only, else `0`      |
+|     40 |    8 | `bias`         | f64; quantized frames only, else `0`      |
+|     48 |    8 | `read_noise`   | f64; quantized frames only, else `0`      |
+|     56 |    8 | `noise_slope`  | f64; quantized frames only, else `0`      |
+|     64 |    8 | `step`         | f64; quantized frames only, else `0`      |
 
 The decoded image is `width × height` elements of `dtype`, little-endian,
 row-major, with no padding; the first row is `y = 0`, the bottom row as
@@ -131,26 +137,78 @@ counter past the last `seq` it sent.
 
 #### Codecs
 
-| Code | Codec         | Payload                                                         |
-| ---: | ------------- | --------------------------------------------------------------- |
-|    0 | `raw`         | the decoded image; `encoded_len` = decoded length               |
-|    1 | `lz4`         | a raw LZ4 block (no frame, no size prefix) of the decoded image |
-|    2 | `shuffle-lz4` | a raw LZ4 block of the image's bytes shuffled by element        |
+| Code | Codec          | Payload                                                         |
+| ---: | -------------- | --------------------------------------------------------------- |
+|    0 | `raw`          | the decoded image; `encoded_len` = decoded length               |
+|    1 | `lz4`          | a raw LZ4 block (no frame, no size prefix) of the decoded image |
+|    2 | `shuffle-lz4`  | a raw LZ4 block of the image's bytes shuffled by element        |
+|    3 | `shuffle-zstd` | a zstd frame of the image's bytes shuffled by element           |
 
 *Shuffled* means all the elements' byte 0, then all their byte 1, and so on
 (Blosc's shuffle). It groups each pixel's slowly varying high byte with its
 neighbours', where LZ4 finds the repetition the noisy low bytes hide. In
 numpy: `img.view(np.uint8).reshape(-1, img.itemsize).T.tobytes()`.
 
-The LZ4 block's decompressed size is the decoded length, which the receiver
-computes from the header instead of trusting a stored size. For the LZ4
-codecs, `encoded_len` may not exceed LZ4's worst case for the decoded length,
-`n + n / 255 + 16` (integer division).
+The decompressed size is the decoded length, which the receiver computes
+from the header instead of trusting a stored size, and a payload that
+decompresses to any other length is an error. `encoded_len` may not exceed
+the codec's worst case for a decoded length `n` (integer division
+throughout):
+
+- LZ4: `n + n / 255 + 16`;
+- zstd: `n + n / 256 + (n < 131072 ? (131072 − n) / 2048 : 0)`, zstd's
+  `ZSTD_COMPRESSBOUND`, which includes the frame header. The zstd frame
+  must be a single frame, and a receiver needn't check content checksums.
 
 Which codec suits a feed is the server's call: `raw` costs no CPU,
-`shuffle-lz4` usually compresses multi-byte camera data best, and a mostly
-zero saturation map compresses enormously with either LZ4 codec. Compression
-also shrinks what a stall can trap, since the window counts encoded bytes.
+`shuffle-lz4` costs little and suits images with repetitive bytes (a mostly
+zero saturation map compresses enormously with either LZ4 codec), and
+`shuffle-zstd` costs more CPU but, having entropy coding, also compresses
+noise, which is most of a camera frame. Compression also shrinks what a
+stall can trap, since the window counts encoded bytes.
+
+#### Quantization
+
+A display can't use precision finer than an image's noise, and noise is
+what compresses worst. So a server may round a frame to steps a fixed
+fraction of its noise, and send the steps' integer **codes**
+(`quantization = 1`). The noise model is one where a pixel at `value` has
+noise variance
+
+    read_noise² + noise_slope × max(value − bias, 0)
+
+which covers read noise alone (`noise_slope = 0`) and photon noise, which
+grows with the signal, on top of it. Values are first mapped to `y`, in
+units of that noise:
+
+    s = value − bias
+    y = s / read_noise                                                if s ≤ 0 or noise_slope = 0
+    y = (2 / noise_slope) (√(noise_slope × s + read_noise²) − read_noise)   otherwise
+
+linear at and below `bias`, and above it the square root that holds the
+noise at one unit, the generalized Anscombe transform. The two meet with
+the same slope at `bias`. The code is `round(y / step)`, and each payload
+element is a code less `code_offset`, so it can be stored unsigned in as
+few bytes as the frame's codes need: `dtype` must be `u8`, `u16` or `u32`.
+
+To decode, `y = (element + code_offset) × step`, and
+
+    value = bias + y × read_noise                                     if y ≤ 0 or noise_slope = 0
+    value = bias + ((noise_slope × y / 2 + read_noise)² − read_noise²) / noise_slope   otherwise
+
+A quantized frame decodes to `f32` values; `width`, `height` and the codec
+describe the codes, as for any frame. `read_noise` and `step` must be
+positive, `noise_slope` not negative, and all four finite. An exact frame
+(`quantization = 0`) has all five fields zero. Any other `quantization` is
+an error.
+
+A value comes back within half a step of its noise: at a step of ¼, an
+error a fraction of the noise that adds ~2% to it in quadrature. Where the
+noise grows with the signal, steps are finest at the faint end, where a
+display stretched for faint detail needs them, and coarse only for bright
+pixels, which are noisier anyway. Rounding is monotonic, so a level (a
+saturation level, say) compares with quantized values as the value of its
+own code. `viewcam-codec`'s `Quantizer` implements both directions.
 
 ### `ACK` (kind 0x81, client → server)
 
@@ -212,8 +270,8 @@ alone, rather than never.
 - Frames arrive in `seq` order, but a client that decodes off its main
   thread can finish them out of order: show a frame only if its `seq` is
   newer than the newest shown on that feed, and drop it otherwise.
-- Decoding the LZ4 codecs is up to the client; the `viewcam-codec` crate does
-  it in Rust and WASM.
+- Decoding the LZ4 and zstd codecs, and quantized frames' codes, is up to
+  the client; the `viewcam-codec` crate does all three in Rust and WASM.
 
 `js/viewcam_proto.js` is a browser client that does all of this:
 `ViewcamFeed` handles one feed, and decodes in `viewcam-codec`'s web worker
@@ -238,6 +296,7 @@ A window of `F` frames and `B` bytes, over a round trip `rtt`, allows at most
 
 ## Test vectors
 
-`tests/vectors/` holds encoded examples of each message. The Rust crate, the
+`tests/vectors/` holds encoded examples of each message, a quantized frame
+among them. The Rust crate, the
 Python reference (`python/viewcam_proto.py`) and the browser client
 (`js/viewcam_proto.js`) are all tested against them, byte for byte.

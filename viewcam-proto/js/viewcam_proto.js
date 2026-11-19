@@ -13,7 +13,7 @@
  *     new URL('viewcam-codec/decode-worker.js', import.meta.url), { type: 'module' }));
  *   const feed = new ViewcamFeed('wss://host/ws/viewcam/camwfs', {
  *     decode,
- *     onFrame: ({ seq, width, height, dtype, pixels }) => { ... },  // pixels: ArrayBuffer
+ *     onFrame: ({ seq, width, height, dtype, pixels, quantization }) => { ... },  // pixels: ArrayBuffer
  *     onEmpty: () => { ... },          // the feed has no image
  *     onStatus: (status) => { ... },   // 'connecting' | 'open' | 'closed'
  *   });
@@ -33,6 +33,10 @@ export const KIND_ACK = 0x81;
 export const CODEC_RAW = 0;
 export const CODEC_LZ4 = 1;
 export const CODEC_SHUFFLE_LZ4 = 2;
+export const CODEC_SHUFFLE_ZSTD = 3;
+
+/** dtype codes quantized codes may have: u8, u16, u32 */
+export const CODE_DTYPES = [1, 3, 5];
 
 /** dtype code -> [viewarr dtype name, bytes per element] */
 export const DTYPES = {
@@ -48,7 +52,7 @@ export const DTYPES = {
   10: ['f64', 8],
 };
 
-export const FRAME_HEADER_LEN = 32;
+export const FRAME_HEADER_LEN = 72;
 export const ACK_LEN = 32;
 /** The most pixels a frame may claim before it is rejected unread. */
 export const DEFAULT_MAX_PIXELS = 2 ** 28;
@@ -67,7 +71,42 @@ export class ProtocolError extends Error {
 /** The largest payload `codec` can produce for a `decoded`-byte image. */
 export function maxEncodedLen(codec, decoded) {
   if (codec === CODEC_RAW) return decoded;
+  if (codec === CODEC_SHUFFLE_ZSTD) { // ZSTD_COMPRESSBOUND
+    const small = 128 * 1024;
+    return decoded + Math.floor(decoded / 256) + (decoded < small ? Math.floor((small - decoded) / 2048) : 0);
+  }
   return decoded + Math.floor(decoded / 255) + 16; // LZ4's worst case
+}
+
+/** A quantized frame's value, in units of its noise. See PROTOCOL.md, "Quantization". */
+function toNoiseUnits(value, { bias, readNoise, noiseSlope }) {
+  const s = value - bias;
+  if (noiseSlope > 0 && s > 0) {
+    return (2 / noiseSlope) * (Math.sqrt(noiseSlope * s + readNoise * readNoise) - readNoise);
+  }
+  return s / readNoise;
+}
+
+function fromNoiseUnits(y, { bias, readNoise, noiseSlope }) {
+  if (noiseSlope > 0 && y > 0) {
+    const r = noiseSlope * y / 2 + readNoise;
+    return bias + (r * r - readNoise * readNoise) / noiseSlope;
+  }
+  return bias + y * readNoise;
+}
+
+/**
+ * The level to compare a frame quantized as `quantization` says with, to
+ * find the pixels that were at or above `value` (its saturated pixels, say):
+ * halfway between the value of `value`'s code and that of the code below.
+ * Rounding is monotonic, so pixels at or above `value` come back at or above
+ * the first, and the rest at or below the second, each half a step clear of
+ * the threshold, whatever float32 does to them.
+ */
+export function quantizedThreshold(value, quantization) {
+  const { step } = quantization;
+  const code = Math.round(toNoiseUnits(value, quantization) / step);
+  return (fromNoiseUnits(code * step, quantization) + fromNoiseUnits((code - 1) * step, quantization)) / 2;
 }
 
 function checkPrefix(view, kind) {
@@ -89,9 +128,11 @@ function checkPrefix(view, kind) {
  *
  * `seq` is a BigInt, since it is a u64. `payload` is a Uint8Array view of
  * the message, still encoded with `codec`. An empty frame ("no image on
- * this feed") has `width * height === 0`. Throws ProtocolError for anything
- * inconsistent, before the payload is looked at, so a corrupt header can't
- * ask for a huge allocation.
+ * this feed") has `width * height === 0`. A quantized frame has
+ * `quantization`, `{ codeOffset, bias, readNoise, noiseSlope, step }`, its
+ * payload holding codes of `dtype`; otherwise it is null. Throws
+ * ProtocolError for anything inconsistent, before the payload is looked
+ * at, so a corrupt header can't ask for a huge allocation.
  */
 export function decodeFrame(message, maxPixels = DEFAULT_MAX_PIXELS) {
   if (message.byteLength < FRAME_HEADER_LEN) {
@@ -106,7 +147,7 @@ export function decodeFrame(message, maxPixels = DEFAULT_MAX_PIXELS) {
   const codec = view.getUint8(25);
   const encodedLen = view.getUint32(28, true);
   if (!(dtypeCode in DTYPES)) throw new ProtocolError(`unknown dtype code ${dtypeCode}`);
-  if (codec !== CODEC_RAW && codec !== CODEC_LZ4 && codec !== CODEC_SHUFFLE_LZ4) {
+  if (![CODEC_RAW, CODEC_LZ4, CODEC_SHUFFLE_LZ4, CODEC_SHUFFLE_ZSTD].includes(codec)) {
     throw new ProtocolError(`unknown codec code ${codec}`);
   }
   const pixels = width * height;
@@ -127,14 +168,39 @@ export function decodeFrame(message, maxPixels = DEFAULT_MAX_PIXELS) {
     throw new ProtocolError(
       `codec ${codec} payload of ${encodedLen} bytes cannot decode to ${decodedLen} bytes`);
   }
+  const quantization = readQuantization(view, dtypeCode);
   if (message.byteLength !== FRAME_HEADER_LEN + encodedLen) {
     throw new ProtocolError(
       `frame message is ${message.byteLength} bytes, its header says ${FRAME_HEADER_LEN + encodedLen}`);
   }
   return {
-    seq, width, height, dtype, dtypeCode, elementSize, codec, decodedLen,
+    seq, width, height, dtype, dtypeCode, elementSize, codec, decodedLen, quantization,
     payload: new Uint8Array(message, FRAME_HEADER_LEN, encodedLen),
   };
+}
+
+function readQuantization(view, dtypeCode) {
+  const flag = view.getUint8(26);
+  if (flag === 0) {
+    for (let at = 32; at < 72; at++) {
+      if (view.getUint8(at) !== 0) throw new ProtocolError('bad quantized frame: an exact frame has no parameters');
+    }
+    return null;
+  }
+  if (flag !== 1) throw new ProtocolError(`unknown quantization ${flag}`);
+  if (!CODE_DTYPES.includes(dtypeCode)) throw new ProtocolError('bad quantized frame: codes are u8, u16 or u32');
+  const q = {
+    codeOffset: Number(view.getBigInt64(32, true)),
+    bias: view.getFloat64(40, true),
+    readNoise: view.getFloat64(48, true),
+    noiseSlope: view.getFloat64(56, true),
+    step: view.getFloat64(64, true),
+  };
+  const model = [q.bias, q.readNoise, q.noiseSlope, q.step];
+  if (!model.every(Number.isFinite) || !(q.readNoise > 0 && q.step > 0 && q.noiseSlope >= 0)) {
+    throw new ProtocolError('bad quantized frame: not a noise model');
+  }
+  return q;
 }
 
 /**
@@ -159,7 +225,8 @@ export function encodeAck({ ackedFrames, ackedBytes, windowFrames, windowBytes =
 
 /**
  * A `decode` function for ViewcamFeed that uses viewcam-codec's
- * decode-worker.js, so LZ4 decoding stays off the main thread.
+ * decode-worker.js, so decompressing and dequantizing stay off the main
+ * thread. The request is the worker's plane, as is.
  */
 export function workerDecoder(worker) {
   let nextId = 0;
@@ -172,10 +239,10 @@ export function workerDecoder(worker) {
     if (type === 'decoded') pending.resolve(planes[0]);
     else pending.reject(new Error(message));
   });
-  return (encoded, elementSize, decodedLength) => new Promise((resolve, reject) => {
+  return (plane) => new Promise((resolve, reject) => {
     const id = nextId++;
     waiting.set(id, { resolve, reject });
-    worker.postMessage({ id, planes: [{ encoded, elementSize, decodedLength }] }, [encoded]);
+    worker.postMessage({ id, planes: [plane] }, [plane.encoded]);
   });
 }
 
@@ -186,10 +253,15 @@ export function workerDecoder(worker) {
  * falling behind.
  *
  * Options:
- *  - `decode(encoded: ArrayBuffer, elementSize, decodedLength) -> Promise<ArrayBuffer>`
- *    for the LZ4 codecs (shuffled when elementSize > 1); `raw` frames need none.
- *  - `onFrame({ seq, width, height, dtype, pixels })`, pixels an ArrayBuffer
- *    of the decoded image, row-major from the bottom row.
+ *  - `decode({ encoded: ArrayBuffer, codec: 'raw' | 'lz4' | 'zstd',
+ *    elementSize, decodedLength, quantized? }) -> Promise<ArrayBuffer>` for
+ *    the compressed codecs (shuffled when elementSize > 1) and quantized
+ *    frames, whose codes it turns into float32 values (see
+ *    viewcam-codec's decode-worker.js); exact `raw` frames need none.
+ *  - `onFrame({ seq, width, height, dtype, pixels, quantization })`, pixels
+ *    an ArrayBuffer of the decoded image, row-major from the bottom row. A
+ *    quantized frame arrives as 'f32' values, with its `quantization`;
+ *    otherwise that is null.
  *  - `onEmpty({ seq })` when the feed has no image.
  *  - `onStatus(status)`: 'connecting', 'open' or 'closed'.
  *  - `onReceive(bytes)` for every message received, decoded or skipped,
@@ -324,7 +396,7 @@ export class ViewcamFeed {
   }
 
   async show(frame) {
-    const { seq, width, height, dtype, codec, elementSize, decodedLen } = frame;
+    const { seq, width, height, codec, elementSize, decodedLen, quantization } = frame;
     if (seq <= this.shownSeq) return;
     if (width * height === 0) {
       this.shownSeq = seq;
@@ -336,11 +408,17 @@ export class ViewcamFeed {
     const encoded = frame.payload.slice().buffer;
     let pixels;
     try {
-      if (codec === CODEC_RAW) {
+      if (codec === CODEC_RAW && !quantization) {
         pixels = encoded;
       } else {
         if (!this.decode) throw new Error(`no decoder for codec ${codec}`);
-        pixels = await this.decode(encoded, codec === CODEC_SHUFFLE_LZ4 ? elementSize : 1, decodedLen);
+        pixels = await this.decode({
+          encoded,
+          codec: { [CODEC_RAW]: 'raw', [CODEC_SHUFFLE_ZSTD]: 'zstd' }[codec] ?? 'lz4',
+          elementSize: codec === CODEC_LZ4 ? 1 : elementSize,
+          decodedLength: decodedLen,
+          quantized: quantization ?? undefined,
+        });
       }
     } catch (error) {
       this.onError(error);
@@ -349,6 +427,7 @@ export class ViewcamFeed {
     // Decoding is asynchronous, so check again that nothing newer got here first.
     if (seq <= this.shownSeq) return;
     this.shownSeq = seq;
-    this.onFrame({ seq, width, height, dtype, pixels });
+    const dtype = quantization ? 'f32' : frame.dtype;
+    this.onFrame({ seq, width, height, dtype, pixels, quantization });
   }
 }

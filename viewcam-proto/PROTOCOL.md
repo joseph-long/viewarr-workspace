@@ -72,7 +72,7 @@ Servers should:
 
 - disable Nagle's algorithm (`TCP_NODELAY`), so an ack or the tail of a
   frame isn't held back waiting for more to send;
-- not negotiate `permessage-deflate` on a feed: LZ4 payloads don't deflate
+- not negotiate `permessage-deflate` on a feed: zstd payloads don't deflate
   further, and the CPU it costs is latency.
 
 ## Encoding
@@ -137,35 +137,29 @@ counter past the last `seq` it sent.
 
 #### Codecs
 
-| Code | Codec          | Payload                                                         |
-| ---: | -------------- | --------------------------------------------------------------- |
-|    0 | `raw`          | the decoded image; `encoded_len` = decoded length               |
-|    1 | `lz4`          | a raw LZ4 block (no frame, no size prefix) of the decoded image |
-|    2 | `shuffle-lz4`  | a raw LZ4 block of the image's bytes shuffled by element        |
-|    3 | `shuffle-zstd` | a zstd frame of the image's bytes shuffled by element           |
+| Code | Codec          | Payload                                               |
+| ---: | -------------- | ----------------------------------------------------- |
+|    0 | `raw`          | the decoded image; `encoded_len` = decoded length     |
+|    1 | `shuffle-zstd` | a zstd frame of the image's bytes shuffled by element |
 
 *Shuffled* means all the elements' byte 0, then all their byte 1, and so on
 (Blosc's shuffle). It groups each pixel's slowly varying high byte with its
-neighbours', where LZ4 finds the repetition the noisy low bytes hide. In
-numpy: `img.view(np.uint8).reshape(-1, img.itemsize).T.tobytes()`.
+neighbours'. In numpy: `img.view(np.uint8).reshape(-1, img.itemsize).T.tobytes()`.
+zstd's entropy coding then spends on each byte only the bits it carries,
+which compresses even the noise that is most of a camera frame.
 
 The decompressed size is the decoded length, which the receiver computes
 from the header instead of trusting a stored size, and a payload that
-decompresses to any other length is an error. `encoded_len` may not exceed
-the codec's worst case for a decoded length `n` (integer division
-throughout):
+decompresses to any other length is an error. The zstd frame must be a
+single frame, and a receiver needn't check content checksums. `encoded_len`
+may not exceed zstd's worst case for a decoded length `n`,
+`ZSTD_COMPRESSBOUND`, which includes the frame header (integer division):
 
-- LZ4: `n + n / 255 + 16`;
-- zstd: `n + n / 256 + (n < 131072 ? (131072 − n) / 2048 : 0)`, zstd's
-  `ZSTD_COMPRESSBOUND`, which includes the frame header. The zstd frame
-  must be a single frame, and a receiver needn't check content checksums.
+    n + n / 256 + (n < 131072 ? (131072 − n) / 2048 : 0)
 
-Which codec suits a feed is the server's call: `raw` costs no CPU,
-`shuffle-lz4` costs little and suits images with repetitive bytes (a mostly
-zero saturation map compresses enormously with either LZ4 codec), and
-`shuffle-zstd` costs more CPU but, having entropy coding, also compresses
-noise, which is most of a camera frame. Compression also shrinks what a
-stall can trap, since the window counts encoded bytes.
+Which codec suits a feed is the server's call: `raw` costs no CPU, and
+`shuffle-zstd` costs some but sends far less. Compression also shrinks
+what a stall can trap, since the window counts encoded bytes.
 
 #### Quantization
 
@@ -263,15 +257,15 @@ alone, rather than never.
   time shouldn't count against the window, and the client can drop frames
   it hasn't the time to decode itself.
 - Check a frame's header before trusting its payload. Reject headers that are
-  inconsistent (a `raw` payload not exactly the decoded length, an LZ4 payload
+  inconsistent (a `raw` payload not exactly the decoded length, a zstd payload
   over the bound, a nonzero payload for an empty frame, a message longer or
   shorter than its header says) and bound what it accepts (e.g. at most 2²⁸
   pixels), so a corrupt header cannot ask it to allocate gigabytes.
 - Frames arrive in `seq` order, but a client that decodes off its main
   thread can finish them out of order: show a frame only if its `seq` is
   newer than the newest shown on that feed, and drop it otherwise.
-- Decoding the LZ4 and zstd codecs, and quantized frames' codes, is up to
-  the client; the `viewcam-codec` crate does all three in Rust and WASM.
+- Decompressing payloads and turning quantized frames' codes into values is
+  up to the client; the `viewcam-codec` crate does both in Rust and WASM.
 
 `js/viewcam_proto.js` is a browser client that does all of this:
 `ViewcamFeed` handles one feed, and decodes in `viewcam-codec`'s web worker

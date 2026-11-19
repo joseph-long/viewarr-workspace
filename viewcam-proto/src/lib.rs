@@ -7,9 +7,9 @@
 //! messages is left to the caller, so the same logic, and the same tests,
 //! serve the native client and the browser.
 //!
-//! Payloads are carried as they arrived, still encoded; decoding the LZ4
-//! codecs is the `viewcam-codec` crate's job, so this one stays
-//! dependency-free.
+//! Payloads are carried as they arrived, still encoded; decompressing them,
+//! and turning quantized codes into values, is the `viewcam-codec` crate's
+//! job, so this one stays dependency-free.
 
 use std::fmt;
 
@@ -225,28 +225,17 @@ impl DType {
 pub enum Codec {
     /// The image itself.
     Raw,
-    /// A raw LZ4 block of the image.
-    Lz4,
-    /// A raw LZ4 block of the image's bytes shuffled by element.
-    ShuffleLz4,
     /// A zstd frame of the image's bytes shuffled by element.
     ShuffleZstd,
 }
 
 impl Codec {
-    pub const ALL: [Codec; 4] = [
-        Codec::Raw,
-        Codec::Lz4,
-        Codec::ShuffleLz4,
-        Codec::ShuffleZstd,
-    ];
+    pub const ALL: [Codec; 2] = [Codec::Raw, Codec::ShuffleZstd];
 
     pub fn code(self) -> u8 {
         match self {
             Codec::Raw => 0,
-            Codec::Lz4 => 1,
-            Codec::ShuffleLz4 => 2,
-            Codec::ShuffleZstd => 3,
+            Codec::ShuffleZstd => 1,
         }
     }
 
@@ -260,8 +249,6 @@ impl Codec {
     pub fn name(self) -> &'static str {
         match self {
             Codec::Raw => "raw",
-            Codec::Lz4 => "lz4",
-            Codec::ShuffleLz4 => "shuffle-lz4",
             Codec::ShuffleZstd => "shuffle-zstd",
         }
     }
@@ -270,8 +257,6 @@ impl Codec {
     pub fn max_encoded_len(self, decoded: u64) -> u64 {
         match self {
             Codec::Raw => decoded,
-            // LZ4's worst case for incompressible input.
-            Codec::Lz4 | Codec::ShuffleLz4 => decoded + decoded / 255 + 16,
             // zstd's worst case, ZSTD_COMPRESSBOUND, frame header included.
             Codec::ShuffleZstd => {
                 let small = 128 << 10;
@@ -402,7 +387,7 @@ impl FrameHeader {
         let fits = match self.codec {
             Codec::Raw => encoded == decoded,
             // An empty image has an empty payload; any other needs at least
-            // one byte of LZ4 block.
+            // one byte of compressed data.
             _ if decoded == 0 => encoded == 0,
             codec => encoded > 0 && encoded <= codec.max_encoded_len(decoded),
         };

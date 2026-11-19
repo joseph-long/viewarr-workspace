@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Joseph D. Long <me@joseph-long.com>"]
 license = "MIT"
-description = "Byte-shuffle + LZ4 frame codec for viewcam, small enough to load in a web worker"
+description = "Byte-shuffle + zstd frame codec and noise-matched quantization for viewcam, small enough to load in a web worker"
 repository = "https://github.com/joseph-long/viewarr"
 
 [lib]
@@ -13,18 +13,10 @@ crate-type = ["cdylib", "rlib"]
 # Deliberately nothing from viewarr/egui: the WASM build is meant to be loaded
 # on its own in a worker, so it should cost the page only the codec.
 [dependencies]
-# Pure Rust, so it builds for wasm32 with no C toolchain. Decoding stays
-# safe-and-checked, since its input comes off a network; encoding uses the
-# faster unchecked path, since it only ever compresses our own frames. The
-# LZ4 frame format (and its hashing dependency) is not used.
-lz4_flex = { version = "0.14", default-features = false, features = [
-    "std",
-    "safe-decode",
-    "checked-decode",
-] }
-# zstd decoding in pure Rust, for the same reason; no content checksums,
-# which the transport already guards. Encoding uses the C library (the
-# `encode-zstd` feature), which only the Python extension needs.
+# zstd decoding in pure Rust, so it builds for wasm32 with no C toolchain;
+# no content checksums, which the transport already guards. Encoding uses
+# the C library (the `encode-zstd` feature), which only the Python extension
+# needs.
 ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 zstd = { version = "0.14", optional = true, default-features = false }
 

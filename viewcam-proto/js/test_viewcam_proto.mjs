@@ -22,12 +22,11 @@ test('frames decode as the vectors were written', () => {
   assert.deepEqual([raw.width, raw.height, raw.dtype, raw.codec], [3, 2, 'u16', vp.CODEC_RAW]);
   assert.deepEqual(raw.payload, ramp(12));
 
-  const lz4 = vp.decodeFrame(vector('frame_f32_lz4'));
-  assert.deepEqual([lz4.seq, lz4.dtype, lz4.codec, lz4.decodedLen], [7n, 'f32', vp.CODEC_LZ4, 16]);
-  assert.deepEqual(lz4.payload, ramp(9));
-
-  const shuffled = vp.decodeFrame(vector('frame_u16_shuffle_lz4'));
-  assert.deepEqual([shuffled.seq, shuffled.codec, shuffled.elementSize], [8n, vp.CODEC_SHUFFLE_LZ4, 2]);
+  const zstd = vp.decodeFrame(vector('frame_f32_zstd'));
+  assert.deepEqual(
+    [zstd.seq, zstd.dtype, zstd.codec, zstd.elementSize, zstd.decodedLen],
+    [7n, 'f32', vp.CODEC_SHUFFLE_ZSTD, 4, 16]);
+  assert.deepEqual(zstd.payload, ramp(9));
 
   const empty = vp.decodeFrame(vector('frame_empty'));
   assert.deepEqual([empty.seq, empty.width * empty.height, empty.dtype, empty.payload.length], [9n, 0, 'f64', 0]);
@@ -82,13 +81,13 @@ test('inconsistent frames are rejected', () => {
     'unknown version': corrupt('frame_u16_raw', 4, 'setUint8', 2),
     'an ack': vector('ack'),
     'unknown dtype': corrupt('frame_u16_raw', 24, 'setUint8', 11),
-    'unknown codec': corrupt('frame_u16_raw', 25, 'setUint8', 4),
+    'unknown codec': corrupt('frame_u16_raw', 25, 'setUint8', 2),
     'unknown quantization': corrupt('frame_u16_raw', 26, 'setUint8', 2),
     'parameters on an exact frame': corrupt('frame_u16_raw', 48, 'setUint8', 1),
     'quantized f32 codes': corrupt('frame_u8_quantized_zstd', 24, 'setUint8', 9),
     'no read noise': corrupt('frame_u8_quantized_zstd', 48, 'setFloat64', 0),
     'raw of the wrong length': corrupt('frame_u16_raw', 16, 'setUint32', 4),
-    'LZ4 over its bound': corrupt('frame_u16_shuffle_lz4', 16, 'setUint32', 0),
+    'zstd over its bound': corrupt('frame_f32_zstd', 16, 'setUint32', 0),
     'too many pixels': corrupt('frame_u16_raw', 20, 'setUint32', 2 ** 31),
     'a header longer than its message': corrupt('frame_u16_raw', 28, 'setUint32', 13),
     'truncated': vector('frame_u16_raw').slice(0, 80),
@@ -154,15 +153,15 @@ test('the feed acks on arrival, and shows only the newest of what arrived while 
   });
   const ws = FakeWebSocket.last;
   ws.open();
-  // A raw frame needs no decoder; make these LZ4 by flipping the codec.
-  const lz4 = (seq, value) => {
+  // A raw frame needs no decoder; make these zstd by flipping the codec.
+  const zstd = (seq, value) => {
     const message = frameMessage(seq, value);
-    new DataView(message).setUint8(25, vp.CODEC_LZ4);
+    new DataView(message).setUint8(25, vp.CODEC_SHUFFLE_ZSTD);
     return message;
   };
-  ws.deliver(lz4(1, 10));
-  ws.deliver(lz4(2, 20));
-  ws.deliver(lz4(3, 30));
+  ws.deliver(zstd(1, 10));
+  ws.deliver(zstd(2, 20));
+  ws.deliver(zstd(3, 30));
   // Every frame was acknowledged as it arrived, decoded or not.
   assert.deepEqual(ws.acks(), [[0, 0, 4], [1, 74, 4], [2, 148, 4], [3, 222, 4]]);
   // Counted as received whether they will be shown or not.

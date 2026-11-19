@@ -1,41 +1,34 @@
 # viewcam-codec
 
-Lossless, cheap-to-decode compression for camera frames: a Blosc-style
-**byte shuffle** followed by **LZ4** (via the pure-Rust
-[`lz4_flex`](https://crates.io/crates/lz4_flex)). It builds to a 28 KB WASM
-module with no dependency on viewarr or egui, meant to be loaded on its own
-in a web worker, so frames are decoded off the main thread that draws the
-viewer.
+Compression for camera frames that is cheap to decode in a browser: a
+Blosc-style **byte shuffle** followed by **zstd**, and **noise-matched
+quantization** that rounds a frame to a fraction of its noise first. The
+decoder builds to a WASM module with no dependency on viewarr or egui, meant
+to be loaded on its own in a web worker, so frames are decoded off the main
+thread that draws the viewer.
 
 Shuffling first, all the elements' byte 0, then all their byte 1, puts each
-pixel's slowly varying high byte next to its neighbours' high bytes, where
-LZ4 can find the repetition the noisy low bytes hide. This is the same idea
-as the bitshuffle/LZ4 compression used for X-ray detector streams, at byte
-rather than bit granularity.
+pixel's slowly varying high byte next to its neighbours' high bytes. zstd
+then compresses the result: its entropy coding spends on the noisy low bytes
+only the bits their noise needs, where a plain LZ-style compressor, finding
+no repeats in noise, saves nothing on them.
 
 ## Format
 
-An encoded plane is a **raw LZ4 block** (no frame, no size prefix) of the
-shuffled bytes. The decoded length is not stored: the receiver supplies it
-from the image's width × height × element size, so a corrupt stream cannot
-ask for an arbitrary allocation.
+An encoded plane is a **zstd frame** (level 1) of the shuffled bytes. The
+decoded length is not taken from the stream: the receiver supplies it from
+the image's width × height × element size, and decodes into a buffer of
+exactly that length, so a corrupt stream cannot ask for an arbitrary
+allocation.
 
 Planes must be little-endian.
 
-These are the payloads of the viewcam protocol's `shuffle-lz4` codec
-(`viewcam-proto/PROTOCOL.md`). Its plain `lz4` codec is the same without the
-shuffle, and decodes here with an element size of 1, since shuffling single
-bytes changes nothing. The `raw` codec needs no decoder.
+These are the payloads of the viewcam protocol's `shuffle-zstd` codec
+(`viewcam-proto/PROTOCOL.md`). Its `raw` codec needs no decoder.
 
-### zstd
-
-The protocol's `shuffle-zstd` codec is the same shuffle followed by a zstd
-frame (level 1). Camera frames are mostly noise, which has no repeated bytes
-for LZ4 to find, but zstd's entropy coding still spends on each pixel only
-the bits its noise needs. Decoding is pure Rust
-([`ruzstd`](https://crates.io/crates/ruzstd)), so the WASM build needs no C
-toolchain; encoding uses the C libzstd, behind the `encode-zstd` feature,
-which only the Python extension enables.
+Decoding is pure Rust ([`ruzstd`](https://crates.io/crates/ruzstd)), so the
+WASM build needs no C toolchain; encoding uses the C libzstd, behind the
+`encode-zstd` feature, which only the Python extension enables.
 
 ### Noise-matched quantization
 
@@ -55,10 +48,8 @@ code the browser decodes with: one implementation, not two to keep in step.
 ```python
 import viewcam_codec
 
-payload = viewcam_codec.encode(frame)                  # shuffle-lz4
-payload = viewcam_codec.encode(satmap, shuffle=False)  # lz4
+payload = viewcam_codec.encode(frame)                  # shuffle-zstd
 image = viewcam_codec.decode(payload, "<u2", (h, w))   # needs numpy
-payload = viewcam_codec.encode(frame, zstd=True)       # shuffle-zstd
 
 # Round to a quarter of the noise; codes are the smallest unsigned type that fits.
 codes, offset = viewcam_codec.quantize(frame, bias, read_noise, noise_slope, 0.25)
@@ -71,10 +62,8 @@ from it. It releases the GIL while compressing, so several threads can
 encode at once. Wheels are `abi3`: one per platform covers Python 3.11 and
 later.
 
-On an Apple Silicon Mac, `shuffle-lz4` encodes a 1024×1024 `u16` camera-like
-frame in about 0.4 ms, against about 1.1 ms for numpy's shuffle followed by
-the C liblz4, with an identical compression ratio (1.9× on that frame; plain
-LZ4 managed 1.0×, which is why the shuffle is there).
+On an Apple Silicon Mac, quantizing and compressing a 1024×1024 `u16` frame
+takes about 7 ms.
 
 ## Web worker
 
@@ -90,7 +79,7 @@ const worker = new Worker(
 worker.onmessage = ({ data }) => {
   if (data.type === 'decoded') {
     const [frame, saturation] = data.planes;   // ArrayBuffers, transferred
-    viewcam.setData('cam', frame, data.meta.width, data.meta.height, 'u16');
+    viewcam.setData('cam', frame, data.meta.width, data.meta.height, 'f32');
     viewcam.setSaturation('cam', saturation, data.meta.width, data.meta.height, 'u8');
   } else {
     console.error(data.message);
@@ -101,53 +90,52 @@ worker.onmessage = ({ data }) => {
 worker.postMessage({
   id: seq,
   planes: [
-    { encoded: dataBytes, elementSize: 2, decodedLength: w * h * 2 },
+    // Quantized codes, one byte each, decoding to float32 values.
+    { encoded: dataBytes, elementSize: 1, decodedLength: w * h, quantized },
     { encoded: satBytes, elementSize: 1, decodedLength: w * h },
   ],
   meta: { width: w, height: h },
 }, [dataBytes, satBytes]);
 ```
 
-The worker decodes requests in arrival order and drops nothing. To stay
-current under load, post only the newest frame while one is being decoded.
+`quantized` is `{ codeOffset, bias, readNoise, noiseSlope, step }`, from the
+frame's header; a plane without it decodes to its bytes. A plane with
+`codec: 'raw'` is not decompressed. The worker decodes requests in arrival
+order and drops nothing. To stay current under load, post only the newest
+frame while one is being decoded.
 
 The module can also be used directly: `new Decoder().decode(encoded,
 elementSize, decodedLength)` returns a `Uint8Array` that owns its own buffer
-(not a view into WASM memory), so it can be transferred onwards, as does
-`decodeZstd` for zstd. A `Decoder` reuses one scratch buffer across calls.
-`dequantize(stored, elementSize, codeOffset, bias, readNoise, noiseSlope,
-step)` turns quantized codes into a `Float32Array` of values. In the worker,
-a plane with `codec: 'zstd'` and `quantized: { codeOffset, bias, readNoise,
-noiseSlope, step }` does both. A 1024×1024 frame of one-byte codes takes
-about 6 ms to decompress and 6 ms to dequantize.
+(not a view into WASM memory), so it can be transferred onwards. A `Decoder`
+reuses one scratch buffer across calls. `dequantize(stored, elementSize,
+codeOffset, bias, readNoise, noiseSlope, step)` turns quantized codes into a
+`Float32Array` of values. On an Apple Silicon Mac under Node, a 1024×1024
+frame of one-byte codes takes about 6 ms to decompress and 6 ms to
+dequantize.
 
 ## Building and testing
 
 ```bash
 npm run build          # -> pkg/ (wasm-pack, --target web)
-npm run test:wasm      # Node: decode the reference vectors, time a 1024x1024 frame
+npm run test:wasm      # Node: decode the reference vectors, check dequantize
 cargo test             # Rust: layout, round trips, corruption, reference vectors
 
 cd python              # the Python extension, in a virtualenv:
-pip install maturin numpy lz4 pytest
+pip install maturin numpy zstandard pytest
 maturin develop --release
 pytest tests
 ```
 
 The Python tests check the extension against an independent reference:
-numpy for the shuffle and the C liblz4 (through the `lz4` package) for
-compression, in both directions, which also proves the payloads are standard
-LZ4. `tests/vectors/` holds planes that reference encoded (`py_*`, decoded by
-the Rust and WASM tests) and one the Rust code encoded (`rs_*`, decoded by
-the reference). Regenerate with `VIEWCAM_REGEN_VECTORS=1` on either suite.
-
-On an Apple Silicon Mac under Node, a 1024×1024 `u16` frame decodes in about
-1.4 ms (~1.4 GiB/s). The compression ratio depends entirely on the data; the
-1.75× the smoke test prints is for synthetic gradient-plus-noise, not a real
-camera.
+numpy for the shuffle and the C libzstd (through the `zstandard` package)
+for compression, in both directions, which also proves the payloads are
+standard zstd frames. `tests/vectors/` holds planes that reference encoded
+(`py_*`, decoded by the Rust and WASM tests) and one the Rust code encoded
+(`rs_*`, decoded by the reference). Regenerate with `VIEWCAM_REGEN_VECTORS=1`
+on either suite.
 
 ## License
 
-MIT. Builds also contain `lz4_flex` and `wasm-bindgen` code under their own
+MIT. Builds also contain `ruzstd` and `wasm-bindgen` code under their own
 licenses; [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) reproduces
 them, and `licenses/generate.py` at the repository root keeps it current.

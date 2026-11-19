@@ -4,9 +4,9 @@
 
 use wasm_bindgen::prelude::*;
 
-use crate::{decode_into, decode_zstd_into, encode as encode_plane, Quantizer};
+use crate::{decode_into, Quantizer};
 
-/// Decodes byte-shuffled LZ4 planes. Holds one scratch buffer that grows to
+/// Decodes byte-shuffled zstd planes. Holds one scratch buffer that grows to
 /// the largest plane seen and is reused after that, so a worker decoding a
 /// stream of same-sized frames allocates only each frame's output.
 #[wasm_bindgen]
@@ -38,18 +38,11 @@ impl Decoder {
         decode_into(encoded, element_size, &mut self.scratch, &mut out)?;
         Ok(out)
     }
+}
 
-    /// As [`decode`](Self::decode), for a `shuffle-zstd` payload.
-    #[wasm_bindgen(js_name = decodeZstd)]
-    pub fn decode_zstd(
-        &mut self,
-        encoded: &[u8],
-        element_size: usize,
-        decoded_length: usize,
-    ) -> Result<Vec<u8>, JsError> {
-        let mut out = vec![0u8; decoded_length];
-        decode_zstd_into(encoded, element_size, &mut self.scratch, &mut out)?;
-        Ok(out)
+impl Default for Decoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -76,18 +69,4 @@ pub fn dequantize(
     let mut out = vec![0f32; stored.len() / element_size.max(1)];
     quantizer.dequantize_into(stored, element_size, code_offset as i64, &mut out)?;
     Ok(out)
-}
-
-impl Default for Decoder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Shuffle and LZ4-compress a plane. The server normally does this (in
-/// Python); it is here for tests and for a client that ever needs to send
-/// frames.
-#[wasm_bindgen]
-pub fn encode(plane: &[u8], element_size: usize) -> Result<Vec<u8>, JsError> {
-    Ok(encode_plane(plane, element_size)?)
 }

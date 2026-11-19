@@ -49,14 +49,27 @@ fn shuffle_round_trips_for_every_element_size() {
     }
 }
 
+/// What `encode` makes, built from the dev-dependency so that the tests
+/// needn't enable the `encode-zstd` feature.
+fn zstd_payload(plane: &[u8], element_size: usize) -> Vec<u8> {
+    zstd::bulk::compress(&shuffle(plane, element_size).unwrap(), ZSTD_LEVEL).unwrap()
+}
+
+#[cfg(feature = "encode-zstd")]
+#[test]
+fn encode_is_shuffle_then_zstd() {
+    let plane = camera_plane(64, 64);
+    assert_eq!(encode(&plane, 2).unwrap(), zstd_payload(&plane, 2));
+}
+
 #[test]
 fn codec_round_trips_and_compresses_camera_data() {
     let plane = camera_plane(256, 256);
-    let encoded = encode(&plane, 2).unwrap();
+    let encoded = zstd_payload(&plane, 2);
     assert_eq!(decode(&encoded, 2, plane.len()).unwrap(), plane);
 
-    // The point of shuffling: it should beat plain LZ4 on this data.
-    let plain = lz4_flex::block::compress(&plane).len();
+    // The point of shuffling: it should beat zstd alone on this data.
+    let plain = zstd::bulk::compress(&plane, ZSTD_LEVEL).unwrap().len();
     assert!(
         encoded.len() < plain,
         "shuffled {} bytes vs plain {plain}",
@@ -68,7 +81,7 @@ fn codec_round_trips_and_compresses_camera_data() {
 fn scratch_is_reused_across_frames() {
     let mut scratch = Vec::new();
     let plane = camera_plane(64, 64);
-    let encoded = encode(&plane, 2).unwrap();
+    let encoded = zstd_payload(&plane, 2);
     let mut out = vec![0; plane.len()];
     decode_into(&encoded, 2, &mut scratch, &mut out).unwrap();
     let capacity = scratch.capacity();
@@ -80,17 +93,17 @@ fn scratch_is_reused_across_frames() {
 #[test]
 fn wrong_lengths_and_corruption_are_errors() {
     let plane = camera_plane(16, 16);
-    let encoded = encode(&plane, 2).unwrap();
+    let encoded = zstd_payload(&plane, 2);
 
-    // Expecting more than the block holds.
+    // Expecting more than the frame holds.
     assert!(matches!(
         decode(&encoded, 2, plane.len() + 2),
         Err(CodecError::ShortOutput { .. })
     ));
-    // Expecting less: the block overflows the output.
+    // Expecting less: the frame overflows the output.
     assert!(matches!(
         decode(&encoded, 2, plane.len() - 2),
-        Err(CodecError::Corrupt(_))
+        Err(CodecError::Zstd(_))
     ));
     // Not a whole number of elements.
     assert!(matches!(
@@ -111,20 +124,18 @@ fn vectors_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors")
 }
 
-/// Planes the independent reference (numpy + the C liblz4 and libzstd, in
-/// `python/tests/`) encoded decode to the raw planes stored beside them.
-/// `<name>.e<size>.lz4` and `.zst` hold the encoded plane (element size 1 is
-/// plain lz4), `<name>.raw` the expected bytes.
+/// Planes the independent reference (numpy + the C libzstd, through the
+/// `zstandard` package, in `python/tests/`) encoded decode to the raw planes
+/// stored beside them. `<name>.e<size>.zst` holds the encoded plane,
+/// `<name>.raw` the expected bytes.
 #[test]
 fn decodes_python_encoded_vectors() {
     let mut seen = 0;
     for entry in std::fs::read_dir(vectors_dir()).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_str().unwrap().to_owned();
-        let (stem, zstd) = match (name.strip_suffix(".lz4"), name.strip_suffix(".zst")) {
-            (Some(stem), _) => (stem, false),
-            (_, Some(stem)) => (stem, true),
-            _ => continue,
+        let Some(stem) = name.strip_suffix(".zst") else {
+            continue;
         };
         if !stem.starts_with("py_") {
             continue;
@@ -133,14 +144,7 @@ fn decodes_python_encoded_vectors() {
         let size: usize = size.parse().unwrap();
         let raw = std::fs::read(vectors_dir().join(format!("{base}.raw"))).unwrap();
         let encoded = std::fs::read(&path).unwrap();
-        let decoded = if zstd {
-            let mut out = vec![0; raw.len()];
-            decode_zstd_into(&encoded, size, &mut Vec::new(), &mut out).unwrap();
-            out
-        } else {
-            decode(&encoded, size, raw.len()).unwrap()
-        };
-        assert_eq!(decoded, raw, "{name}");
+        assert_eq!(decode(&encoded, size, raw.len()).unwrap(), raw, "{name}");
         seen += 1;
     }
     assert!(
@@ -150,62 +154,21 @@ fn decodes_python_encoded_vectors() {
     );
 }
 
-/// Writes planes encoded here for the Python test to decode. Run with
+/// Writes a plane encoded here for the Python test to decode. Run with
 /// `VIEWCAM_REGEN_VECTORS=1`.
 #[test]
 fn rust_encoded_vectors_are_current() {
     let plane = camera_plane(32, 24);
-    let encoded = encode(&plane, 2).unwrap();
+    let encoded = zstd_payload(&plane, 2);
     let raw_path = vectors_dir().join("rs_camera_u16.raw");
-    let lz4_path = vectors_dir().join("rs_camera_u16.e2.lz4");
+    let zst_path = vectors_dir().join("rs_camera_u16.e2.zst");
     if std::env::var_os("VIEWCAM_REGEN_VECTORS").is_some() {
         std::fs::create_dir_all(vectors_dir()).unwrap();
         std::fs::write(&raw_path, &plane).unwrap();
-        std::fs::write(&lz4_path, &encoded).unwrap();
+        std::fs::write(&zst_path, &encoded).unwrap();
     } else {
         assert_eq!(std::fs::read(&raw_path).unwrap(), plane);
-        assert_eq!(std::fs::read(&lz4_path).unwrap(), encoded);
-    }
-}
-
-/// What `encode_zstd` makes, built from the dev-dependency so that the
-/// tests needn't enable the `encode-zstd` feature.
-fn zstd_payload(plane: &[u8], element_size: usize) -> Vec<u8> {
-    zstd::bulk::compress(&shuffle(plane, element_size).unwrap(), ZSTD_LEVEL).unwrap()
-}
-
-#[cfg(feature = "encode-zstd")]
-#[test]
-fn encode_zstd_is_shuffle_then_zstd() {
-    let plane = camera_plane(64, 64);
-    assert_eq!(encode_zstd(&plane, 2).unwrap(), zstd_payload(&plane, 2));
-}
-
-#[test]
-fn zstd_round_trips_and_beats_lz4_on_noisy_frames() {
-    let plane = camera_plane(256, 256);
-    let encoded = zstd_payload(&plane, 2);
-    let mut out = vec![0; plane.len()];
-    decode_zstd_into(&encoded, 2, &mut Vec::new(), &mut out).unwrap();
-    assert_eq!(out, plane);
-    // The low bytes are noise: no repeats for LZ4, but few bits for zstd.
-    assert!(encoded.len() < encode(&plane, 2).unwrap().len());
-}
-
-#[test]
-fn zstd_lengths_and_corruption_are_errors() {
-    let plane = camera_plane(16, 16);
-    let encoded = zstd_payload(&plane, 2);
-    let mut scratch = Vec::new();
-    // Expecting more than the frame holds, or less: refused either way.
-    assert!(matches!(
-        decode_zstd_into(&encoded, 2, &mut scratch, &mut vec![0; plane.len() + 2]),
-        Err(CodecError::ShortOutput { .. })
-    ));
-    assert!(decode_zstd_into(&encoded, 2, &mut scratch, &mut vec![0; plane.len() - 2]).is_err());
-    for cut in 0..encoded.len() {
-        let mut out = vec![0; plane.len()];
-        assert!(decode_zstd_into(&encoded[..cut], 2, &mut scratch, &mut out).is_err());
+        assert_eq!(std::fs::read(&zst_path).unwrap(), encoded);
     }
 }
 

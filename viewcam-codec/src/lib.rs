@@ -1,40 +1,32 @@
-//! Byte-shuffle + LZ4: lossless, cheap-to-decode compression for camera frames.
+//! Byte-shuffle + zstd, and noise-matched quantization: compression for
+//! camera frames that decodes cheaply in a browser.
 //!
 //! Raw detector pixels compress poorly: the low byte of each `u16` is mostly
 //! noise, and interleaved with the slowly varying high byte it hides what
-//! little structure there is from LZ4. Shuffling first, all the elements'
-//! byte 0, then all their byte 1, and so on (Blosc's "shuffle" filter), puts
-//! the predictable bytes next to each other, where LZ4 finds them.
+//! little structure there is. Shuffling first, all the elements' byte 0,
+//! then all their byte 1, and so on (Blosc's "shuffle" filter), puts the
+//! predictable bytes next to each other. zstd then compresses the result,
+//! its entropy coding spending on the noise only the bits it needs.
 //!
 //! ## Format
 //!
-//! An encoded plane is a raw LZ4 *block* (no frame, no size prefix) of the
-//! shuffled bytes. The decoded length is not stored: the receiver already
-//! knows it from the image's width, height and dtype, and taking it from the
-//! stream would let a corrupt length ask for an arbitrary allocation.
+//! An encoded plane is a zstd frame (level 1) of the shuffled bytes: the
+//! payload of the viewcam protocol's `shuffle-zstd` codec. Decoding is into
+//! a buffer of the length the receiver expects from the image's width,
+//! height and dtype, never a length the stream gives, so a corrupt stream
+//! cannot ask for an arbitrary allocation.
 //!
-//! Server side, with numpy and the `lz4` package:
+//! Server side, with numpy and the `zstandard` package:
 //!
 //! ```python
 //! shuffled = plane.view(np.uint8).reshape(-1, plane.itemsize).T.tobytes()
-//! encoded = lz4.block.compress(shuffled, store_size=False)
+//! encoded = zstandard.ZstdCompressor(level=1).compress(shuffled)
 //! ```
 //!
 //! The same plane decodes with [`decode`] here, or with the WASM
-//! [`Decoder`](wasm::Decoder) in a browser worker.
-//!
-//! These are the payloads of the viewcam protocol's `shuffle-lz4` codec. Its
-//! plain `lz4` codec (no shuffle) decodes with the same functions and an
-//! element size of 1, since shuffling single bytes changes nothing.
-//!
-//! ## zstd
-//!
-//! The protocol's `shuffle-zstd` codec is the same shuffle followed by a
-//! zstd frame instead of an LZ4 block. Camera frames are mostly noise, which
-//! has no repeats for LZ4 to find; zstd's entropy coding still makes each
-//! pixel cost only the bits its noise needs. Decoding is pure Rust
-//! ([`ruzstd`]), so it builds for wasm32; encoding uses the C library, behind
-//! the `encode-zstd` feature, since only servers encode.
+//! [`Decoder`](wasm::Decoder) in a browser worker. Decoding is pure Rust
+//! ([`ruzstd`]), so it builds for wasm32; encoding ([`encode`]) uses the C
+//! library, behind the `encode-zstd` feature, since only servers encode.
 //!
 //! ## Noise-matched quantization
 //!
@@ -56,9 +48,10 @@ pub enum CodecError {
     ZeroElementSize,
     /// A plane whose length is not a whole number of elements.
     PartialElement { len: usize, element_size: usize },
-    /// The LZ4 block is corrupt, or decodes to more than the expected length.
-    Corrupt(String),
-    /// The LZ4 block decoded to fewer bytes than expected.
+    /// zstd failed: a corrupt frame, or one that decodes to more than the
+    /// expected length.
+    Zstd(String),
+    /// Fewer bytes than expected: from a zstd frame, or quantized codes.
     ShortOutput { expected: usize, got: usize },
     /// Quantizer parameters that don't describe a noise model: a read noise
     /// or step that isn't positive, a negative slope, or anything not finite.
@@ -79,12 +72,9 @@ impl fmt::Display for CodecError {
                 f,
                 "{len} bytes is not a whole number of {element_size}-byte elements"
             ),
-            CodecError::Corrupt(why) => write!(f, "corrupt LZ4 block: {why}"),
+            CodecError::Zstd(why) => write!(f, "zstd: {why}"),
             CodecError::ShortOutput { expected, got } => {
-                write!(
-                    f,
-                    "LZ4 block decoded to {got} of the expected {expected} bytes"
-                )
+                write!(f, "{got} bytes where {expected} were expected")
             }
             CodecError::BadQuantizer => write!(f, "quantizer parameters are not a noise model"),
             CodecError::NotFinite => write!(f, "can't quantize a value that isn't finite"),
@@ -178,15 +168,16 @@ pub fn shuffle(input: &[u8], element_size: usize) -> Result<Vec<u8>, CodecError>
     Ok(shuffled)
 }
 
-/// LZ4-compress bytes into a raw block, no size prefix. On its own this is
-/// the protocol's plain `lz4` codec; [`encode`] shuffles first.
-pub fn compress_block(data: &[u8]) -> Vec<u8> {
-    lz4_flex::block::compress(data)
-}
+/// The zstd level servers use: the fastest, which on noisy frames compresses
+/// nearly as well as any.
+pub const ZSTD_LEVEL: i32 = 1;
 
-/// Shuffle and LZ4-compress a plane of `element_size`-byte elements.
+/// Shuffle and zstd-compress a plane of `element_size`-byte elements: the
+/// protocol's `shuffle-zstd` payload.
+#[cfg(feature = "encode-zstd")]
 pub fn encode(plane: &[u8], element_size: usize) -> Result<Vec<u8>, CodecError> {
-    Ok(compress_block(&shuffle(plane, element_size)?))
+    let shuffled = shuffle(plane, element_size)?;
+    zstd::bulk::compress(&shuffled, ZSTD_LEVEL).map_err(|e| CodecError::Zstd(e.to_string()))
 }
 
 /// Decompress and unshuffle a plane that should decode to `decoded_len` bytes.
@@ -212,50 +203,13 @@ pub fn decode_into(
 ) -> Result<(), CodecError> {
     check_layout(out.len(), element_size)?;
     // Resizing within the existing capacity costs nothing once the scratch
-    // buffer has grown to the frame size; LZ4 overwrites every byte it
-    // reports, and anything short of the full length is rejected below.
+    // buffer has grown to the frame size. Decoding into a buffer of exactly
+    // the expected length: a frame that would write more is refused, not
+    // allowed to grow it, and one that writes less is rejected below.
     scratch.resize(out.len(), 0);
-    let got = lz4_flex::block::decompress_into(encoded, scratch)
-        .map_err(|e| CodecError::Corrupt(e.to_string()))?;
-    if got != out.len() {
-        return Err(CodecError::ShortOutput {
-            expected: out.len(),
-            got,
-        });
-    }
-    unshuffle_into(scratch, out, element_size)
-}
-
-// =============================================================================
-// zstd
-// =============================================================================
-
-/// The zstd level servers use: the fastest, which on noisy frames compresses
-/// nearly as well as any.
-pub const ZSTD_LEVEL: i32 = 1;
-
-/// Shuffle and zstd-compress a plane: the protocol's `shuffle-zstd` payload.
-#[cfg(feature = "encode-zstd")]
-pub fn encode_zstd(plane: &[u8], element_size: usize) -> Result<Vec<u8>, CodecError> {
-    let shuffled = shuffle(plane, element_size)?;
-    zstd::bulk::compress(&shuffled, ZSTD_LEVEL).map_err(|e| CodecError::Corrupt(e.to_string()))
-}
-
-/// Decompress and unshuffle a `shuffle-zstd` plane into `out`, whose length
-/// is the expected decoded length, using `scratch` as [`decode_into`] does.
-pub fn decode_zstd_into(
-    encoded: &[u8],
-    element_size: usize,
-    scratch: &mut Vec<u8>,
-    out: &mut [u8],
-) -> Result<(), CodecError> {
-    check_layout(out.len(), element_size)?;
-    scratch.resize(out.len(), 0);
-    // Decoding into a buffer of exactly the expected length: a frame that
-    // would write more is refused, not allowed to grow it.
     let got = ruzstd::decoding::FrameDecoder::new()
         .decode_all(encoded, scratch)
-        .map_err(|e| CodecError::Corrupt(e.to_string()))?;
+        .map_err(|e| CodecError::Zstd(e.to_string()))?;
     if got != out.len() {
         return Err(CodecError::ShortOutput {
             expected: out.len(),

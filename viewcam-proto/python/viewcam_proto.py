@@ -8,7 +8,7 @@ Every feed (data, dark, saturation) is its own WebSocket carrying the same
 FRAME messages, one per WebSocket message. A server sends
 ``encode_frame(...)`` as a binary message whenever its ``SendWindow`` allows,
 and passes each binary message from the client through ``decode_ack``.
-Payloads are passed in already encoded; for the LZ4 and zstd codecs, the
+Payloads are passed in already encoded; for the ``shuffle-zstd`` codec, the
 ``viewcam_codec`` extension (``viewcam-codec/python``) produces them, and for
 a quantized frame its ``quantize`` makes the codes, whose model goes in
 ``Quantization``.
@@ -27,10 +27,8 @@ KIND_FRAME = 1
 KIND_ACK = 0x81
 
 CODEC_RAW = 0
-CODEC_LZ4 = 1
-CODEC_SHUFFLE_LZ4 = 2
-CODEC_SHUFFLE_ZSTD = 3
-CODECS = (CODEC_RAW, CODEC_LZ4, CODEC_SHUFFLE_LZ4, CODEC_SHUFFLE_ZSTD)
+CODEC_SHUFFLE_ZSTD = 1
+CODECS = (CODEC_RAW, CODEC_SHUFFLE_ZSTD)
 
 # dtype codes quantized codes may have: u8, u16, u32
 CODE_DTYPES = (1, 3, 5)
@@ -80,10 +78,8 @@ def max_encoded_len(codec: int, decoded: int) -> int:
     """The largest payload ``codec`` can produce for a ``decoded``-byte image."""
     if codec == CODEC_RAW:
         return decoded
-    if codec == CODEC_SHUFFLE_ZSTD:  # ZSTD_COMPRESSBOUND
-        small = 128 << 10
-        return decoded + (decoded >> 8) + ((small - decoded) >> 11 if decoded < small else 0)
-    return decoded + decoded // 255 + 16  # LZ4's worst case
+    small = 128 << 10  # zstd's worst case, ZSTD_COMPRESSBOUND
+    return decoded + (decoded >> 8) + ((small - decoded) >> 11 if decoded < small else 0)
 
 
 class Quantization(NamedTuple):

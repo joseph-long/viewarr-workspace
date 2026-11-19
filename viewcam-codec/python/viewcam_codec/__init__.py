@@ -1,14 +1,12 @@
-"""LZ4 and byte-shuffle + LZ4 codecs for viewcam frames.
+"""Byte-shuffle + zstd for viewcam frames, and noise-matched quantization.
 
 The same Rust code (the ``viewcam-codec`` crate) that browsers run as WASM to
 decode frames, built as a Python extension so servers encode with it.
 
-``encode`` produces the payload of the viewcam protocol's ``shuffle-lz4``
-codec, or with ``shuffle=False`` its ``lz4`` codec: a raw LZ4 block (no size
-prefix) of the image, its bytes first shuffled Blosc-style, all elements'
-byte 0, then all their byte 1, and so on. The ``raw`` codec needs no
-encoding. With ``zstd=True`` it produces the ``shuffle-zstd`` codec's
-payload instead: the shuffled bytes as a zstd frame.
+``encode`` produces the payload of the viewcam protocol's ``shuffle-zstd``
+codec: a zstd frame of the image, its bytes first shuffled Blosc-style, all
+elements' byte 0, then all their byte 1, and so on. The ``raw`` codec needs
+no encoding.
 
 ``quantize`` rounds an image to a fraction of its noise, given a noise model
 (read noise, and how fast noise variance grows above a bias), for the
@@ -26,7 +24,7 @@ from ._native import quantize as _quantize
 __all__ = ["encode", "decode", "quantize", "dequantize"]
 
 
-def encode(plane, shuffle: bool = True, zstd: bool = False) -> bytes:
+def encode(plane) -> bytes:
     """Compress an image: a C-contiguous little-endian numpy array, or any
     such buffer. Big-endian arrays must be byteswapped first, since
     little-endian is what clients decode to.
@@ -34,7 +32,7 @@ def encode(plane, shuffle: bool = True, zstd: bool = False) -> bytes:
     Releases the GIL while compressing.
     """
     try:
-        return _encode(plane, shuffle, zstd)
+        return _encode(plane)
     except BufferError:
         if not hasattr(plane, "__array__"):
             raise
@@ -42,18 +40,17 @@ def encode(plane, shuffle: bool = True, zstd: bool = False) -> bytes:
         # copy of it instead.
         import numpy as np
 
-        return _encode(np.ascontiguousarray(plane), shuffle, zstd)
+        return _encode(np.ascontiguousarray(plane))
 
 
-def decode(encoded: bytes, dtype, shape, shuffle: bool = True, zstd: bool = False):
+def decode(encoded: bytes, dtype, shape):
     """Inverse of ``encode``, given the image's dtype and shape. Returns a
     read-only numpy array. Raises ``ValueError`` on corrupt input."""
     import numpy as np
 
     dtype = np.dtype(dtype)
     n = int(np.prod(shape))
-    element_size = dtype.itemsize if shuffle else 1
-    data = _decode(encoded, element_size, n * dtype.itemsize, zstd)
+    data = _decode(encoded, dtype.itemsize, n * dtype.itemsize)
     return np.frombuffer(data, dtype).reshape(shape)
 
 

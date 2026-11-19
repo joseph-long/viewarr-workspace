@@ -1,7 +1,7 @@
 {
   "name": "viewcam-codec",
   "version": "0.1.0",
-  "description": "Byte-shuffle + LZ4 decoder for viewcam frames, as a WASM module for web workers",
+  "description": "Byte-shuffle + zstd decoder and dequantizer for viewcam frames, as a WASM module for web workers",
   "main": "pkg/viewcam_codec.js",
   "module": "pkg/viewcam_codec.js",
   "types": "pkg/viewcam_codec.d.ts",
@@ -21,7 +21,7 @@
   },
   "keywords": [
     "wasm",
-    "lz4",
+    "zstd",
     "shuffle",
     "compression",
     "web-worker",

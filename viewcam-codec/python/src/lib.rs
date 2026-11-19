@@ -16,21 +16,13 @@ fn to_py(err: CodecError) -> PyErr {
 }
 
 /// Compress `plane`, any C-contiguous little-endian buffer (a numpy array,
-/// `bytes`, ...), into the payload of the protocol's `shuffle-lz4` codec, or
-/// with `shuffle=False` its plain `lz4` codec, or with `zstd=True` its
-/// `shuffle-zstd` codec. The element size comes from the buffer's own item
-/// size.
+/// `bytes`, ...), into the payload of the protocol's `shuffle-zstd` codec.
+/// The element size comes from the buffer's own item size.
 ///
 /// The GIL is released while compressing, the expensive part, so several
 /// threads can encode at once.
 #[pyfunction]
-#[pyo3(signature = (plane, shuffle = true, zstd = false))]
-fn encode<'py>(
-    py: Python<'py>,
-    plane: &Bound<'py, PyAny>,
-    shuffle: bool,
-    zstd: bool,
-) -> PyResult<Bound<'py, PyBytes>> {
+fn encode<'py>(py: Python<'py>, plane: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBytes>> {
     let buffer = PyUntypedBuffer::get(plane)?;
     if !buffer.is_c_contiguous() {
         return Err(PyBufferError::new_err(
@@ -50,48 +42,30 @@ fn encode<'py>(
     // only read while the GIL is held, as any C extension reads one.
     let bytes =
         unsafe { std::slice::from_raw_parts(buffer.buf_ptr() as *const u8, buffer.len_bytes()) };
-    // Copy (shuffling, if asked) under the GIL: one fast pass that leaves the
-    // compression with data of its own, so it can run without the GIL and
-    // without the caller's buffer.
-    let data = if shuffle {
-        viewcam_codec::shuffle(bytes, buffer.item_size()).map_err(to_py)?
-    } else {
-        bytes.to_vec()
-    };
+    // Shuffle under the GIL: one fast pass that leaves the compression with
+    // data of its own, so it can run without the GIL and without the
+    // caller's buffer. Shuffled, it compresses as single bytes.
+    let data = viewcam_codec::shuffle(bytes, buffer.item_size()).map_err(to_py)?;
     drop(buffer);
-    let encoded = if zstd {
-        // Already shuffled (or not), so zstd sees it as single bytes.
-        py.detach(|| viewcam_codec::encode_zstd(&data, 1))
-            .map_err(to_py)?
-    } else {
-        py.detach(|| viewcam_codec::compress_block(&data))
-    };
+    let encoded = py
+        .detach(|| viewcam_codec::encode(&data, 1))
+        .map_err(to_py)?;
     Ok(PyBytes::new(py, &encoded))
 }
 
-/// Decode a `shuffle-lz4` payload (or with `element_size=1`, a plain `lz4`
-/// one, or with `zstd=True` a `shuffle-zstd` one) to `decoded_len` bytes.
-/// Raises `ValueError` on corrupt input or a length that does not match.
+/// Decode a `shuffle-zstd` payload of `element_size`-byte elements to
+/// `decoded_len` bytes. Raises `ValueError` on corrupt input or a length
+/// that does not match.
 #[pyfunction]
-#[pyo3(signature = (encoded, element_size, decoded_len, zstd = false))]
 fn decode<'py>(
     py: Python<'py>,
     encoded: &[u8],
     element_size: usize,
     decoded_len: usize,
-    zstd: bool,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let encoded = encoded.to_vec();
     let decoded = py
-        .detach(|| {
-            if zstd {
-                let mut out = vec![0u8; decoded_len];
-                viewcam_codec::decode_zstd_into(&encoded, element_size, &mut Vec::new(), &mut out)
-                    .map(|()| out)
-            } else {
-                viewcam_codec::decode(&encoded, element_size, decoded_len)
-            }
-        })
+        .detach(|| viewcam_codec::decode(&encoded, element_size, decoded_len))
         .map_err(to_py)?;
     Ok(PyBytes::new(py, &decoded))
 }

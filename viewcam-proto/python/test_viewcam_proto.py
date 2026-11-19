@@ -25,14 +25,8 @@ class TestVectors(unittest.TestCase):
     def test_frame_u16_raw(self):
         self.check("frame_u16_raw", vp.encode_frame(0x0102030405060708, 3, 2, 3, ramp(12)))
 
-    def test_frame_f32_lz4(self):
-        self.check("frame_f32_lz4", vp.encode_frame(7, 2, 2, 9, ramp(9), vp.CODEC_LZ4))
-
-    def test_frame_u16_shuffle_lz4(self):
-        self.check(
-            "frame_u16_shuffle_lz4",
-            vp.encode_frame(8, 3, 2, 3, ramp(5), vp.CODEC_SHUFFLE_LZ4),
-        )
+    def test_frame_f32_zstd(self):
+        self.check("frame_f32_zstd", vp.encode_frame(7, 2, 2, 9, ramp(9), vp.CODEC_SHUFFLE_ZSTD))
 
     def test_frame_empty(self):
         self.check("frame_empty", vp.encode_empty_frame(9, 10))
@@ -55,19 +49,13 @@ class TestValidation(unittest.TestCase):
         with self.assertRaises(vp.ProtocolError):
             vp.encode_frame(0, 2, 2, 3, b"\0" * 7)
 
-    def test_lz4_payload_bounds(self):
-        # 4 x 4 u16 = 32 bytes decoded; LZ4 allows 1 to 32 + 0 + 16 bytes.
-        vp.encode_frame(0, 4, 4, 3, b"\0", vp.CODEC_LZ4)
-        vp.encode_frame(0, 4, 4, 3, b"\0" * 48, vp.CODEC_SHUFFLE_LZ4)
-        for bad in (b"", b"\0" * 49):
-            with self.assertRaises(vp.ProtocolError):
-                vp.encode_frame(0, 4, 4, 3, bad, vp.CODEC_LZ4)
-
     def test_zstd_payload_bounds(self):
-        # 4 x 4 u16 = 32 bytes decoded; zstd's bound is 32 + 0 + 63.
+        # 4 x 4 u16 = 32 bytes decoded; zstd allows 1 to 32 + 0 + 63 bytes.
+        vp.encode_frame(0, 4, 4, 3, b"\0", vp.CODEC_SHUFFLE_ZSTD)
         vp.encode_frame(0, 4, 4, 3, b"\0" * 95, vp.CODEC_SHUFFLE_ZSTD)
-        with self.assertRaises(vp.ProtocolError):
-            vp.encode_frame(0, 4, 4, 3, b"\0" * 96, vp.CODEC_SHUFFLE_ZSTD)
+        for bad in (b"", b"\0" * 96):
+            with self.assertRaises(vp.ProtocolError):
+                vp.encode_frame(0, 4, 4, 3, bad, vp.CODEC_SHUFFLE_ZSTD)
 
     def test_quantized_frames_need_unsigned_codes_and_a_model(self):
         q = vp.Quantization(0, 432.0, 14.0, 8.0, 0.25)
@@ -84,7 +72,7 @@ class TestValidation(unittest.TestCase):
 
     def test_unknown_codes(self):
         with self.assertRaises(vp.ProtocolError):
-            vp.encode_frame(0, 1, 1, 3, b"\0\0", codec=4)
+            vp.encode_frame(0, 1, 1, 3, b"\0\0", codec=2)
         with self.assertRaises(vp.ProtocolError):
             vp.encode_frame(0, 1, 1, 11, b"\0")
 

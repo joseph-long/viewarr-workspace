@@ -31,9 +31,7 @@ export const KIND_FRAME = 1;
 export const KIND_ACK = 0x81;
 
 export const CODEC_RAW = 0;
-export const CODEC_LZ4 = 1;
-export const CODEC_SHUFFLE_LZ4 = 2;
-export const CODEC_SHUFFLE_ZSTD = 3;
+export const CODEC_SHUFFLE_ZSTD = 1;
 
 /** dtype codes quantized codes may have: u8, u16, u32 */
 export const CODE_DTYPES = [1, 3, 5];
@@ -71,11 +69,8 @@ export class ProtocolError extends Error {
 /** The largest payload `codec` can produce for a `decoded`-byte image. */
 export function maxEncodedLen(codec, decoded) {
   if (codec === CODEC_RAW) return decoded;
-  if (codec === CODEC_SHUFFLE_ZSTD) { // ZSTD_COMPRESSBOUND
-    const small = 128 * 1024;
-    return decoded + Math.floor(decoded / 256) + (decoded < small ? Math.floor((small - decoded) / 2048) : 0);
-  }
-  return decoded + Math.floor(decoded / 255) + 16; // LZ4's worst case
+  const small = 128 * 1024; // zstd's worst case, ZSTD_COMPRESSBOUND
+  return decoded + Math.floor(decoded / 256) + (decoded < small ? Math.floor((small - decoded) / 2048) : 0);
 }
 
 /** A quantized frame's value, in units of its noise. See PROTOCOL.md, "Quantization". */
@@ -147,7 +142,7 @@ export function decodeFrame(message, maxPixels = DEFAULT_MAX_PIXELS) {
   const codec = view.getUint8(25);
   const encodedLen = view.getUint32(28, true);
   if (!(dtypeCode in DTYPES)) throw new ProtocolError(`unknown dtype code ${dtypeCode}`);
-  if (![CODEC_RAW, CODEC_LZ4, CODEC_SHUFFLE_LZ4, CODEC_SHUFFLE_ZSTD].includes(codec)) {
+  if (codec !== CODEC_RAW && codec !== CODEC_SHUFFLE_ZSTD) {
     throw new ProtocolError(`unknown codec code ${codec}`);
   }
   const pixels = width * height;
@@ -253,7 +248,7 @@ export function workerDecoder(worker) {
  * falling behind.
  *
  * Options:
- *  - `decode({ encoded: ArrayBuffer, codec: 'raw' | 'lz4' | 'zstd',
+ *  - `decode({ encoded: ArrayBuffer, codec: 'raw' | 'zstd',
  *    elementSize, decodedLength, quantized? }) -> Promise<ArrayBuffer>` for
  *    the compressed codecs (shuffled when elementSize > 1) and quantized
  *    frames, whose codes it turns into float32 values (see
@@ -414,8 +409,8 @@ export class ViewcamFeed {
         if (!this.decode) throw new Error(`no decoder for codec ${codec}`);
         pixels = await this.decode({
           encoded,
-          codec: { [CODEC_RAW]: 'raw', [CODEC_SHUFFLE_ZSTD]: 'zstd' }[codec] ?? 'lz4',
-          elementSize: codec === CODEC_LZ4 ? 1 : elementSize,
+          codec: codec === CODEC_RAW ? 'raw' : 'zstd',
+          elementSize,
           decodedLength: decodedLen,
           quantized: quantization ?? undefined,
         });

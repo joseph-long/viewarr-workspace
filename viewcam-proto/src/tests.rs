@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use super::*;
 
-/// Every codec, plus an empty frame and an ack. Payloads are fixed bytes,
-/// not real LZ4 output, since this crate only frames them; that keeps the
+/// Every codec, plus an empty frame, a quantized frame and an ack. Payloads
+/// are fixed bytes, not real zstd output, since this crate only frames them; that keeps the
 /// Python reference able to reproduce them exactly. These are written to
 /// `tests/vectors/` and `python/test_viewcam_proto.py` checks the same files.
 fn vectors() -> Vec<(&'static str, Vec<u8>)> {
@@ -26,12 +26,8 @@ fn vectors() -> Vec<(&'static str, Vec<u8>)> {
             ),
         ),
         (
-            "frame_f32_lz4",
-            frame(7, 2, 2, DType::F32, Codec::Lz4, ramp(9)),
-        ),
-        (
-            "frame_u16_shuffle_lz4",
-            frame(8, 3, 2, DType::U16, Codec::ShuffleLz4, ramp(5)),
+            "frame_f32_zstd",
+            frame(7, 2, 2, DType::F32, Codec::ShuffleZstd, ramp(9)),
         ),
         ("frame_empty", Frame::empty(9, DType::F64).encode()),
         (
@@ -109,15 +105,15 @@ fn header_layout_is_as_specified() {
     assert_eq!(&frame[28..32], &12u32.to_le_bytes());
     assert_eq!(frame.len(), FRAME_HEADER_LEN + 12);
 
-    let shuffled = &vectors()[2].1;
-    assert_eq!(shuffled[25], 2);
-    assert_eq!(&shuffled[28..32], &5u32.to_le_bytes());
+    let compressed = &vectors()[1].1;
+    assert_eq!((compressed[24], compressed[25]), (9, 1)); // f32, shuffle-zstd
+    assert_eq!(&compressed[28..32], &9u32.to_le_bytes());
     // Exact: no quantization, and no parameters.
-    assert_eq!(shuffled[26], 0);
-    assert_eq!(&shuffled[32..72], &[0; 40]);
+    assert_eq!(compressed[26], 0);
+    assert_eq!(&compressed[32..72], &[0; 40]);
 
-    let quantized = &vectors()[4].1;
-    assert_eq!((quantized[24], quantized[25], quantized[26]), (1, 3, 1)); // u8, shuffle-zstd
+    let quantized = &vectors()[3].1;
+    assert_eq!((quantized[24], quantized[25], quantized[26]), (1, 1, 1)); // u8, shuffle-zstd
     assert_eq!(&quantized[32..40], &(-3i64).to_le_bytes());
     assert_eq!(&quantized[40..48], &432.0f64.to_le_bytes());
     assert_eq!(&quantized[48..56], &14.25f64.to_le_bytes());
@@ -224,8 +220,8 @@ fn empty_frames_mean_no_image() {
     assert!(frame.header.is_empty());
     assert!(frame.payload.is_empty());
     // An empty image cannot carry a payload, whatever the codec.
-    assert!(Frame::new(0, 0, 5, DType::U8, Codec::Lz4, vec![1]).is_err());
-    assert!(Frame::new(0, 0, 0, DType::U8, Codec::Lz4, vec![]).is_ok());
+    assert!(Frame::new(0, 0, 5, DType::U8, Codec::ShuffleZstd, vec![1]).is_err());
+    assert!(Frame::new(0, 0, 0, DType::U8, Codec::ShuffleZstd, vec![]).is_ok());
 }
 
 #[test]
@@ -240,18 +236,12 @@ fn encoded_lengths_are_checked_per_codec() {
     assert!(!bad(Codec::Raw, 32));
     assert!(bad(Codec::Raw, 31));
     assert!(bad(Codec::Raw, 33));
-    // LZ4 may be anything from one byte up to its worst case, 32 + 0 + 16,
-    // and zstd up to its own, 32 + 0 + (128 KiB - 32) / 2048.
-    for (codec, most) in [
-        (Codec::Lz4, 48),
-        (Codec::ShuffleLz4, 48),
-        (Codec::ShuffleZstd, 95),
-    ] {
-        assert!(bad(codec, 0));
-        assert!(!bad(codec, 1));
-        assert!(!bad(codec, most));
-        assert!(bad(codec, most + 1));
-    }
+    // zstd may be anything from one byte up to its worst case,
+    // 32 + 0 + (128 KiB - 32) / 2048.
+    assert!(bad(Codec::ShuffleZstd, 0));
+    assert!(!bad(Codec::ShuffleZstd, 1));
+    assert!(!bad(Codec::ShuffleZstd, 95));
+    assert!(bad(Codec::ShuffleZstd, 96));
 }
 
 #[test]
@@ -280,7 +270,7 @@ fn malformed_messages_are_rejected() {
     assert_eq!(decode(4, 2), Err(ProtoError::UnsupportedVersion(2)));
     assert_eq!(decode(5, 9), Err(ProtoError::UnknownKind(9)));
     assert_eq!(decode(24, 11), Err(ProtoError::UnknownDtype(11)));
-    assert_eq!(decode(25, 4), Err(ProtoError::UnknownCodec(4)));
+    assert_eq!(decode(25, 2), Err(ProtoError::UnknownCodec(2)));
     // A raw frame whose length field disagrees with its dimensions.
     assert!(matches!(
         decode(28, 13),
@@ -302,7 +292,7 @@ fn oversized_images_are_refused_before_allocating() {
         width: 100_000,
         height: 100_000,
         dtype: DType::U8,
-        codec: Codec::Lz4,
+        codec: Codec::ShuffleZstd,
         encoded_len: 1,
         quantization: None,
     }

@@ -110,11 +110,10 @@ enum ZoomAction {
     ZoomOut,
     Reset,
     ResetRotation,
-    RotateBy(f32),           // Rotate by delta degrees
-    SetRotation(f32),        // Rotate to an absolute angle (any value; wrapped)
-    TogglePivotMarker,       // Toggle pivot marker visibility
-    ResetPivot,              // Reset pivot to image center
-    CenterOnPoint(f32, f32), // Center view on image point (x, y)
+    RotateBy(f32),     // Rotate by delta degrees
+    SetRotation(f32),  // Rotate to an absolute angle (any value; wrapped)
+    TogglePivotMarker, // Toggle pivot marker visibility
+    ResetPivot,        // Reset pivot to image center
 }
 
 /// Actions returned from stretch controls overlay
@@ -1785,14 +1784,6 @@ impl ArrayViewerWidget {
             }
             ZoomAction::ResetPivot => {
                 self.transform.set_pivot_to_center(self.width, self.height);
-            }
-            ZoomAction::CenterOnPoint(x, y) => {
-                self.transform.center_on_image_point(
-                    egui::pos2(x, y),
-                    egui::vec2(self.width as f32, self.height as f32),
-                    egui::vec2(0.0, 0.0), // Will be computed
-                    egui::Rect::NOTHING,
-                );
             }
         }
     }

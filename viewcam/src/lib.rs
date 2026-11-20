@@ -9,7 +9,8 @@
 //! ## Architecture
 //!
 //! - `camera::CameraFrames`: the inputs and the arithmetic, no UI
-//! - `widget::ViewcamWidget`: toolbar + embedded viewer, usable in any egui app
+//! - `status::StatusBar`: what the feeds are doing, as whatever receives them reports it
+//! - `widget::ViewcamWidget`: toolbar + embedded viewer + status bar, usable in any egui app
 //! - `ViewcamApp`: thin eframe shell hosting the widget in the browser
 //! - `ViewcamHandle`: WASM interface for JavaScript to control it
 
@@ -25,12 +26,15 @@ use web_sys::HtmlCanvasElement;
 #[cfg(target_arch = "wasm32")]
 mod app;
 pub mod camera;
+pub mod status;
 pub mod widget;
 
 #[cfg(target_arch = "wasm32")]
 use app::ViewcamApp;
 #[cfg(target_arch = "wasm32")]
 use camera::Frame;
+#[cfg(target_arch = "wasm32")]
+use status::{now_secs, Connection, FeedRole, FrameInfo};
 #[cfg(target_arch = "wasm32")]
 use viewarr::buffer::{convert_buffer_to_f64, dtype_meta};
 #[cfg(target_arch = "wasm32")]
@@ -40,7 +44,7 @@ use widget::{format_hex_color, parse_hex_color, ViewcamWidget};
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
 pub struct ViewcamCallbacks {
-    /// Called when a toolbar setting changes (from the UI or from JS).
+    /// Called when a toolbar setting or turbo changes (from the UI or from JS).
     pub on_state_change: Option<js_sys::Function>,
 }
 
@@ -204,8 +208,84 @@ impl ViewcamHandle {
         Ok(())
     }
 
-    /// Register a callback for toolbar setting changes. It receives
-    /// `{ darkSubtraction, saturationOverlay, saturationColor }`.
+    /// Name the stream a feed comes from, putting it in the status bar as
+    /// connecting; `null` takes it out. `role` is "data", "dark" or "saturation".
+    #[wasm_bindgen(js_name = setFeed)]
+    pub fn set_feed(&self, role: &str, name: Option<String>) -> Result<(), JsValue> {
+        let role = parse_role(role)?;
+        self.widget.borrow_mut().status_mut().set_feed(role, name);
+        Ok(())
+    }
+
+    /// A feed's connection is now "connecting", "open" or "closed".
+    #[wasm_bindgen(js_name = setFeedConnection)]
+    pub fn set_feed_connection(&self, role: &str, connection: &str) -> Result<(), JsValue> {
+        let role = parse_role(role)?;
+        let connection = Connection::parse(connection)
+            .ok_or_else(|| JsValue::from_str(&format!("Not a connection state: {connection:?}")))?;
+        self.widget
+            .borrow_mut()
+            .status_mut()
+            .set_connection(role, connection);
+        Ok(())
+    }
+
+    /// A feed's frame was shown: the status bar lists its shape, dtype and
+    /// seq, and times it for the frame rate.
+    #[wasm_bindgen(js_name = noteFeedFrame)]
+    pub fn note_feed_frame(
+        &self,
+        role: &str,
+        seq: u64,
+        width: u32,
+        height: u32,
+        dtype: &str,
+    ) -> Result<(), JsValue> {
+        let role = parse_role(role)?;
+        let frame = FrameInfo {
+            seq,
+            width,
+            height,
+            dtype: dtype.to_owned(),
+        };
+        self.widget
+            .borrow_mut()
+            .status_mut()
+            .note_frame(role, frame, now_secs());
+        Ok(())
+    }
+
+    /// A feed said it has no image.
+    #[wasm_bindgen(js_name = noteFeedEmpty)]
+    pub fn note_feed_empty(&self, role: &str) -> Result<(), JsValue> {
+        let role = parse_role(role)?;
+        self.widget.borrow_mut().status_mut().note_empty(role);
+        Ok(())
+    }
+
+    /// A message of `bytes` arrived on any feed, shown or not, for the bandwidth.
+    #[wasm_bindgen(js_name = noteReceived)]
+    pub fn note_received(&self, bytes: f64) {
+        self.widget
+            .borrow_mut()
+            .status_mut()
+            .note_received(bytes as usize, now_secs());
+    }
+
+    /// Whether the status bar's turbo toggle is on. What it does is up to
+    /// whatever receives the feeds.
+    #[wasm_bindgen(js_name = getTurbo)]
+    pub fn get_turbo(&self) -> bool {
+        self.widget.borrow().status().turbo()
+    }
+
+    #[wasm_bindgen(js_name = setTurbo)]
+    pub fn set_turbo(&self, turbo: bool) {
+        self.widget.borrow_mut().status_mut().set_turbo(turbo);
+    }
+
+    /// Register a callback for toolbar setting and turbo changes. It receives
+    /// `{ darkSubtraction, saturationOverlay, saturationColor, turbo }`.
     #[wasm_bindgen(js_name = onStateChange)]
     pub fn on_state_change(&self, callback: js_sys::Function) {
         self.callbacks.borrow_mut().on_state_change = Some(callback);
@@ -222,6 +302,15 @@ impl ViewcamHandle {
     pub fn destroy(&self) {
         self.runner.destroy();
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_role(role: &str) -> Result<FeedRole, JsValue> {
+    FeedRole::parse(role).ok_or_else(|| {
+        JsValue::from_str(&format!(
+            "Not a feed role (data, dark or saturation): {role:?}"
+        ))
+    })
 }
 
 #[cfg(target_arch = "wasm32")]

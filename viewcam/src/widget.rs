@@ -1,4 +1,5 @@
-//! ViewcamWidget - a viewarr viewer with a camera toolbar above it
+//! ViewcamWidget - a viewarr viewer with a camera toolbar above it and a
+//! status bar of its feeds below
 //!
 //! Holds the camera inputs in a [`CameraFrames`] and keeps the embedded
 //! [`ArrayViewerWidget`] showing what they add up to: the data (dark-subtracted
@@ -13,6 +14,7 @@ use egui::{Color32, Response, Ui, Vec2};
 use viewarr::widget::ArrayViewerWidget;
 
 use crate::camera::{Availability, CameraFrames, Frame};
+use crate::status::{now_secs, StatusBar};
 
 /// Default colour for saturated pixels: red sits outside the default (gray)
 /// colormap and reads as "bad" at a glance.
@@ -26,6 +28,7 @@ pub struct ViewcamWidget {
     dark_subtraction: bool,
     /// Whether the user wants saturated pixels shown; held the same way.
     saturation_overlay: bool,
+    status: StatusBar,
 }
 
 impl Default for ViewcamWidget {
@@ -43,6 +46,7 @@ impl ViewcamWidget {
             frames: CameraFrames::new(),
             dark_subtraction: true,
             saturation_overlay: true,
+            status: StatusBar::new(now_secs()),
         }
     }
 
@@ -57,6 +61,15 @@ impl ViewcamWidget {
 
     pub fn frames(&self) -> &CameraFrames {
         &self.frames
+    }
+
+    /// What the feeds are doing, for whatever receives them to report to.
+    pub fn status(&self) -> &StatusBar {
+        &self.status
+    }
+
+    pub fn status_mut(&mut self) -> &mut StatusBar {
+        &mut self.status
     }
 
     // =========================================================================
@@ -231,6 +244,16 @@ impl ViewcamWidget {
                 }
             });
         });
+    }
+
+    /// Whether there is a status bar to show: not until a feed is named.
+    pub fn has_status_bar(&self) -> bool {
+        self.status.has_feeds()
+    }
+
+    /// The status bar: each feed, the bandwidth, and the turbo toggle.
+    pub fn show_status_bar(&mut self, ui: &mut Ui) {
+        self.status.show(ui, now_secs());
     }
 
     /// The embedded viewer, filling `container_size`.

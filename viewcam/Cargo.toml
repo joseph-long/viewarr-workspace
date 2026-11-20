@@ -27,7 +27,7 @@ js-sys = "=0.3.85"
 
 [dependencies.web-sys]
 version = "=0.3.85"
-features = ["HtmlCanvasElement"]
+features = ["HtmlCanvasElement", "Performance", "Window"]
 
 [profile.release]
 opt-level = 2

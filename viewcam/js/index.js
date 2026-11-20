@@ -299,9 +299,91 @@ export function setSaturationColor(containerId, color) {
 }
 
 /**
- * Register a callback for toolbar setting changes, whether made in the UI or
- * through this API. It receives
- * { darkSubtraction, saturationOverlay, saturationColor }.
+ * Name the stream a feed comes from, putting it in the status bar below the
+ * image as connecting; null takes it out. The status bar shows only what it
+ * is told, so whatever receives the feed reports to it with
+ * setFeedConnection, noteFeedFrame, noteFeedEmpty and noteReceived.
+ *
+ * @param {string} containerId - The ID of the container (viewer instance).
+ * @param {'data'|'dark'|'saturation'} role
+ * @param {string|null} name
+ */
+export function setFeed(containerId, role, name) {
+  getViewer(containerId).handle.setFeed(role, name);
+}
+
+/**
+ * A feed's connection changed. Its frame rate starts over.
+ *
+ * @param {string} containerId - The ID of the container (viewer instance).
+ * @param {'data'|'dark'|'saturation'} role
+ * @param {'connecting'|'open'|'closed'} connection
+ */
+export function setFeedConnection(containerId, role, connection) {
+  getViewer(containerId).handle.setFeedConnection(role, connection);
+}
+
+/**
+ * A feed's frame was shown: the status bar lists its shape, dtype and seq,
+ * and times it for the frame rate.
+ *
+ * @param {string} containerId - The ID of the container (viewer instance).
+ * @param {'data'|'dark'|'saturation'} role
+ * @param {bigint} seq
+ * @param {number} width
+ * @param {number} height
+ * @param {string} dtype
+ */
+export function noteFeedFrame(containerId, role, seq, width, height, dtype) {
+  getViewer(containerId).handle.noteFeedFrame(role, BigInt(seq), width, height, dtype);
+}
+
+/**
+ * A feed said it has no image.
+ *
+ * @param {string} containerId - The ID of the container (viewer instance).
+ * @param {'data'|'dark'|'saturation'} role
+ */
+export function noteFeedEmpty(containerId, role) {
+  getViewer(containerId).handle.noteFeedEmpty(role);
+}
+
+/**
+ * A message of this many bytes arrived on any feed, shown or not: the
+ * status bar's bandwidth counts them all.
+ *
+ * @param {string} containerId - The ID of the container (viewer instance).
+ * @param {number} bytes
+ */
+export function noteReceived(containerId, bytes) {
+  getViewer(containerId).handle.noteReceived(bytes);
+}
+
+/**
+ * Whether the status bar's turbo toggle is on. What turbo does is up to
+ * whatever receives the feeds; onStateChange says when it changes.
+ *
+ * @param {string} containerId - The ID of the container (viewer instance).
+ * @returns {boolean}
+ */
+export function getTurbo(containerId) {
+  return getViewer(containerId).handle.getTurbo();
+}
+
+/**
+ * Switch turbo on or off, as the status bar's toggle does.
+ *
+ * @param {string} containerId - The ID of the container (viewer instance).
+ * @param {boolean} turbo
+ */
+export function setTurbo(containerId, turbo) {
+  getViewer(containerId).handle.setTurbo(turbo);
+}
+
+/**
+ * Register a callback for toolbar setting and turbo changes, whether made in
+ * the UI or through this API. It receives
+ * { darkSubtraction, saturationOverlay, saturationColor, turbo }.
  *
  * @param {string} containerId - The ID of the container (viewer instance).
  * @param {Function} callback
@@ -361,6 +443,13 @@ const api = {
   setSaturationOverlay,
   getSaturationColor,
   setSaturationColor,
+  setFeed,
+  setFeedConnection,
+  noteFeedFrame,
+  noteFeedEmpty,
+  noteReceived,
+  getTurbo,
+  setTurbo,
   onStateChange,
   clearCallbacks,
   destroyViewer,

@@ -1,7 +1,8 @@
 //! Thin application shell for the camera viewer
 //!
-//! Hosts a ViewcamWidget: its toolbar in a panel above, the viewer filling the
-//! rest. Also reports toolbar changes to JavaScript.
+//! Hosts a ViewcamWidget: its toolbar in a panel above, its status bar in one
+//! below, the viewer filling the rest. Also reports toolbar and status bar
+//! settings to JavaScript when they change.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -14,12 +15,13 @@ use wasm_bindgen::JsValue;
 use crate::widget::{format_hex_color, ViewcamWidget};
 use crate::ViewcamCallbacks;
 
-/// The toolbar settings JavaScript is told about when they change.
+/// The settings JavaScript is told about when they change.
 #[derive(Clone, PartialEq)]
 struct ToolbarState {
     dark_subtraction: bool,
     saturation_overlay: bool,
     saturation_color: String,
+    turbo: bool,
 }
 
 impl ToolbarState {
@@ -28,6 +30,7 @@ impl ToolbarState {
             dark_subtraction: widget.dark_subtraction(),
             saturation_overlay: widget.saturation_overlay(),
             saturation_color: format_hex_color(widget.saturation_color()),
+            turbo: widget.status().turbo(),
         }
     }
 }
@@ -84,6 +87,7 @@ impl ViewcamApp {
                 &current.saturation_color.clone().into(),
             )
             .ok();
+            js_sys::Reflect::set(&state, &"turbo".into(), &current.turbo.into()).ok();
             let _ = callback.call1(&JsValue::NULL, &state);
         }
         self.reported = Some(current);
@@ -106,6 +110,22 @@ impl eframe::App for ViewcamApp {
                 .frame(toolbar_frame)
                 .show(ctx, |ui| {
                     self.widget.borrow_mut().show_toolbar(ui);
+                });
+        }
+
+        // The status bar takes the same frame as the toolbar, mirrored.
+        let status_frame = toolbar_frame.inner_margin(egui::Margin {
+            left: 8,
+            right: 8,
+            top: 3,
+            bottom: 2,
+        });
+        let has_status_bar = self.widget.borrow().has_status_bar();
+        if has_status_bar {
+            egui::TopBottomPanel::bottom("camera_status")
+                .frame(status_frame)
+                .show(ctx, |ui| {
+                    self.widget.borrow_mut().show_status_bar(ui);
                 });
         }
 

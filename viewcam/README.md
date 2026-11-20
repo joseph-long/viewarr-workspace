@@ -26,6 +26,16 @@ reason on hover. A dark or saturation image is kept until it is replaced or
 cleared, so a stream of data frames needs the dark sent only once, and an
 image that arrives before data of its shape applies as soon as that data does.
 
+The status bar below the viewer lists each feed a camera's images come
+from, with its connection, and once frames arrive their shape, dtype,
+sequence number and rate; then the bandwidth of all of them together, and a
+**turbo** toggle. viewcam doesn't receive the feeds itself, so the bar shows
+only what it is told: whatever does receive them names them with `setFeed`
+and reports with `setFeedConnection`, `noteFeedFrame`, `noteFeedEmpty` and
+`noteReceived`. What turbo does is up to it too (sup's camera views lift a
+one-frame-a-second cap); `onStateChange` reports the toggle. Until a feed is
+named there is no status bar.
+
 Camera specifics stay out of viewarr itself. The one hook viewcam needs, a
 solid-colour mask overlay (`ArrayViewerWidget::set_mask_overlay`), is generic.
 

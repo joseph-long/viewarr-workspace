@@ -122,7 +122,8 @@ dark that has been withdrawn. Its `encoded_len` is 0.
 
 `acq_time_ns` is when the image was acquired, in nanoseconds since the Unix
 epoch (UTC), as the server's clock has it: for an ImageStreamIO stream, the
-image's `atime`. It is `0` if the server doesn't know. Clients compare it
+image's `atime`, or its `writetime` (when it was written to shared memory)
+where the writer leaves `atime` unset. It is `0` if the server doesn't know. Clients compare it
 with their own clock to tell how old a frame is, which is only as good as
 the two clocks' agreement (NTP keeps that to milliseconds).
 

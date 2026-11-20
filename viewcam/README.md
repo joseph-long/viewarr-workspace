@@ -29,7 +29,9 @@ image that arrives before data of its shape applies as soon as that data does.
 The status bar below the viewer lists each feed a camera's images come
 from, with its connection, and once frames arrive their shape, dtype,
 sequence number and rate; then the bandwidth of all of them together, and a
-**turbo** toggle. viewcam doesn't receive the feeds itself, so the bar shows
+**turbo** toggle. A feed whose newest frame is overdue for replacing (nothing
+newer for 2.5 of its usual gaps between frames, and at least 1.5 s) is
+flagged with that frame's age, from when it was acquired if the server said. viewcam doesn't receive the feeds itself, so the bar shows
 only what it is told: whatever does receive them names them with `setFeed`
 and reports with `setFeedConnection`, `noteFeedFrame`, `noteFeedEmpty` and
 `noteReceived`. What turbo does is up to it too (sup's camera views lift a

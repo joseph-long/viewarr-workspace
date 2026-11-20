@@ -72,14 +72,19 @@ export function setSaturationColor(containerId: string, color: string): void;
 export function setFeed(containerId: string, role: FeedRole, name: string | null): void;
 /** A feed's connection changed; its frame rate starts over. */
 export function setFeedConnection(containerId: string, role: FeedRole, connection: FeedConnection): void;
-/** A feed's frame was shown. */
+/**
+ * A feed's frame was shown. `acquiredMs` is when it was acquired, in ms since
+ * the Unix epoch; the status bar warns with that age if no newer frame comes
+ * when the feed's rate says one should.
+ */
 export function noteFeedFrame(
   containerId: string,
   role: FeedRole,
   seq: bigint | number,
   width: number,
   height: number,
-  dtype: string
+  dtype: string,
+  acquiredMs?: number | null
 ): void;
 /** A feed said it has no image. */
 export function noteFeedEmpty(containerId: string, role: FeedRole): void;

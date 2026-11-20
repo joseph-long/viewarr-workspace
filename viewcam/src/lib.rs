@@ -231,7 +231,9 @@ impl ViewcamHandle {
     }
 
     /// A feed's frame was shown: the status bar lists its shape, dtype and
-    /// seq, and times it for the frame rate.
+    /// seq, and times it for the frame rate. `acquired_ms` is when the image
+    /// was acquired, in milliseconds since the Unix epoch, if known; the
+    /// status bar gives that age if the frame is left showing too long.
     #[wasm_bindgen(js_name = noteFeedFrame)]
     pub fn note_feed_frame(
         &self,
@@ -240,6 +242,7 @@ impl ViewcamHandle {
         width: u32,
         height: u32,
         dtype: &str,
+        acquired_ms: Option<f64>,
     ) -> Result<(), JsValue> {
         let role = parse_role(role)?;
         let frame = FrameInfo {
@@ -247,6 +250,7 @@ impl ViewcamHandle {
             width,
             height,
             dtype: dtype.to_owned(),
+            acquired: acquired_ms.map(|ms| ms / 1000.0),
         };
         self.widget
             .borrow_mut()

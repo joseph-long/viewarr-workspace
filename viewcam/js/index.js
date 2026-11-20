@@ -325,7 +325,9 @@ export function setFeedConnection(containerId, role, connection) {
 
 /**
  * A feed's frame was shown: the status bar lists its shape, dtype and seq,
- * and times it for the frame rate.
+ * and times it for the frame rate. If no newer frame comes for longer than
+ * that rate would have it, the status bar warns, with how long ago the
+ * frame shown was acquired (or, without `acquiredMs`, since it arrived).
  *
  * @param {string} containerId - The ID of the container (viewer instance).
  * @param {'data'|'dark'|'saturation'} role
@@ -333,9 +335,11 @@ export function setFeedConnection(containerId, role, connection) {
  * @param {number} width
  * @param {number} height
  * @param {string} dtype
+ * @param {number|null} [acquiredMs] - When the image was acquired, in
+ *   milliseconds since the Unix epoch (as `Date.now()`), if known.
  */
-export function noteFeedFrame(containerId, role, seq, width, height, dtype) {
-  getViewer(containerId).handle.noteFeedFrame(role, BigInt(seq), width, height, dtype);
+export function noteFeedFrame(containerId, role, seq, width, height, dtype, acquiredMs = null) {
+  getViewer(containerId).handle.noteFeedFrame(role, BigInt(seq), width, height, dtype, acquiredMs ?? undefined);
 }
 
 /**

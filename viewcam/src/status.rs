@@ -2,7 +2,9 @@
 //!
 //! One entry per feed (data, dark, saturation): its connection, and once
 //! frames arrive their shape, dtype, sequence number and rate; then the
-//! bandwidth of all of them together, and the turbo toggle. The bar only
+//! bandwidth of all of them together, and the turbo toggle. A feed whose
+//! newest frame is overdue for replacing, judged by how often frames had
+//! been coming, gets a warning with that frame's age. The bar only
 //! shows what it is told: whatever receives the feeds (the browser's
 //! viewcam-proto client, or a native one) reports connections, frames and
 //! bytes as they happen. What turbo means is up to it too; the bar only
@@ -19,6 +21,12 @@ const FPS_FRAMES: usize = 10;
 const BANDWIDTH_WINDOW_SEC: f64 = 5.0;
 /// How often the bandwidth shown is updated, so it can be read.
 const BANDWIDTH_UPDATE_SEC: f64 = 1.0;
+
+/// A feed's newest frame is overdue once nothing newer has come for this
+/// many of its usual gaps between frames, and never sooner than
+/// `OVERDUE_MIN_SEC`, so that a dip in a fast feed's rate isn't news.
+const OVERDUE_GAPS: f64 = 2.5;
+const OVERDUE_MIN_SEC: f64 = 1.5;
 
 /// Feed names, in the blue sup uses for names.
 const NAME_COLOR: Color32 = Color32::from_rgb(0x3d, 0xae, 0xe9);
@@ -39,6 +47,21 @@ pub fn now_secs() -> f64 {
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
+/// Seconds since the Unix epoch, for comparing with when frames were acquired.
+#[cfg(target_arch = "wasm32")]
+pub fn wall_secs() -> f64 {
+    js_sys::Date::now() / 1000.0
+}
+
+/// Seconds since the Unix epoch, for comparing with when frames were acquired.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn wall_secs() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -62,7 +85,8 @@ impl FeedRole {
         }
     }
 
-    fn index(self) -> usize {
+    /// 0, 1 and 2, in the order of [`FeedRole::ALL`], for arrays by role.
+    pub fn index(self) -> usize {
         self as usize
     }
 }
@@ -101,6 +125,9 @@ pub struct FrameInfo {
     pub width: u32,
     pub height: u32,
     pub dtype: String,
+    /// When the image was acquired, in seconds since the Unix epoch, if the
+    /// server said.
+    pub acquired: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,6 +139,9 @@ pub struct FeedStatus {
     pub frame: Option<FrameInfo>,
     /// When the last few frames were shown, oldest first.
     arrivals: VecDeque<f64>,
+    /// When the newest frame was shown. Unlike `arrivals`, it survives a
+    /// reconnection, since the frame it belongs to is still on screen.
+    last_frame_at: Option<f64>,
 }
 
 impl FeedStatus {
@@ -122,6 +152,7 @@ impl FeedStatus {
             empty: false,
             frame: None,
             arrivals: VecDeque::new(),
+            last_frame_at: None,
         }
     }
 
@@ -142,25 +173,55 @@ impl FeedStatus {
         role == FeedRole::Data || (!self.empty && self.frame.is_some())
     }
 
-    fn detail(&self, role: FeedRole) -> String {
+    /// If the newest frame is overdue for replacing, how old it is (`now`
+    /// on the monotonic clock, `wall` since the Unix epoch): from when it
+    /// was acquired if the server said, else since it arrived, which is as
+    /// old as it can be at least. Overdue is judged by the feed's own rate,
+    /// so a camera taking long exposures isn't flagged between them.
+    pub fn overdue_age(&self, now: f64, wall: f64) -> Option<f64> {
+        let (frame, last) = (self.frame.as_ref()?, self.last_frame_at?);
+        let since = now - last;
+        let fps = self.fps();
+        let usual_gap = if fps > 0.0 { 1.0 / fps } else { 0.0 };
+        if since < (OVERDUE_GAPS * usual_gap).max(OVERDUE_MIN_SEC) {
+            return None;
+        }
+        // A clock running behind the server's could make the acquisition
+        // time look recent; the frame is at least as old as its arrival.
+        Some(frame.acquired.map_or(since, |t| (wall - t).max(since)))
+    }
+
+    /// The text after the feed's name, and whether it is a warning.
+    fn detail(&self, role: FeedRole, now: f64, wall: f64) -> (String, bool) {
         if self.connection != Connection::Open {
-            return self.connection.label().to_owned();
+            return (self.connection.label().to_owned(), true);
         }
         if self.empty {
-            return "no image".to_owned();
+            return ("no image".to_owned(), false);
         }
         let Some(frame) = &self.frame else {
-            return "waiting".to_owned();
+            return ("waiting".to_owned(), false);
         };
         let mut detail = format!(
             "{}×{} {} · #{}",
             frame.width, frame.height, frame.dtype, frame.seq
         );
         // The dark changes too rarely for a rate to mean anything.
-        if role != FeedRole::Dark {
-            detail.push_str(&format!(" · {:.1} fps", self.fps()));
+        if role == FeedRole::Dark {
+            return (detail, false);
         }
-        detail
+        detail.push_str(&format!(" · {:.1} fps", self.fps()));
+        match self.overdue_age(now, wall) {
+            Some(age) => {
+                detail.push_str(&format!(
+                    " · {} {} old",
+                    phosphor::regular::WARNING,
+                    format_age(age)
+                ));
+                (detail, true)
+            }
+            None => (detail, false),
+        }
     }
 }
 
@@ -216,6 +277,7 @@ impl StatusBar {
         if let Some(feed) = &mut self.feeds[role.index()] {
             feed.empty = false;
             feed.frame = Some(frame);
+            feed.last_frame_at = Some(now);
             feed.arrivals.push_back(now);
             while feed.arrivals.len() > FPS_FRAMES {
                 feed.arrivals.pop_front();
@@ -270,6 +332,7 @@ impl StatusBar {
     /// The bar: the feeds from the left, turbo and the bandwidth at the right.
     pub fn show(&mut self, ui: &mut Ui, now: f64) {
         let bandwidth = self.bandwidth(now);
+        let wall = wall_secs();
         ui.horizontal(|ui| {
             for role in FeedRole::ALL {
                 let Some(feed) = self.feed(role) else {
@@ -278,13 +341,20 @@ impl StatusBar {
                 if !feed.listed(role) {
                     continue;
                 }
-                let color = if feed.connection == Connection::Open {
-                    ui.visuals().weak_text_color()
-                } else {
+                let (detail, warning) = feed.detail(role, now, wall);
+                let color = if warning {
                     ui.visuals().warn_fg_color
+                } else {
+                    ui.visuals().weak_text_color()
                 };
                 ui.label(mono(&feed.name).color(NAME_COLOR));
-                ui.label(mono(&feed.detail(role)).color(color));
+                let label = ui.label(mono(&detail).color(color));
+                if feed.connection == Connection::Open && warning {
+                    label.on_hover_text(
+                        "Nothing newer has arrived for longer than this feed's frame rate \
+                         would have it; this is how long ago the frame shown was taken",
+                    );
+                }
                 ui.add_space(12.0);
             }
 
@@ -307,6 +377,22 @@ impl StatusBar {
                 }
             });
         });
+    }
+}
+
+/// An age to read at a glance: tenths of a second while that matters, then
+/// coarser units.
+pub fn format_age(seconds: f64) -> String {
+    if seconds < 10.0 {
+        format!("{seconds:.1} s")
+    } else if seconds < 60.0 {
+        format!("{seconds:.0} s")
+    } else if seconds < 3600.0 {
+        format!("{:.0} min", seconds / 60.0)
+    } else if seconds < 86400.0 {
+        format!("{:.1} h", seconds / 3600.0)
+    } else {
+        format!("{:.1} d", seconds / 86400.0)
     }
 }
 
@@ -336,7 +422,13 @@ mod tests {
             width: 4,
             height: 2,
             dtype: "u16".to_owned(),
+            acquired: None,
         }
+    }
+
+    /// A feed's detail text at `now` (monotonic) and `wall` (Unix) seconds.
+    fn detail_at(bar: &StatusBar, role: FeedRole, now: f64, wall: f64) -> (String, bool) {
+        bar.feed(role).unwrap().detail(role, now, wall)
     }
 
     #[test]
@@ -352,15 +444,15 @@ mod tests {
         }
         assert!((bar.feed(FeedRole::Data).unwrap().fps() - 20.0).abs() < 1e-9);
         assert_eq!(
-            bar.feed(FeedRole::Data).unwrap().detail(FeedRole::Data),
-            "4×2 u16 · #11 · 20.0 fps"
+            detail_at(&bar, FeedRole::Data, 10.5, 0.0),
+            ("4×2 u16 · #11 · 20.0 fps".to_owned(), false)
         );
 
         bar.set_connection(FeedRole::Data, Connection::Closed);
         assert_eq!(bar.feed(FeedRole::Data).unwrap().fps(), 0.0);
         assert_eq!(
-            bar.feed(FeedRole::Data).unwrap().detail(FeedRole::Data),
-            "closed"
+            detail_at(&bar, FeedRole::Data, 10.5, 0.0),
+            ("closed".to_owned(), true)
         );
     }
 
@@ -378,9 +470,10 @@ mod tests {
         bar.set_connection(FeedRole::Dark, Connection::Open);
         bar.note_frame(FeedRole::Dark, frame(1), 1.0);
         assert!(listed(&bar, FeedRole::Dark));
+        // The dark changes too rarely to be overdue, however long it waits.
         assert_eq!(
-            bar.feed(FeedRole::Dark).unwrap().detail(FeedRole::Dark),
-            "4×2 u16 · #1"
+            detail_at(&bar, FeedRole::Dark, 1000.0, 0.0),
+            ("4×2 u16 · #1".to_owned(), false)
         );
         bar.note_empty(FeedRole::Dark);
         assert!(!listed(&bar, FeedRole::Dark));
@@ -388,9 +481,57 @@ mod tests {
         bar.note_empty(FeedRole::Data);
         bar.set_connection(FeedRole::Data, Connection::Open);
         assert_eq!(
-            bar.feed(FeedRole::Data).unwrap().detail(FeedRole::Data),
-            "no image"
+            detail_at(&bar, FeedRole::Data, 1.0, 0.0),
+            ("no image".to_owned(), false)
         );
+    }
+
+    #[test]
+    fn a_frame_is_overdue_by_the_feeds_own_rate() {
+        let mut bar = StatusBar::new(0.0);
+        bar.set_feed(FeedRole::Data, Some("camsci2".to_owned()));
+        bar.set_connection(FeedRole::Data, Connection::Open);
+        // Two frames a second, each acquired 0.3 s before it arrived.
+        let wall0 = 1_800_000_000.0;
+        for i in 0..5 {
+            let t = 0.5 * i as f64;
+            let info = FrameInfo {
+                acquired: Some(wall0 + t - 0.3),
+                ..frame(i)
+            };
+            bar.note_frame(FeedRole::Data, info, t);
+        }
+        let feed = |bar: &StatusBar| bar.feed(FeedRole::Data).unwrap().clone();
+        let at = |dt: f64| (2.0 + dt, wall0 + 2.0 + dt);
+        // 2.5 gaps of 0.5 s is 1.25 s, so the 1.5 s floor decides.
+        let (now, wall) = at(1.4);
+        assert_eq!(feed(&bar).overdue_age(now, wall), None);
+        let (now, wall) = at(1.6);
+        let age = feed(&bar).overdue_age(now, wall).unwrap();
+        assert!((age - 1.9).abs() < 1e-6, "acquired 1.9 s ago, got {age}");
+        let (text, warning) = detail_at(&bar, FeedRole::Data, now, wall);
+        assert!(warning && text.ends_with("1.9 s old"), "{text}");
+
+        // A camera taking 10 s exposures is fine 20 s after its last frame.
+        let mut slow = StatusBar::new(0.0);
+        slow.set_feed(FeedRole::Data, Some("camsci1".to_owned()));
+        slow.set_connection(FeedRole::Data, Connection::Open);
+        for i in 0..3 {
+            slow.note_frame(FeedRole::Data, frame(i), 10.0 * i as f64);
+        }
+        let slow_feed = slow.feed(FeedRole::Data).unwrap();
+        assert_eq!(slow_feed.overdue_age(40.0, 0.0), None);
+        // Without an acquisition time, the age is since it arrived.
+        assert_eq!(slow_feed.overdue_age(46.0, 0.0), Some(26.0));
+    }
+
+    #[test]
+    fn ages_read_at_a_glance() {
+        assert_eq!(format_age(1.94), "1.9 s");
+        assert_eq!(format_age(42.0), "42 s");
+        assert_eq!(format_age(600.0), "10 min");
+        assert_eq!(format_age(5400.0), "1.5 h");
+        assert_eq!(format_age(2.0 * 86400.0), "2.0 d");
     }
 
     #[test]

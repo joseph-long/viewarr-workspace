@@ -287,6 +287,11 @@ A window of `F` frames and `B` bytes, over a round trip `rtt`, allows at most
 - A rarely changing feed like the dark needs a window of 1.
 - `window_frames = 0` pauses a feed (a hidden tab, a collapsed panel) without
   closing it; reopening the window gets the newest frame straight away.
+- To cap a feed's frame rate, a client can hold its acks back: with a window
+  of 1, acking no more than `fps` times a second lets at most `fps` frames a
+  second through, each still the newest the server had when the ack reached
+  it. Acks are counts, so a held-back ack is no different on the wire, and
+  the server needs nothing to support it.
 
 ## Test vectors
 

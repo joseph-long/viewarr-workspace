@@ -4,7 +4,8 @@
  * See ../PROTOCOL.md for the specification. `decodeFrame` and `encodeAck` are
  * the wire format, checked against ../tests/vectors/ like the Rust crate and
  * the Python reference. `ViewcamFeed` is a client for one feed: it opens the
- * WebSocket, acknowledges every frame as it arrives, decodes off the main
+ * WebSocket, acknowledges every frame as it arrives (or paced, to cap the
+ * frame rate), decodes off the main
  * thread and hands over only frames newer than the last one shown.
  *
  *   import { ViewcamFeed, workerDecoder } from './viewcam_proto.js';
@@ -18,6 +19,7 @@
  *     onStatus: (status) => { ... },   // 'connecting' | 'open' | 'closed'
  *   });
  *   feed.setWindow(0);   // pause while hidden; feed.setWindow(6) to resume
+ *   feed.setMaxFps(1);   // at most one frame a second, with a window of 1
  *   feed.close();
  *
  * Standard JavaScript only (a WebSocket, a DataView), so it runs in browsers
@@ -264,6 +266,11 @@ export function workerDecoder(worker) {
  *  - `onError(error)`, for frames that fail to decode.
  *  - `windowFrames` (default 6) and `windowBytes` (default 0, no limit);
  *    see PROTOCOL.md, "Choosing a window".
+ *  - `maxFps` (default 0, no limit): acknowledge at most this many times a
+ *    second, each ack covering everything received since the last. With a
+ *    window of 1 that caps the frame rate, and each frame is still the
+ *    newest the server had when the ack reached it; a larger window lets
+ *    a burst of up to that many frames through per ack.
  *  - `reconnectDelayMs` (default 1000), doubling to `maxReconnectDelayMs`
  *    (default 10000) while connecting keeps failing.
  *  - `WebSocket`, a constructor to use instead of the global one.
@@ -279,6 +286,7 @@ export class ViewcamFeed {
     this.onError = options.onError ?? ((error) => console.error(`viewcam feed ${url}:`, error));
     this.windowFrames = options.windowFrames ?? 6;
     this.windowBytes = options.windowBytes ?? 0;
+    this.maxFps = options.maxFps ?? 0;
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1000;
     this.maxReconnectDelayMs = options.maxReconnectDelayMs ?? 10000;
     this.WebSocket = options.WebSocket ?? globalThis.WebSocket;
@@ -288,6 +296,9 @@ export class ViewcamFeed {
     this.closed = false;
     this.retryDelayMs = this.reconnectDelayMs;
     this.retryTimer = null;
+    // A paced ack waiting for its time, and when the last one went.
+    this.ackTimer = null;
+    this.lastAckAt = -Infinity;
     // seq of the newest frame handed over. A reconnection is a new
     // connection, whose seq may start anywhere, so this resets with it.
     this.shownSeq = -1n;
@@ -303,9 +314,17 @@ export class ViewcamFeed {
     this.sendAck();
   }
 
+  /** Cap the rate of acks, and so of frames, or lift it with `maxFps = 0`. */
+  setMaxFps(maxFps) {
+    this.maxFps = maxFps;
+    this.cancelAck();
+    this.acknowledge();
+  }
+
   close() {
     this.closed = true;
     clearTimeout(this.retryTimer);
+    this.cancelAck();
     if (this.ws) this.ws.close();
     this.ws = null;
   }
@@ -316,8 +335,12 @@ export class ViewcamFeed {
     const ws = new this.WebSocket(this.url);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
+    // Received, and of that acknowledged: they differ while an ack is paced.
+    this.receivedFrames = 0;
+    this.receivedBytes = 0;
     this.ackedFrames = 0;
     this.ackedBytes = 0;
+    this.cancelAck();
     this.shownSeq = -1n;
     this.waiting = null;
     ws.onopen = () => {
@@ -338,6 +361,28 @@ export class ViewcamFeed {
       this.retryTimer = setTimeout(() => this.connect(), this.retryDelayMs);
       this.retryDelayMs = Math.min(2 * this.retryDelayMs, this.maxReconnectDelayMs);
     };
+  }
+
+  /** Acknowledge what has arrived, now or, when paced, once it's time. */
+  acknowledge() {
+    if (this.ackTimer !== null || this.receivedFrames === this.ackedFrames) return;
+    const wait = this.maxFps > 0 ? this.lastAckAt + 1000 / this.maxFps - performance.now() : 0;
+    if (wait > 0) {
+      this.ackTimer = setTimeout(() => {
+        this.ackTimer = null;
+        this.acknowledge();
+      }, wait);
+      return;
+    }
+    this.lastAckAt = performance.now();
+    this.ackedFrames = this.receivedFrames;
+    this.ackedBytes = this.receivedBytes;
+    this.sendAck();
+  }
+
+  cancelAck() {
+    clearTimeout(this.ackTimer);
+    this.ackTimer = null;
   }
 
   sendAck() {
@@ -367,9 +412,9 @@ export class ViewcamFeed {
     }
     // Acknowledge on arrival, before decoding: decoding time shouldn't count
     // against the window.
-    this.ackedFrames += 1;
-    this.ackedBytes += message.byteLength;
-    this.sendAck();
+    this.receivedFrames += 1;
+    this.receivedBytes += message.byteLength;
+    this.acknowledge();
     if (this.decoding) {
       this.waiting = frame; // newest wins
     } else {

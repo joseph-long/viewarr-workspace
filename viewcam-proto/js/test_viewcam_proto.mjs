@@ -180,6 +180,32 @@ test('the feed acks on arrival, and shows only the newest of what arrived while 
   feed.close();
 });
 
+test('a capped feed paces its acks, and acks at once when the cap is lifted', async () => {
+  const feed = new vp.ViewcamFeed('ws://test/feed', {
+    WebSocket: FakeWebSocket,
+    windowFrames: 1,
+    maxFps: 20,
+  });
+  const ws = FakeWebSocket.last;
+  ws.open();
+  ws.deliver(frameMessage(1, 10));
+  // The first frame is acknowledged straight away: nothing was acked before it.
+  assert.deepEqual(ws.acks(), [[0, 0, 1], [1, 74, 1]]);
+  ws.deliver(frameMessage(2, 20));
+  assert.equal(ws.acks().length, 2);
+  await new Promise((r) => setTimeout(r, 80));
+  // One ack, 50 ms after the last.
+  assert.deepEqual(ws.acks(), [[0, 0, 1], [1, 74, 1], [2, 148, 1]]);
+  ws.deliver(frameMessage(3, 30));
+  ws.deliver(frameMessage(4, 40));
+  assert.equal(ws.acks().length, 3);
+  feed.setMaxFps(0);
+  assert.deepEqual(ws.acks().at(-1), [4, 296, 1]);
+  ws.deliver(frameMessage(5, 50));
+  assert.deepEqual(ws.acks().at(-1), [5, 370, 1]);
+  feed.close();
+});
+
 test('the feed reports empty frames, and closes on a bad one', () => {
   const empties = [];
   const errors = [];

@@ -19,6 +19,7 @@ const ramp = (n) => Uint8Array.from({ length: n }, (_, i) => (i * 37 + 11) & 0xf
 test('frames decode as the vectors were written', () => {
   const raw = vp.decodeFrame(vector('frame_u16_raw'));
   assert.equal(raw.seq, 0x0102030405060708n);
+  assert.equal(raw.acqTimeNs, 1795208400123456789n);
   assert.deepEqual([raw.width, raw.height, raw.dtype, raw.codec], [3, 2, 'u16', vp.CODEC_RAW]);
   assert.deepEqual(raw.payload, ramp(12));
 
@@ -26,6 +27,7 @@ test('frames decode as the vectors were written', () => {
   assert.deepEqual(
     [zstd.seq, zstd.dtype, zstd.codec, zstd.elementSize, zstd.decodedLen],
     [7n, 'f32', vp.CODEC_SHUFFLE_ZSTD, 4, 16]);
+  assert.equal(zstd.acqTimeNs, 0n);
   assert.deepEqual(zstd.payload, ramp(9));
 
   const empty = vp.decodeFrame(vector('frame_empty'));
@@ -80,17 +82,17 @@ test('inconsistent frames are rejected', () => {
     'bad magic': corrupt('frame_u16_raw', 0, 'setUint8', 0x58),
     'unknown version': corrupt('frame_u16_raw', 4, 'setUint8', 2),
     'an ack': vector('ack'),
-    'unknown dtype': corrupt('frame_u16_raw', 24, 'setUint8', 11),
-    'unknown codec': corrupt('frame_u16_raw', 25, 'setUint8', 2),
-    'unknown quantization': corrupt('frame_u16_raw', 26, 'setUint8', 2),
-    'parameters on an exact frame': corrupt('frame_u16_raw', 48, 'setUint8', 1),
-    'quantized f32 codes': corrupt('frame_u8_quantized_zstd', 24, 'setUint8', 9),
-    'no read noise': corrupt('frame_u8_quantized_zstd', 48, 'setFloat64', 0),
-    'raw of the wrong length': corrupt('frame_u16_raw', 16, 'setUint32', 4),
-    'zstd over its bound': corrupt('frame_f32_zstd', 16, 'setUint32', 0),
-    'too many pixels': corrupt('frame_u16_raw', 20, 'setUint32', 2 ** 31),
-    'a header longer than its message': corrupt('frame_u16_raw', 28, 'setUint32', 13),
-    'truncated': vector('frame_u16_raw').slice(0, 80),
+    'unknown dtype': corrupt('frame_u16_raw', 32, 'setUint8', 11),
+    'unknown codec': corrupt('frame_u16_raw', 33, 'setUint8', 2),
+    'unknown quantization': corrupt('frame_u16_raw', 34, 'setUint8', 2),
+    'parameters on an exact frame': corrupt('frame_u16_raw', 56, 'setUint8', 1),
+    'quantized f32 codes': corrupt('frame_u8_quantized_zstd', 32, 'setUint8', 9),
+    'no read noise': corrupt('frame_u8_quantized_zstd', 56, 'setFloat64', 0),
+    'raw of the wrong length': corrupt('frame_u16_raw', 24, 'setUint32', 4),
+    'zstd over its bound': corrupt('frame_f32_zstd', 24, 'setUint32', 0),
+    'too many pixels': corrupt('frame_u16_raw', 28, 'setUint32', 2 ** 31),
+    'a header longer than its message': corrupt('frame_u16_raw', 36, 'setUint32', 13),
+    'truncated': vector('frame_u16_raw').slice(0, 88),
   };
   for (const [what, message] of Object.entries(bad)) {
     assert.throws(() => vp.decodeFrame(message), vp.ProtocolError, what);
@@ -116,6 +118,9 @@ class FakeWebSocket {
       return [Number(v.getBigUint64(8, true)), Number(v.getBigUint64(16, true)), v.getUint32(24, true)];
     });
   }
+  windowBytes() {
+    return this.sent.map((m) => new DataView(m).getUint32(28, true));
+  }
 }
 
 function frameMessage(seq, value) {
@@ -123,9 +128,9 @@ function frameMessage(seq, value) {
   new Uint8Array(message).set(new Uint8Array(vector('frame_u16_raw')).subarray(0, vp.FRAME_HEADER_LEN));
   const view = new DataView(message);
   view.setBigUint64(8, BigInt(seq), true);
-  view.setUint32(16, 1, true);
-  view.setUint32(20, 1, true);
-  view.setUint32(28, 2, true);
+  view.setUint32(24, 1, true);
+  view.setUint32(28, 1, true);
+  view.setUint32(36, 2, true);
   view.setUint16(vp.FRAME_HEADER_LEN, value, true);
   return message;
 }
@@ -138,6 +143,7 @@ function deferred() {
 
 test('the feed acks on arrival, and shows only the newest of what arrived while decoding', async () => {
   const shown = [];
+  const acquired = [];
   const decodes = [];
   const received = [];
   const feed = new vp.ViewcamFeed('ws://test/feed', {
@@ -149,23 +155,26 @@ test('the feed acks on arrival, and shows only the newest of what arrived while 
       decodes.push(d);
       return d.promise.then(() => encoded);
     },
-    onFrame: ({ seq, pixels }) => shown.push([seq, new DataView(pixels).getUint16(0, true)]),
+    onFrame: ({ seq, pixels, acquiredMs }) => {
+      shown.push([seq, new DataView(pixels).getUint16(0, true)]);
+      acquired.push(acquiredMs);
+    },
   });
   const ws = FakeWebSocket.last;
   ws.open();
   // A raw frame needs no decoder; make these zstd by flipping the codec.
   const zstd = (seq, value) => {
     const message = frameMessage(seq, value);
-    new DataView(message).setUint8(25, vp.CODEC_SHUFFLE_ZSTD);
+    new DataView(message).setUint8(33, vp.CODEC_SHUFFLE_ZSTD);
     return message;
   };
   ws.deliver(zstd(1, 10));
   ws.deliver(zstd(2, 20));
   ws.deliver(zstd(3, 30));
   // Every frame was acknowledged as it arrived, decoded or not.
-  assert.deepEqual(ws.acks(), [[0, 0, 4], [1, 74, 4], [2, 148, 4], [3, 222, 4]]);
+  assert.deepEqual(ws.acks(), [[0, 0, 4], [1, 82, 4], [2, 164, 4], [3, 246, 4]]);
   // Counted as received whether they will be shown or not.
-  assert.deepEqual(received, [74, 74, 74]);
+  assert.deepEqual(received, [82, 82, 82]);
   assert.equal(decodes.length, 1);
   decodes[0].resolve();
   await new Promise((r) => setTimeout(r));
@@ -174,9 +183,11 @@ test('the feed acks on arrival, and shows only the newest of what arrived while 
   decodes[1].resolve();
   await new Promise((r) => setTimeout(r));
   assert.deepEqual(shown, [[1n, 10], [3n, 30]]);
+  // Copied from frame_u16_raw's header: 2026-11-20T21:00:00.123456789Z, in ms.
+  assert.ok(Math.abs(acquired[0] - 1795208400123.4568) < 1e-3);
 
   feed.setWindow(0);
-  assert.deepEqual(ws.acks().at(-1), [3, 222, 0]);
+  assert.deepEqual(ws.acks().at(-1), [3, 246, 0]);
   feed.close();
 });
 
@@ -190,19 +201,55 @@ test('a capped feed paces its acks, and acks at once when the cap is lifted', as
   ws.open();
   ws.deliver(frameMessage(1, 10));
   // The first frame is acknowledged straight away: nothing was acked before it.
-  assert.deepEqual(ws.acks(), [[0, 0, 1], [1, 74, 1]]);
+  assert.deepEqual(ws.acks(), [[0, 0, 1], [1, 82, 1]]);
   ws.deliver(frameMessage(2, 20));
   assert.equal(ws.acks().length, 2);
   await new Promise((r) => setTimeout(r, 80));
   // One ack, 50 ms after the last.
-  assert.deepEqual(ws.acks(), [[0, 0, 1], [1, 74, 1], [2, 148, 1]]);
+  assert.deepEqual(ws.acks(), [[0, 0, 1], [1, 82, 1], [2, 164, 1]]);
   ws.deliver(frameMessage(3, 30));
   ws.deliver(frameMessage(4, 40));
   assert.equal(ws.acks().length, 3);
   feed.setMaxFps(0);
-  assert.deepEqual(ws.acks().at(-1), [4, 296, 1]);
+  assert.deepEqual(ws.acks().at(-1), [4, 328, 1]);
   ws.deliver(frameMessage(5, 50));
-  assert.deepEqual(ws.acks().at(-1), [5, 370, 1]);
+  assert.deepEqual(ws.acks().at(-1), [5, 410, 1]);
+  feed.close();
+});
+
+test('the delivery rate is over the latest arrivals, and sizes the byte window', () => {
+  const rate = new vp.DeliveryRate();
+  assert.equal(rate.bytesPerSec(), null);
+  assert.equal(rate.windowBytes(500), 1);
+  rate.note(10000, 1000);
+  for (let i = 1; i <= 4; i++) rate.note(10000 + 100 * i, 1000);
+  assert.equal(Math.round(rate.bytesPerSec()), 10000);
+  assert.equal(rate.windowBytes(500), 5000);
+  // Frames too large for the target alone still get two in flight.
+  assert.equal(rate.windowBytes(100), 2500);
+  // A pause longer than the span leaves one arrival: no rate again.
+  rate.note(20000, 1000);
+  assert.equal(rate.bytesPerSec(), null);
+});
+
+test('the feed asks for a byte window sized from what arrives', () => {
+  let now = 0;
+  const feed = new vp.ViewcamFeed('ws://test/feed', { WebSocket: FakeWebSocket, now: () => now });
+  const ws = FakeWebSocket.last;
+  ws.open();
+  // A frame at a time until there is a rate to go by.
+  assert.deepEqual(ws.windowBytes(), [1]);
+  ws.deliver(frameMessage(1, 10));
+  assert.deepEqual(ws.windowBytes(), [1, 1]);
+  // 82 bytes every 100 ms is 820 B/s, so 410 bytes for half a second.
+  now = 100;
+  ws.deliver(frameMessage(2, 20));
+  assert.equal(ws.windowBytes().at(-1), 410);
+
+  // With the target off, the fixed byte window goes out.
+  feed.targetInFlightMs = 0;
+  feed.setWindow(6, 0);
+  assert.equal(ws.windowBytes().at(-1), 0);
   feed.close();
 });
 
@@ -241,10 +288,10 @@ test('a quantized frame is decoded to f32 values, with its quantization', async 
   const message = new ArrayBuffer(vp.FRAME_HEADER_LEN + 1);
   new Uint8Array(message).set(new Uint8Array(vector('frame_u8_quantized_zstd')).subarray(0, vp.FRAME_HEADER_LEN));
   const view = new DataView(message);
-  view.setUint32(16, 1, true);
-  view.setUint32(20, 1, true);
-  view.setUint8(25, vp.CODEC_RAW);
+  view.setUint32(24, 1, true);
   view.setUint32(28, 1, true);
+  view.setUint8(33, vp.CODEC_RAW);
+  view.setUint32(36, 1, true);
   ws.deliver(message);
   await new Promise((r) => setTimeout(r));
   assert.equal(requests.length, 1);
@@ -253,5 +300,7 @@ test('a quantized frame is decoded to f32 values, with its quantization', async 
     ['raw', 1, 1, 14.25]);
   assert.equal(frames[0].dtype, 'f32');
   assert.equal(frames[0].quantization.step, 0.25);
+  // This vector carries no acquisition time.
+  assert.equal(frames[0].acquiredMs, null);
   feed.close();
 });

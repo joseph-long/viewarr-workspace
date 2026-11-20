@@ -11,6 +11,7 @@
 //! and turning quantized codes into values, is the `viewcam-codec` crate's
 //! job, so this one stays dependency-free.
 
+use std::collections::VecDeque;
 use std::fmt;
 
 pub const MAGIC: [u8; 4] = *b"VCAM";
@@ -18,7 +19,7 @@ pub const VERSION: u8 = 1;
 
 /// Length of the prefix every message starts with.
 pub const PREFIX_LEN: usize = 8;
-pub const FRAME_HEADER_LEN: usize = 72;
+pub const FRAME_HEADER_LEN: usize = 80;
 pub const ACK_LEN: usize = 32;
 
 const KIND_FRAME: u8 = 1;
@@ -308,6 +309,9 @@ impl Quantization {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameHeader {
     pub seq: u64,
+    /// When the image was acquired, in nanoseconds since the Unix epoch
+    /// (UTC, as the server's clock had it); 0 if the server doesn't know.
+    pub acq_time_ns: i64,
     pub width: u32,
     pub height: u32,
     pub dtype: DType,
@@ -411,18 +415,19 @@ impl FrameHeader {
         let mut out = [0u8; FRAME_HEADER_LEN];
         out[..PREFIX_LEN].copy_from_slice(&prefix(KIND_FRAME));
         out[8..16].copy_from_slice(&self.seq.to_le_bytes());
-        out[16..20].copy_from_slice(&self.width.to_le_bytes());
-        out[20..24].copy_from_slice(&self.height.to_le_bytes());
-        out[24] = self.dtype.code();
-        out[25] = self.codec.code();
-        out[28..32].copy_from_slice(&self.encoded_len.to_le_bytes());
+        out[16..24].copy_from_slice(&self.acq_time_ns.to_le_bytes());
+        out[24..28].copy_from_slice(&self.width.to_le_bytes());
+        out[28..32].copy_from_slice(&self.height.to_le_bytes());
+        out[32] = self.dtype.code();
+        out[33] = self.codec.code();
+        out[36..40].copy_from_slice(&self.encoded_len.to_le_bytes());
         if let Some(q) = &self.quantization {
-            out[26] = 1;
-            out[32..40].copy_from_slice(&q.code_offset.to_le_bytes());
-            out[40..48].copy_from_slice(&q.bias.to_le_bytes());
-            out[48..56].copy_from_slice(&q.read_noise.to_le_bytes());
-            out[56..64].copy_from_slice(&q.noise_slope.to_le_bytes());
-            out[64..72].copy_from_slice(&q.step.to_le_bytes());
+            out[34] = 1;
+            out[40..48].copy_from_slice(&q.code_offset.to_le_bytes());
+            out[48..56].copy_from_slice(&q.bias.to_le_bytes());
+            out[56..64].copy_from_slice(&q.read_noise.to_le_bytes());
+            out[64..72].copy_from_slice(&q.noise_slope.to_le_bytes());
+            out[72..80].copy_from_slice(&q.step.to_le_bytes());
         }
         out
     }
@@ -441,29 +446,30 @@ impl FrameHeader {
             return Ok(None);
         }
         let read_f64 = |at| f64::from_bits(read_u64(buf, at));
-        let quantization = match buf[26] {
-            0 if buf[32..72].iter().all(|&b| b == 0) => None,
+        let quantization = match buf[34] {
+            0 if buf[40..80].iter().all(|&b| b == 0) => None,
             0 => {
                 return Err(ProtoError::BadQuantization(
                     "an exact frame has no parameters",
                 ))
             }
             1 => Some(Quantization {
-                code_offset: read_u64(buf, 32) as i64,
-                bias: read_f64(40),
-                read_noise: read_f64(48),
-                noise_slope: read_f64(56),
-                step: read_f64(64),
+                code_offset: read_u64(buf, 40) as i64,
+                bias: read_f64(48),
+                read_noise: read_f64(56),
+                noise_slope: read_f64(64),
+                step: read_f64(72),
             }),
             other => return Err(ProtoError::UnknownQuantization(other)),
         };
         let header = FrameHeader {
             seq: read_u64(buf, 8),
-            width: read_u32(buf, 16),
-            height: read_u32(buf, 20),
-            dtype: DType::from_code(buf[24])?,
-            codec: Codec::from_code(buf[25])?,
-            encoded_len: read_u32(buf, 28),
+            acq_time_ns: read_u64(buf, 16) as i64,
+            width: read_u32(buf, 24),
+            height: read_u32(buf, 28),
+            dtype: DType::from_code(buf[32])?,
+            codec: Codec::from_code(buf[33])?,
+            encoded_len: read_u32(buf, 36),
             quantization,
         };
         header.validate(max_pixels)?;
@@ -511,6 +517,7 @@ impl Frame {
             })?;
         let header = FrameHeader {
             seq,
+            acq_time_ns: 0,
             width,
             height,
             dtype,
@@ -520,6 +527,13 @@ impl Frame {
         };
         header.validate(DEFAULT_MAX_PIXELS)?;
         Ok(Frame { header, payload })
+    }
+
+    /// The same frame, acquired at `acq_time_ns` (nanoseconds since the
+    /// Unix epoch).
+    pub fn acquired_at(mut self, acq_time_ns: i64) -> Frame {
+        self.header.acq_time_ns = acq_time_ns;
+        self
     }
 
     /// "No image on this feed".
@@ -680,6 +694,79 @@ impl ClientState {
         }
         self.newest_shown = Some(seq);
         true
+    }
+}
+
+// =============================================================================
+// Sizing the byte window
+// =============================================================================
+
+/// How long a client aims to have in flight, by default: the byte window is
+/// this much of the measured delivery rate. See PROTOCOL.md, "Choosing a window".
+pub const DEFAULT_TARGET_IN_FLIGHT_SEC: f64 = 0.5;
+
+/// Over how many of the latest messages, and how long, the delivery rate is
+/// measured.
+const RATE_MESSAGES: usize = 16;
+const RATE_SPAN_SEC: f64 = 2.0;
+
+/// The rate a feed's messages are arriving at, for sizing its byte window.
+#[derive(Clone, Debug, Default)]
+pub struct DeliveryRate {
+    /// (seconds, bytes) of the latest arrivals, oldest first.
+    arrivals: VecDeque<(f64, usize)>,
+}
+
+impl DeliveryRate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A message of `bytes` arrived at `now`, in seconds on any steady clock.
+    pub fn note(&mut self, now: f64, bytes: usize) {
+        self.arrivals.push_back((now, bytes));
+        while self.arrivals.len() > RATE_MESSAGES
+            || self
+                .arrivals
+                .front()
+                .is_some_and(|&(t, _)| now - t > RATE_SPAN_SEC)
+        {
+            self.arrivals.pop_front();
+        }
+    }
+
+    /// Forget what arrived, as for a new connection.
+    pub fn clear(&mut self) {
+        self.arrivals.clear();
+    }
+
+    /// Bytes a second: all but the first recent message's bytes, over the
+    /// time since it arrived. `None` until two have arrived close enough
+    /// together to say.
+    pub fn bytes_per_sec(&self) -> Option<f64> {
+        let (&(t0, _), &(t1, _)) = (self.arrivals.front()?, self.arrivals.back()?);
+        let bytes: usize = self.arrivals.iter().skip(1).map(|&(_, n)| n).sum();
+        (t1 > t0).then(|| bytes as f64 / (t1 - t0))
+    }
+
+    /// The byte window that keeps `target_sec` of the delivery rate in
+    /// flight, but never less than room for two of the largest recent
+    /// messages: with only one in flight, a link that takes longer than a
+    /// round trip to carry a frame sits idle for a round trip after each, and
+    /// the rate measured that way is too low ever to make room for a second.
+    /// Two and a half, in fact, since the next frame may be a little larger
+    /// than any yet; three still won't fit.
+    /// Before there is a rate, 1, which (the server always letting one frame
+    /// go when none is in flight) means a frame at a time.
+    pub fn window_bytes(&self, target_sec: f64) -> u32 {
+        let Some(rate) = self.bytes_per_sec() else {
+            return 1;
+        };
+        let largest = self.arrivals.iter().map(|&(_, n)| n).max().unwrap_or(0);
+        (rate * target_sec)
+            .round()
+            .max(2.5 * largest as f64)
+            .clamp(1.0, u32::MAX as f64) as u32
     }
 }
 

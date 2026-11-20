@@ -16,14 +16,17 @@ fn vectors() -> Vec<(&'static str, Vec<u8>)> {
     vec![
         (
             "frame_u16_raw",
-            frame(
+            Frame::new(
                 0x0102_0304_0506_0708,
                 3,
                 2,
                 DType::U16,
                 Codec::Raw,
                 ramp(12),
-            ),
+            )
+            .unwrap()
+            .acquired_at(ACQ_TIME_NS)
+            .encode(),
         ),
         (
             "frame_f32_zstd",
@@ -57,6 +60,9 @@ fn vectors() -> Vec<(&'static str, Vec<u8>)> {
         ),
     ]
 }
+
+/// 2026-11-20T21:00:00.123456789Z
+const ACQ_TIME_NS: i64 = 1_795_208_400_123_456_789;
 
 const QUANTIZATION: Quantization = Quantization {
     code_offset: -3,
@@ -99,26 +105,29 @@ fn header_layout_is_as_specified() {
     assert_eq!(&frame[..4], b"VCAM");
     assert_eq!((frame[4], frame[5]), (1, 1));
     assert_eq!(&frame[8..16], &0x0102_0304_0506_0708u64.to_le_bytes());
-    assert_eq!(&frame[16..20], &3u32.to_le_bytes());
-    assert_eq!(&frame[20..24], &2u32.to_le_bytes());
-    assert_eq!((frame[24], frame[25]), (3, 0)); // u16, raw
-    assert_eq!(&frame[28..32], &12u32.to_le_bytes());
+    assert_eq!(&frame[16..24], &ACQ_TIME_NS.to_le_bytes());
+    assert_eq!(&frame[24..28], &3u32.to_le_bytes());
+    assert_eq!(&frame[28..32], &2u32.to_le_bytes());
+    assert_eq!((frame[32], frame[33]), (3, 0)); // u16, raw
+    assert_eq!(&frame[36..40], &12u32.to_le_bytes());
     assert_eq!(frame.len(), FRAME_HEADER_LEN + 12);
 
     let compressed = &vectors()[1].1;
-    assert_eq!((compressed[24], compressed[25]), (9, 1)); // f32, shuffle-zstd
-    assert_eq!(&compressed[28..32], &9u32.to_le_bytes());
+    // No acquisition time given: 0, unknown.
+    assert_eq!(&compressed[16..24], &[0; 8]);
+    assert_eq!((compressed[32], compressed[33]), (9, 1)); // f32, shuffle-zstd
+    assert_eq!(&compressed[36..40], &9u32.to_le_bytes());
     // Exact: no quantization, and no parameters.
-    assert_eq!(compressed[26], 0);
-    assert_eq!(&compressed[32..72], &[0; 40]);
+    assert_eq!(compressed[34], 0);
+    assert_eq!(&compressed[40..80], &[0; 40]);
 
     let quantized = &vectors()[3].1;
-    assert_eq!((quantized[24], quantized[25], quantized[26]), (1, 1, 1)); // u8, shuffle-zstd
-    assert_eq!(&quantized[32..40], &(-3i64).to_le_bytes());
-    assert_eq!(&quantized[40..48], &432.0f64.to_le_bytes());
-    assert_eq!(&quantized[48..56], &14.25f64.to_le_bytes());
-    assert_eq!(&quantized[56..64], &8.5f64.to_le_bytes());
-    assert_eq!(&quantized[64..72], &0.25f64.to_le_bytes());
+    assert_eq!((quantized[32], quantized[33], quantized[34]), (1, 1, 1)); // u8, shuffle-zstd
+    assert_eq!(&quantized[40..48], &(-3i64).to_le_bytes());
+    assert_eq!(&quantized[48..56], &432.0f64.to_le_bytes());
+    assert_eq!(&quantized[56..64], &14.25f64.to_le_bytes());
+    assert_eq!(&quantized[64..72], &8.5f64.to_le_bytes());
+    assert_eq!(&quantized[72..80], &0.25f64.to_le_bytes());
     assert_eq!(quantized.len(), FRAME_HEADER_LEN + 4);
 }
 
@@ -158,13 +167,13 @@ fn quantized_frames_need_unsigned_codes_and_a_noise_model() {
     let mut message = Frame::new(3, 1, 1, DType::U8, Codec::Raw, vec![7])
         .unwrap()
         .encode();
-    message[26] = 2;
+    message[34] = 2;
     assert_eq!(
         Frame::decode(&message, DEFAULT_MAX_PIXELS),
         Err(ProtoError::UnknownQuantization(2))
     );
-    message[26] = 0;
-    message[50] = 1;
+    message[34] = 0;
+    message[58] = 1;
     assert!(matches!(
         Frame::decode(&message, DEFAULT_MAX_PIXELS),
         Err(ProtoError::BadQuantization(_))
@@ -269,11 +278,11 @@ fn malformed_messages_are_rejected() {
     };
     assert_eq!(decode(4, 2), Err(ProtoError::UnsupportedVersion(2)));
     assert_eq!(decode(5, 9), Err(ProtoError::UnknownKind(9)));
-    assert_eq!(decode(24, 11), Err(ProtoError::UnknownDtype(11)));
-    assert_eq!(decode(25, 2), Err(ProtoError::UnknownCodec(2)));
+    assert_eq!(decode(32, 11), Err(ProtoError::UnknownDtype(11)));
+    assert_eq!(decode(33, 2), Err(ProtoError::UnknownCodec(2)));
     // A raw frame whose length field disagrees with its dimensions.
     assert!(matches!(
-        decode(28, 13),
+        decode(36, 13),
         Err(ProtoError::BadEncodedLength { .. })
     ));
 
@@ -289,6 +298,7 @@ fn malformed_messages_are_rejected() {
 fn oversized_images_are_refused_before_allocating() {
     let header = FrameHeader {
         seq: 0,
+        acq_time_ns: 0,
         width: 100_000,
         height: 100_000,
         dtype: DType::U8,
@@ -374,4 +384,45 @@ fn client_state_shows_only_the_newest_frame() {
     assert!(!s.is_stale(5));
     assert!(s.accept(5));
     assert!(!s.accept(5), "the same frame twice is not newer");
+}
+
+#[test]
+fn the_delivery_rate_is_over_the_latest_arrivals() {
+    let mut rate = DeliveryRate::new();
+    assert_eq!(rate.bytes_per_sec(), None);
+    assert_eq!(
+        rate.window_bytes(0.5),
+        1,
+        "a frame at a time until there is a rate"
+    );
+    rate.note(10.0, 1000);
+    assert_eq!(rate.bytes_per_sec(), None);
+    // 1000 bytes every 0.1 s: the first message only starts the clock.
+    for i in 1..=4 {
+        rate.note(10.0 + 0.1 * i as f64, 1000);
+    }
+    assert!((rate.bytes_per_sec().unwrap() - 10_000.0).abs() < 1e-6);
+    assert_eq!(rate.window_bytes(0.5), 5000);
+    // Frames too large for the target alone still get two in flight.
+    assert_eq!(rate.window_bytes(0.1), 2500);
+
+    // A pause longer than the span leaves one arrival: no rate again.
+    rate.note(20.0, 1000);
+    assert_eq!(rate.bytes_per_sec(), None);
+    rate.clear();
+    assert_eq!(rate.window_bytes(0.5), 1);
+}
+
+#[test]
+fn the_delivery_rate_forgets_all_but_the_latest_messages() {
+    let mut rate = DeliveryRate::new();
+    // Slow at first, then ten times faster: only the latest count.
+    for i in 0..10 {
+        rate.note(0.1 * i as f64, 100);
+    }
+    let t = 0.9;
+    for i in 1..=RATE_MESSAGES {
+        rate.note(t + 0.01 * i as f64, 100);
+    }
+    assert!((rate.bytes_per_sec().unwrap() - 10_000.0).abs() < 1e-6);
 }

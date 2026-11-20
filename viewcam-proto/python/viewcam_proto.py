@@ -47,14 +47,14 @@ DTYPES = {
     10: ("<f8", 8),
 }
 
-# prefix (magic, version, kind, reserved), seq, width, height, dtype, codec,
-# quantization, reserved, encoded_len, code_offset, bias, read_noise,
-# noise_slope, step
-_FRAME = struct.Struct("<4sBBHQIIBBBBIqdddd")
+# prefix (magic, version, kind, reserved), seq, acq_time_ns, width, height,
+# dtype, codec, quantization, reserved, encoded_len, code_offset, bias,
+# read_noise, noise_slope, step
+_FRAME = struct.Struct("<4sBBHQqIIBBBBIqdddd")
 # prefix, acked_frames, acked_bytes, window_frames, window_bytes
 _ACK = struct.Struct("<4sBBHQQII")
 
-FRAME_HEADER_LEN = _FRAME.size  # 72
+FRAME_HEADER_LEN = _FRAME.size  # 80
 ACK_LEN = _ACK.size  # 32
 
 
@@ -98,7 +98,7 @@ class Quantization(NamedTuple):
 
 def encode_frame(
     seq: int, width: int, height: int, dtype: int, payload, codec: int = CODEC_RAW,
-    quantization: Quantization | None = None,
+    quantization: Quantization | None = None, acq_time_ns: int = 0,
 ) -> bytes:
     """A FRAME message: the header, then ``payload``.
 
@@ -109,6 +109,9 @@ def encode_frame(
 
     With ``quantization``, the image is quantized codes of ``dtype`` (u8, u16
     or u32), which the client turns into float32 values.
+
+    ``acq_time_ns`` is when the image was acquired, in nanoseconds since the
+    Unix epoch; 0 if not known.
     """
     if dtype not in DTYPES:
         raise ProtocolError(f"unknown dtype code {dtype}")
@@ -139,7 +142,9 @@ def encode_frame(
         if not (q.read_noise > 0 and q.step > 0 and q.noise_slope >= 0):
             raise ProtocolError("read noise and step must be positive, and the slope not negative")
         flag, params = 1, (int(q.code_offset), *map(float, model))
-    header = _FRAME.pack(MAGIC, VERSION, KIND_FRAME, 0, seq, width, height, dtype, codec, flag, 0, encoded, *params)
+    header = _FRAME.pack(
+        MAGIC, VERSION, KIND_FRAME, 0, seq, int(acq_time_ns), width, height, dtype, codec, flag, 0, encoded, *params
+    )
     return header + payload
 
 

@@ -52,7 +52,7 @@ export const DTYPES = {
   10: ['f64', 8],
 };
 
-export const FRAME_HEADER_LEN = 72;
+export const FRAME_HEADER_LEN = 80;
 export const ACK_LEN = 32;
 /** The most pixels a frame may claim before it is rejected unread. */
 export const DEFAULT_MAX_PIXELS = 2 ** 28;
@@ -123,7 +123,9 @@ function checkPrefix(view, kind) {
 /**
  * Check a FRAME message (an ArrayBuffer) and return its header and payload.
  *
- * `seq` is a BigInt, since it is a u64. `payload` is a Uint8Array view of
+ * `seq` is a BigInt, since it is a u64; so is `acqTimeNs`, when the image
+ * was acquired in nanoseconds since the Unix epoch, 0n if the server
+ * doesn't know. `payload` is a Uint8Array view of
  * the message, still encoded with `codec`. An empty frame ("no image on
  * this feed") has `width * height === 0`. A quantized frame has
  * `quantization`, `{ codeOffset, bias, readNoise, noiseSlope, step }`, its
@@ -138,11 +140,12 @@ export function decodeFrame(message, maxPixels = DEFAULT_MAX_PIXELS) {
   const view = new DataView(message);
   checkPrefix(view, KIND_FRAME);
   const seq = view.getBigUint64(8, true);
-  const width = view.getUint32(16, true);
-  const height = view.getUint32(20, true);
-  const dtypeCode = view.getUint8(24);
-  const codec = view.getUint8(25);
-  const encodedLen = view.getUint32(28, true);
+  const acqTimeNs = view.getBigInt64(16, true);
+  const width = view.getUint32(24, true);
+  const height = view.getUint32(28, true);
+  const dtypeCode = view.getUint8(32);
+  const codec = view.getUint8(33);
+  const encodedLen = view.getUint32(36, true);
   if (!(dtypeCode in DTYPES)) throw new ProtocolError(`unknown dtype code ${dtypeCode}`);
   if (codec !== CODEC_RAW && codec !== CODEC_SHUFFLE_ZSTD) {
     throw new ProtocolError(`unknown codec code ${codec}`);
@@ -171,15 +174,15 @@ export function decodeFrame(message, maxPixels = DEFAULT_MAX_PIXELS) {
       `frame message is ${message.byteLength} bytes, its header says ${FRAME_HEADER_LEN + encodedLen}`);
   }
   return {
-    seq, width, height, dtype, dtypeCode, elementSize, codec, decodedLen, quantization,
+    seq, acqTimeNs, width, height, dtype, dtypeCode, elementSize, codec, decodedLen, quantization,
     payload: new Uint8Array(message, FRAME_HEADER_LEN, encodedLen),
   };
 }
 
 function readQuantization(view, dtypeCode) {
-  const flag = view.getUint8(26);
+  const flag = view.getUint8(34);
   if (flag === 0) {
-    for (let at = 32; at < 72; at++) {
+    for (let at = 40; at < 80; at++) {
       if (view.getUint8(at) !== 0) throw new ProtocolError('bad quantized frame: an exact frame has no parameters');
     }
     return null;
@@ -187,11 +190,11 @@ function readQuantization(view, dtypeCode) {
   if (flag !== 1) throw new ProtocolError(`unknown quantization ${flag}`);
   if (!CODE_DTYPES.includes(dtypeCode)) throw new ProtocolError('bad quantized frame: codes are u8, u16 or u32');
   const q = {
-    codeOffset: Number(view.getBigInt64(32, true)),
-    bias: view.getFloat64(40, true),
-    readNoise: view.getFloat64(48, true),
-    noiseSlope: view.getFloat64(56, true),
-    step: view.getFloat64(64, true),
+    codeOffset: Number(view.getBigInt64(40, true)),
+    bias: view.getFloat64(48, true),
+    readNoise: view.getFloat64(56, true),
+    noiseSlope: view.getFloat64(64, true),
+    step: view.getFloat64(72, true),
   };
   const model = [q.bias, q.readNoise, q.noiseSlope, q.step];
   if (!model.every(Number.isFinite) || !(q.readNoise > 0 && q.step > 0 && q.noiseSlope >= 0)) {
@@ -243,6 +246,71 @@ export function workerDecoder(worker) {
   });
 }
 
+/** How long a client aims to have in flight, by default; see DeliveryRate. */
+export const DEFAULT_TARGET_IN_FLIGHT_MS = 500;
+
+// Over how many of the latest messages, and how long, the delivery rate is measured.
+const RATE_MESSAGES = 16;
+const RATE_SPAN_MS = 2000;
+
+/**
+ * The rate a feed's messages are arriving at, for sizing its byte window
+ * (PROTOCOL.md, "Choosing a window"). The same as the Rust crate's
+ * `DeliveryRate`.
+ */
+export class DeliveryRate {
+  constructor() {
+    // [ms, bytes] of the latest arrivals, oldest first.
+    this.arrivals = [];
+  }
+
+  /** A message of `bytes` arrived at `now`, in milliseconds on a steady clock. */
+  note(now, bytes) {
+    this.arrivals.push([now, bytes]);
+    while (this.arrivals.length > RATE_MESSAGES || now - this.arrivals[0][0] > RATE_SPAN_MS) {
+      this.arrivals.shift();
+    }
+  }
+
+  clear() {
+    this.arrivals.length = 0;
+  }
+
+  /**
+   * Bytes a second: all but the first recent message's bytes, over the time
+   * since it arrived; null until two have arrived close enough together to say.
+   */
+  bytesPerSec() {
+    const n = this.arrivals.length;
+    if (n < 2) return null;
+    const span = this.arrivals[n - 1][0] - this.arrivals[0][0];
+    if (span <= 0) return null;
+    let bytes = 0;
+    for (let i = 1; i < n; i++) bytes += this.arrivals[i][1];
+    return (1000 * bytes) / span;
+  }
+
+  /**
+   * The byte window that keeps `targetMs` of the delivery rate in flight,
+   * but never less than room for two of the largest recent messages: with
+   * only one in flight, a link that takes longer than a round trip to carry
+   * a frame sits idle for a round trip after each, and the rate measured
+   * that way is too low ever to make room for a second. Two and a half, in
+   * fact, since the next frame may be a little larger than any yet; three
+   * still won't fit. Before there is a
+   * rate, 1, which (the server always letting one frame go when none is in
+   * flight) means a frame at a time.
+   */
+  windowBytes(targetMs) {
+    const rate = this.bytesPerSec();
+    if (rate === null) return 1;
+    let largest = 0;
+    for (const [, bytes] of this.arrivals) largest = Math.max(largest, bytes);
+    const bytes = Math.max(Math.round((rate * targetMs) / 1000), 2.5 * largest);
+    return Math.min(Math.max(bytes, 1), 0xffffffff);
+  }
+}
+
 /**
  * A client for one feed: a WebSocket that reconnects, acknowledges each
  * frame on arrival, and keeps the decoding queue to one frame in progress
@@ -255,17 +323,24 @@ export function workerDecoder(worker) {
  *    the compressed codecs (shuffled when elementSize > 1) and quantized
  *    frames, whose codes it turns into float32 values (see
  *    viewcam-codec's decode-worker.js); exact `raw` frames need none.
- *  - `onFrame({ seq, width, height, dtype, pixels, quantization })`, pixels
- *    an ArrayBuffer of the decoded image, row-major from the bottom row. A
- *    quantized frame arrives as 'f32' values, with its `quantization`;
- *    otherwise that is null.
+ *  - `onFrame({ seq, width, height, dtype, pixels, quantization, acquiredMs })`,
+ *    pixels an ArrayBuffer of the decoded image, row-major from the bottom
+ *    row. A quantized frame arrives as 'f32' values, with its
+ *    `quantization`; otherwise that is null. `acquiredMs` is when the image
+ *    was acquired, in milliseconds since the Unix epoch (comparable with
+ *    `Date.now()`), or null if the server doesn't know.
  *  - `onEmpty({ seq })` when the feed has no image.
  *  - `onStatus(status)`: 'connecting', 'open' or 'closed'.
  *  - `onReceive(bytes)` for every message received, decoded or skipped,
  *    with its length: what the feed costs in bandwidth.
  *  - `onError(error)`, for frames that fail to decode.
- *  - `windowFrames` (default 6) and `windowBytes` (default 0, no limit);
- *    see PROTOCOL.md, "Choosing a window".
+ *  - `windowFrames` (default 6): frames allowed in flight.
+ *  - `targetInFlightMs` (default 500): size the byte window to keep this
+ *    much of the measured delivery rate in flight, so that while the link
+ *    is what limits the frame rate, frames arrive about this far behind the
+ *    newest rather than a whole window of frames behind. 0 to use a fixed
+ *    `windowBytes` (default 0, no limit) instead. See PROTOCOL.md,
+ *    "Choosing a window".
  *  - `maxFps` (default 0, no limit): acknowledge at most this many times a
  *    second, each ack covering everything received since the last. With a
  *    window of 1 that caps the frame rate, and each frame is still the
@@ -273,7 +348,8 @@ export function workerDecoder(worker) {
  *    a burst of up to that many frames through per ack.
  *  - `reconnectDelayMs` (default 1000), doubling to `maxReconnectDelayMs`
  *    (default 10000) while connecting keeps failing.
- *  - `WebSocket`, a constructor to use instead of the global one.
+ *  - `WebSocket`, a constructor to use instead of the global one, and
+ *    `now`, a steady clock in milliseconds instead of `performance.now`.
  */
 export class ViewcamFeed {
   constructor(url, options = {}) {
@@ -286,10 +362,13 @@ export class ViewcamFeed {
     this.onError = options.onError ?? ((error) => console.error(`viewcam feed ${url}:`, error));
     this.windowFrames = options.windowFrames ?? 6;
     this.windowBytes = options.windowBytes ?? 0;
+    this.targetInFlightMs = options.targetInFlightMs ?? DEFAULT_TARGET_IN_FLIGHT_MS;
+    this.rate = new DeliveryRate();
     this.maxFps = options.maxFps ?? 0;
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1000;
     this.maxReconnectDelayMs = options.maxReconnectDelayMs ?? 10000;
     this.WebSocket = options.WebSocket ?? globalThis.WebSocket;
+    this.now = options.now ?? (() => performance.now());
     this.maxPixels = options.maxPixels ?? DEFAULT_MAX_PIXELS;
 
     this.ws = null;
@@ -307,7 +386,10 @@ export class ViewcamFeed {
     this.connect();
   }
 
-  /** Resize the window, or pause the feed with `windowFrames = 0`. */
+  /**
+   * Resize the window, or pause the feed with `windowFrames = 0`. The byte
+   * window given applies only with `targetInFlightMs = 0`.
+   */
   setWindow(windowFrames, windowBytes = this.windowBytes) {
     this.windowFrames = windowFrames;
     this.windowBytes = windowBytes;
@@ -340,6 +422,7 @@ export class ViewcamFeed {
     this.receivedBytes = 0;
     this.ackedFrames = 0;
     this.ackedBytes = 0;
+    this.rate.clear();
     this.cancelAck();
     this.shownSeq = -1n;
     this.waiting = null;
@@ -366,7 +449,7 @@ export class ViewcamFeed {
   /** Acknowledge what has arrived, now or, when paced, once it's time. */
   acknowledge() {
     if (this.ackTimer !== null || this.receivedFrames === this.ackedFrames) return;
-    const wait = this.maxFps > 0 ? this.lastAckAt + 1000 / this.maxFps - performance.now() : 0;
+    const wait = this.maxFps > 0 ? this.lastAckAt + 1000 / this.maxFps - this.now() : 0;
     if (wait > 0) {
       this.ackTimer = setTimeout(() => {
         this.ackTimer = null;
@@ -374,7 +457,7 @@ export class ViewcamFeed {
       }, wait);
       return;
     }
-    this.lastAckAt = performance.now();
+    this.lastAckAt = this.now();
     this.ackedFrames = this.receivedFrames;
     this.ackedBytes = this.receivedBytes;
     this.sendAck();
@@ -392,7 +475,7 @@ export class ViewcamFeed {
       ackedFrames: this.ackedFrames,
       ackedBytes: this.ackedBytes,
       windowFrames: this.windowFrames,
-      windowBytes: this.windowBytes,
+      windowBytes: this.targetInFlightMs > 0 ? this.rate.windowBytes(this.targetInFlightMs) : this.windowBytes,
     }));
   }
 
@@ -414,6 +497,7 @@ export class ViewcamFeed {
     // against the window.
     this.receivedFrames += 1;
     this.receivedBytes += message.byteLength;
+    this.rate.note(this.now(), message.byteLength);
     this.acknowledge();
     if (this.decoding) {
       this.waiting = frame; // newest wins
@@ -468,6 +552,7 @@ export class ViewcamFeed {
     if (seq <= this.shownSeq) return;
     this.shownSeq = seq;
     const dtype = quantization ? 'f32' : frame.dtype;
-    this.onFrame({ seq, width, height, dtype, pixels, quantization });
+    const acquiredMs = frame.acqTimeNs === 0n ? null : Number(frame.acqTimeNs) / 1e6;
+    this.onFrame({ seq, width, height, dtype, pixels, quantization, acquiredMs });
   }
 }

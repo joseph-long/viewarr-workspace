@@ -92,24 +92,25 @@ kind.
 
 ### `FRAME` (kind 1, server → client)
 
-72-byte header, then `encoded_len` bytes of payload, and nothing after it:
+80-byte header, then `encoded_len` bytes of payload, and nothing after it:
 
 | Offset | Size | Field          | Notes                                     |
 | -----: | ---: | -------------- | ----------------------------------------- |
 |      0 |    8 | prefix         | `kind = 1`                                |
 |      8 |    8 | `seq`          | u64, strictly increasing within a feed    |
-|     16 |    4 | `width`        | u32                                       |
-|     20 |    4 | `height`       | u32                                       |
-|     24 |    1 | `dtype`        | element type, below                       |
-|     25 |    1 | `codec`        | payload encoding, below                   |
-|     26 |    1 | `quantization` | `0` = exact, `1` = noise-matched, below   |
-|     27 |    1 | `reserved`     | `0`                                       |
-|     28 |    4 | `encoded_len`  | u32, payload length in bytes              |
-|     32 |    8 | `code_offset`  | i64; quantized frames only, else `0`      |
-|     40 |    8 | `bias`         | f64; quantized frames only, else `0`      |
-|     48 |    8 | `read_noise`   | f64; quantized frames only, else `0`      |
-|     56 |    8 | `noise_slope`  | f64; quantized frames only, else `0`      |
-|     64 |    8 | `step`         | f64; quantized frames only, else `0`      |
+|     16 |    8 | `acq_time_ns`  | i64, when acquired, below; `0` = unknown  |
+|     24 |    4 | `width`        | u32                                       |
+|     28 |    4 | `height`       | u32                                       |
+|     32 |    1 | `dtype`        | element type, below                       |
+|     33 |    1 | `codec`        | payload encoding, below                   |
+|     34 |    1 | `quantization` | `0` = exact, `1` = noise-matched, below   |
+|     35 |    1 | `reserved`     | `0`                                       |
+|     36 |    4 | `encoded_len`  | u32, payload length in bytes              |
+|     40 |    8 | `code_offset`  | i64; quantized frames only, else `0`      |
+|     48 |    8 | `bias`         | f64; quantized frames only, else `0`      |
+|     56 |    8 | `read_noise`   | f64; quantized frames only, else `0`      |
+|     64 |    8 | `noise_slope`  | f64; quantized frames only, else `0`      |
+|     72 |    8 | `step`         | f64; quantized frames only, else `0`      |
 
 The decoded image is `width × height` elements of `dtype`, little-endian,
 row-major, with no padding; the first row is `y = 0`, the bottom row as
@@ -118,6 +119,12 @@ the **decoded length**.
 
 A frame with `width × height = 0` means "no image on this feed", e.g. a
 dark that has been withdrawn. Its `encoded_len` is 0.
+
+`acq_time_ns` is when the image was acquired, in nanoseconds since the Unix
+epoch (UTC), as the server's clock has it: for an ImageStreamIO stream, the
+image's `atime`. It is `0` if the server doesn't know. Clients compare it
+with their own clock to tell how old a frame is, which is only as good as
+the two clocks' agreement (NTP keeps that to milliseconds).
 
 `seq` strictly increases on a connection; gaps are fine, and are what a
 client sees of the frames the server skipped. It can be the camera's own
@@ -280,10 +287,28 @@ A window of `F` frames and `B` bytes, over a round trip `rtt`, allows at most
 - `window_frames` of about `rtt × fps` plus one or two reaches a frame rate
   `fps` (6 covers 30 fps over 150 ms). Larger buys nothing but a longer
   catch-up.
-- `window_bytes` matters when frames are large compared with the link: set
-  it to about what the link carries in a round trip, and the catch-up after
-  a stall is about one round trip's worth of data. `0` leaves the frame count
-  as the only bound.
+- `window_bytes` matters when frames are large compared with the link.
+  While the link is what limits the rate, every frame waits behind whatever
+  else is in flight, so a window of `F` frames makes each frame arrive about
+  `F` frames' transfer time behind the newest: 6 frames of 600 kB over a
+  1.5 MB/s link is over two seconds. A client can't know the link's rate in
+  advance, but it can measure the rate frames arrive at and size the byte
+  window from that: `window_bytes = rate × T` keeps about `T` seconds of
+  data in flight, so frames arrive about `T` behind the newest, whatever the
+  link; and when the camera rather than the link sets the rate, the window
+  covers `T` of what the camera sends and holds nothing back. Leave room
+  for at least two frames, though: with one in flight, a link that takes
+  longer than a round trip to carry a frame sits idle for a round trip
+  after each, and the rate measured that way is too low ever to make room
+  for a second. With two, the next frame is on its way while one arrives,
+  and each waits behind at most one other. (Leave a little more than room
+  for two, since the next frame may be a little larger than any yet.) Until
+  there is a rate,
+  `window_bytes = 1` asks for a frame at a time, since the server always
+  lets one frame go when none is in flight. The reference clients measure
+  the rate over the latest 16 messages or 2 seconds, whichever is fewer, and
+  use `window_bytes = max(rate × 0.5 s, 2.5 × the largest of those messages)`.
+  `0` leaves the frame count as the only bound.
 - A rarely changing feed like the dark needs a window of 1.
 - `window_frames = 0` pauses a feed (a hidden tab, a collapsed panel) without
   closing it; reopening the window gets the newest frame straight away.

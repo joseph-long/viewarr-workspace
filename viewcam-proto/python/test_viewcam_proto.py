@@ -23,7 +23,10 @@ class TestVectors(unittest.TestCase):
         self.assertEqual(encoded, (VECTORS / f"{name}.bin").read_bytes(), name)
 
     def test_frame_u16_raw(self):
-        self.check("frame_u16_raw", vp.encode_frame(0x0102030405060708, 3, 2, 3, ramp(12)))
+        self.check(
+            "frame_u16_raw",
+            vp.encode_frame(0x0102030405060708, 3, 2, 3, ramp(12), acq_time_ns=1_795_208_400_123_456_789),
+        )
 
     def test_frame_f32_zstd(self):
         self.check("frame_f32_zstd", vp.encode_frame(7, 2, 2, 9, ramp(9), vp.CODEC_SHUFFLE_ZSTD))

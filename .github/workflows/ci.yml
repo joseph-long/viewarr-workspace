@@ -166,10 +166,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Not setup-python: in a container it lends the host runner's Python
+      # from the tool cache, built for the host's Ubuntu, and when the host
+      # moved to 26.04 that Python's ssl module stopped loading in this 24.04
+      # image, leaving pip unable to reach PyPI. uv's managed Python is a
+      # self-contained build, OpenSSL included, so it runs whatever the host.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+
       - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
+        run: |
+          set -eux
+          uv venv --python 3.12 --python-preference only-managed "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/venv/bin/python" -c "import ssl; print(ssl.OPENSSL_VERSION)"
 
       - name: Download extension package
         uses: actions/download-artifact@v8
@@ -180,7 +191,7 @@ jobs:
       - name: Install the extension (provides jlpm + jupyterlab)
         run: |
           set -eux
-          python -m pip install "jupyterlab>=4.0.0,<5" dist/fitsview*.whl
+          uv pip install "jupyterlab>=4.0.0,<5" dist/fitsview*.whl
 
       - name: Install ui-tests dependencies
         working-directory: jupyterlab-fitsview/ui-tests
@@ -260,10 +271,21 @@ jobs:
           name: viewarr-pkg
           path: viewarr/pkg
 
+      # Not setup-python: in a container it lends the host runner's Python
+      # from the tool cache, built for the host's Ubuntu, and when the host
+      # moved to 26.04 that Python's ssl module stopped loading in this 24.04
+      # image, leaving pip unable to reach PyPI. uv's managed Python is a
+      # self-contained build, OpenSSL included, so it runs whatever the host.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+
       - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
+        run: |
+          set -eux
+          uv venv --python 3.12 --python-preference only-managed "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/venv/bin/python" -c "import ssl; print(ssl.OPENSSL_VERSION)"
 
       - name: Install JavaScript dependencies
         run: npm install
@@ -277,11 +299,8 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          # Use `python -m pip` throughout: in the Playwright container the
-          # setup-python interpreter is on PATH but a bare `pip` shim is not.
-          python -m pip install --upgrade pip
-          python -m pip install build
-          python -m pip install -e ".[dev]"
+          # Into the venv from "Set up Python" (VIRTUAL_ENV), which has no pip.
+          uv pip install build -e ".[dev]"
 
       - name: Verify Playwright browsers are preinstalled (fail instead of downloading)
         run: |

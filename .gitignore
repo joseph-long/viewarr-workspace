@@ -35,6 +35,7 @@ viewarr/target/
 viewarr/pkg/
 viewarr-native/target/
 viewcam/target/
+viewcam-native/target/
 viewcam/pkg/
 viewcam-proto/target/
 viewcam-codec/target/

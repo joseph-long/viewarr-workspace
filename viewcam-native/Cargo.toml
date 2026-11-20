@@ -1,0 +1,43 @@
+[package]
+name = "viewcam-native"
+version = "0.1.0"
+edition = "2021"
+authors = ["Joseph D. Long <me@joseph-long.com>"]
+license = "MIT"
+description = "Native desktop viewer for viewcam camera streams"
+repository = "https://github.com/joseph-long/viewarr"
+
+[lib]
+name = "viewcam_native"
+path = "src/lib.rs"
+
+[[bin]]
+name = "viewcam"
+path = "src/main.rs"
+
+[dependencies]
+# The same ViewcamWidget (and so the same viewarr viewer) the browser gets,
+# and the protocol and codec crates the browser client mirrors.
+viewcam = { path = "../viewcam" }
+viewarr = { path = "../viewarr" }
+viewcam-proto = { path = "../viewcam-proto" }
+viewcam-codec = { path = "../viewcam-codec" }
+
+# Keep these pinned to the same versions viewarr uses, so there is exactly one
+# egui in the dependency graph (two copies would not share types).
+egui = "0.33.3"
+eframe = "0.33.3"
+egui-phosphor = "0.11"
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+# Blocking WebSockets, one thread per feed; rustls with the webpki roots, so
+# wss:// needs no system OpenSSL.
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# For the stream catalog at /ws/viewcam/, which names a camera's companions.
+ureq = { version = "3", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3

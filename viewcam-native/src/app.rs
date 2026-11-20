@@ -15,7 +15,7 @@ use egui_phosphor as phosphor;
 use viewcam::status::{now_secs, FeedRole, FrameInfo};
 use viewcam::widget::ViewcamWidget;
 
-use crate::decode::{quantized_threshold, DecodedFrame};
+use crate::decode::DecodedFrame;
 use crate::feed::{Feed, FeedEvent};
 use crate::{pacing, FeedSpec};
 
@@ -32,11 +32,6 @@ pub struct CameraApp {
     events: Receiver<(FeedRole, FeedEvent)>,
     latest: Arc<Latest>,
     turbo: bool,
-    /// For a camera without a saturation mask: data at or above this is saturated.
-    saturation_level: Option<f64>,
-    /// The level last given the widget, which for a quantized frame is the
-    /// threshold between codes rather than the level itself.
-    applied_level: Option<f64>,
 }
 
 impl CameraApp {
@@ -89,8 +84,6 @@ impl CameraApp {
             events,
             latest,
             turbo,
-            saturation_level,
-            applied_level: saturation_level,
         }
     }
 
@@ -133,29 +126,13 @@ impl CameraApp {
             acquired: decoded.acquired,
         };
         match role {
-            FeedRole::Data => {
-                self.follow_saturation_level(&decoded);
-                self.widget.set_data(decoded.frame);
-            }
+            // A quantized frame carries its quantizer, with which the
+            // widget compares it with any saturation level.
+            FeedRole::Data => self.widget.set_data(decoded.frame),
             FeedRole::Dark => self.widget.set_dark(Some(decoded.frame)),
             FeedRole::Saturation => self.widget.set_saturation(Some(decoded.frame)),
         }
         self.widget.status_mut().note_frame(role, info, now);
-    }
-
-    /// A quantized frame's values are rounded, so compare a saturation level
-    /// with the threshold between its code and the one below.
-    fn follow_saturation_level(&mut self, decoded: &DecodedFrame) {
-        let Some(level) = self.saturation_level else {
-            return;
-        };
-        let level = decoded
-            .quantization
-            .map_or(level, |q| quantized_threshold(level, &q));
-        if self.applied_level != Some(level) {
-            self.applied_level = Some(level);
-            self.widget.set_saturation_level(Some(level));
-        }
     }
 
     fn apply_turbo(&mut self) {

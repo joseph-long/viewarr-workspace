@@ -16,7 +16,7 @@
  *     meta,                      // anything; echoed back (width, dtype, seq, ...)
  *   }, planes.map((p) => p.encoded));
  *
- * `encoded` is a `shuffle-zstd` payload, or with `codec: 'raw'` the image
+ * `encoded` is a `bitshuffle-zstd` payload, or with `codec: 'raw'` the image
  * itself. A plane with `quantized: { codeOffset, bias, readNoise,
  * noiseSlope, step }` holds the codes of a noise-matched quantized image,
  * `elementSize` bytes each, and decodes to their float32 values.

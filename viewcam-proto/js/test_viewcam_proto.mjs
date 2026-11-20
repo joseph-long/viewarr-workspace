@@ -26,7 +26,7 @@ test('frames decode as the vectors were written', () => {
   const zstd = vp.decodeFrame(vector('frame_f32_zstd'));
   assert.deepEqual(
     [zstd.seq, zstd.dtype, zstd.codec, zstd.elementSize, zstd.decodedLen],
-    [7n, 'f32', vp.CODEC_SHUFFLE_ZSTD, 4, 16]);
+    [7n, 'f32', vp.CODEC_BITSHUFFLE_ZSTD, 4, 16]);
   assert.equal(zstd.acqTimeNs, 0n);
   assert.deepEqual(zstd.payload, ramp(9));
 
@@ -35,30 +35,9 @@ test('frames decode as the vectors were written', () => {
   assert.equal(empty.quantization, null);
 
   const quantized = vp.decodeFrame(vector('frame_u8_quantized_zstd'));
-  assert.deepEqual([quantized.seq, quantized.dtype, quantized.codec], [12n, 'u8', vp.CODEC_SHUFFLE_ZSTD]);
+  assert.deepEqual([quantized.seq, quantized.dtype, quantized.codec], [12n, 'u8', vp.CODEC_BITSHUFFLE_ZSTD]);
   assert.deepEqual(quantized.quantization, { codeOffset: -3, bias: 432, readNoise: 14.25, noiseSlope: 8.5, step: 0.25 });
   assert.deepEqual(quantized.payload, ramp(4));
-});
-
-test('a quantized threshold separates the codes at and above a level from those below', () => {
-  const q = { codeOffset: 0, bias: 432, readNoise: 14, noiseSlope: 8, step: 0.25 };
-  const valueOf = (code) => {
-    const y = code * q.step;
-    if (y <= 0) return q.bias + y * q.readNoise;
-    const r = q.noiseSlope * y / 2 + q.readNoise;
-    return q.bias + (r * r - q.readNoise ** 2) / q.noiseSlope;
-  };
-  for (const level of [432, 440, 1000, 16383]) {
-    const threshold = vp.quantizedThreshold(level, q);
-    // Within a step of the level, and between the level's code's value
-    // (as float32, as a decoded frame holds it) and the one below.
-    const noise = Math.sqrt(14 * 14 + 8 * (level - 432));
-    assert.ok(Math.abs(threshold - level) <= 0.25 * noise * 1.05, `${level} -> ${threshold}`);
-    const values = [...Array(400).keys()].map((code) => Math.fround(valueOf(code - 50)));
-    const above = values.filter((v) => v >= threshold);
-    assert.ok(above.every((v) => v >= Math.fround(vp.quantizedThreshold(level, q))));
-    assert.equal(values.length - above.length, values.filter((v) => v < threshold).length);
-  }
 });
 
 test('acks encode as the vector was written', () => {
@@ -165,7 +144,7 @@ test('the feed acks on arrival, and shows only the newest of what arrived while 
   // A raw frame needs no decoder; make these zstd by flipping the codec.
   const zstd = (seq, value) => {
     const message = frameMessage(seq, value);
-    new DataView(message).setUint8(33, vp.CODEC_SHUFFLE_ZSTD);
+    new DataView(message).setUint8(33, vp.CODEC_BITSHUFFLE_ZSTD);
     return message;
   };
   ws.deliver(zstd(1, 10));

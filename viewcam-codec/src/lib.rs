@@ -1,32 +1,33 @@
-//! Byte-shuffle + zstd, and noise-matched quantization: compression for
+//! Bit-shuffle + zstd, and noise-matched quantization: compression for
 //! camera frames that decodes cheaply in a browser.
 //!
-//! Raw detector pixels compress poorly: the low byte of each `u16` is mostly
-//! noise, and interleaved with the slowly varying high byte it hides what
-//! little structure there is. Shuffling first, all the elements' byte 0,
-//! then all their byte 1, and so on (Blosc's "shuffle" filter), puts the
-//! predictable bytes next to each other. zstd then compresses the result,
-//! its entropy coding spending on the noise only the bits it needs.
+//! Raw detector pixels compress poorly as they stand: each `u16` mixes
+//! high bits that barely change across the image with low bits that are
+//! mostly noise. Bit-shuffling first (as the `bitshuffle` filter does for
+//! HDF5) regroups them into bit planes, all the pixels' bit 0, then all
+//! their bit 1, and so on, so a high-order plane that is constant, or
+//! nearly, becomes a long run zstd all but removes, and the noisy low planes
+//! cost about what their noise does. It does better than shuffling whole
+//! bytes because a 14-bit camera's top two bits, or a mask's top seven, are
+//! planes of their own rather than part of a byte with noise in it.
 //!
 //! ## Format
 //!
-//! An encoded plane is a zstd frame (level 1) of the shuffled bytes: the
-//! payload of the viewcam protocol's `shuffle-zstd` codec. Decoding is into
-//! a buffer of the length the receiver expects from the image's width,
-//! height and dtype, never a length the stream gives, so a corrupt stream
-//! cannot ask for an arbitrary allocation.
+//! An encoded plane is a zstd frame (level 1) of the bit-shuffled bytes:
+//! the payload of the viewcam protocol's `bitshuffle-zstd` codec. For `n`
+//! elements of `s` bytes, the first `8 × ⌊n / 8⌋` elements make `8s` bit
+//! planes of `⌊n / 8⌋` bytes each: plane `8b + k` holds bit `k` (0 the least
+//! significant) of byte `b` of each element, element `i` at bit `i mod 8` of
+//! the plane's byte `⌊i / 8⌋`. The last `n mod 8` elements follow the
+//! planes as they are. Decoding is into a buffer of the length the receiver
+//! expects from the image's width, height and dtype, never a length the
+//! stream gives, so a corrupt stream cannot ask for an arbitrary allocation.
 //!
-//! Server side, with numpy and the `zstandard` package:
-//!
-//! ```python
-//! shuffled = plane.view(np.uint8).reshape(-1, plane.itemsize).T.tobytes()
-//! encoded = zstandard.ZstdCompressor(level=1).compress(shuffled)
-//! ```
-//!
-//! The same plane decodes with [`decode`] here, or with the WASM
-//! [`Decoder`](wasm::Decoder) in a browser worker. Decoding is pure Rust
-//! ([`ruzstd`]), so it builds for wasm32; encoding ([`encode`]) uses the C
-//! library, behind the `encode-zstd` feature, since only servers encode.
+//! The same plane decodes with [`decode`] here, with the WASM
+//! `Decoder` in a browser worker, or with the Python extension in
+//! `python/`, all this code. Decoding is pure Rust ([`ruzstd`]), so it
+//! builds for wasm32; encoding ([`encode`]) uses the C library, behind the
+//! `encode-zstd` feature, since only servers encode.
 //!
 //! ## Noise-matched quantization
 //!
@@ -35,11 +36,13 @@
 //! the signal, as photon noise does, it first maps values through the
 //! square root that makes the noise the same everywhere (the generalized
 //! Anscombe transform), so the steps are fine at the faint end and coarse
-//! only where bright pixels are noisy anyway.
+//! only where bright pixels are noisy anyway. Servers use it for floating
+//! point images, whose precision is otherwise all noise; integer images go
+//! exact.
 
 use std::fmt;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub mod wasm;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,73 +101,82 @@ fn check_layout(len: usize, element_size: usize) -> Result<usize, CodecError> {
     Ok(len / element_size)
 }
 
-/// Shuffle `input` into `output`: byte `j` of element `i` moves to
-/// `j * n + i`. Both must be the same length, a multiple of `element_size`.
-pub fn shuffle_into(
+/// Transpose the 8×8 bit matrix in `x`, byte `r` its row `r` and bit `c`
+/// of that byte its column `c`: afterwards bit `j` of byte `k` is what bit
+/// `k` of byte `j` was. Its own inverse. (Hacker's Delight, 7-3.)
+fn transpose8(mut x: u64) -> u64 {
+    let t = (x ^ (x >> 7)) & 0x00AA_00AA_00AA_00AA;
+    x ^= t ^ (t << 7);
+    let t = (x ^ (x >> 14)) & 0x0000_CCCC_0000_CCCC;
+    x ^= t ^ (t << 14);
+    let t = (x ^ (x >> 28)) & 0x0000_0000_F0F0_F0F0;
+    x ^= t ^ (t << 28);
+    x
+}
+
+/// Bit-shuffle `input` into `output`, as the module docs lay out. Both must
+/// be the same length, a multiple of `element_size`.
+///
+/// Eight elements at a time: byte `b` of each is gathered into a `u64`,
+/// whose transpose holds, in its byte `k`, bit `k` of all eight, which is
+/// the next byte of plane `8b + k`.
+pub fn bitshuffle_into(
     input: &[u8],
     output: &mut [u8],
     element_size: usize,
 ) -> Result<(), CodecError> {
     let n = check_layout(input.len(), element_size)?;
     assert_eq!(input.len(), output.len());
-    match element_size {
-        1 => output.copy_from_slice(input),
-        // The common camera case, written out (as in `unshuffle_into`) so it
-        // compiles to a tight split of one run into two.
-        2 => {
-            let (lo, hi) = output.split_at_mut(n);
-            for ((pair, l), h) in input.chunks_exact(2).zip(lo).zip(hi) {
-                *l = pair[0];
-                *h = pair[1];
+    let s = element_size;
+    let groups = n / 8;
+    for (g, block) in input.chunks_exact(8 * s).enumerate() {
+        for b in 0..s {
+            let mut x = 0u64;
+            for j in 0..8 {
+                x |= (block[j * s + b] as u64) << (8 * j);
             }
-        }
-        // Walk the input contiguously; each element scatters one byte into
-        // each of the `element_size` output runs.
-        _ => {
-            for (i, element) in input.chunks_exact(element_size).enumerate() {
-                for (j, &byte) in element.iter().enumerate() {
-                    output[j * n + i] = byte;
-                }
+            let y = transpose8(x);
+            for k in 0..8 {
+                output[(8 * b + k) * groups + g] = (y >> (8 * k)) as u8;
             }
         }
     }
+    let body = groups * 8 * s;
+    output[body..].copy_from_slice(&input[body..]);
     Ok(())
 }
 
-/// Undo [`shuffle_into`].
-pub fn unshuffle_into(
+/// Undo [`bitshuffle_into`].
+pub fn bitunshuffle_into(
     input: &[u8],
     output: &mut [u8],
     element_size: usize,
 ) -> Result<(), CodecError> {
     let n = check_layout(input.len(), element_size)?;
     assert_eq!(input.len(), output.len());
-    match element_size {
-        1 => output.copy_from_slice(input),
-        // The common camera case, written out so it compiles to a tight
-        // interleave of two contiguous runs.
-        2 => {
-            let (lo, hi) = input.split_at(n);
-            for ((pair, &l), &h) in output.chunks_exact_mut(2).zip(lo).zip(hi) {
-                pair[0] = l;
-                pair[1] = h;
+    let s = element_size;
+    let groups = n / 8;
+    for (g, block) in output.chunks_exact_mut(8 * s).enumerate() {
+        for b in 0..s {
+            let mut x = 0u64;
+            for k in 0..8 {
+                x |= (input[(8 * b + k) * groups + g] as u64) << (8 * k);
             }
-        }
-        _ => {
-            for (i, element) in output.chunks_exact_mut(element_size).enumerate() {
-                for (j, byte) in element.iter_mut().enumerate() {
-                    *byte = input[j * n + i];
-                }
+            let y = transpose8(x);
+            for j in 0..8 {
+                block[j * s + b] = (y >> (8 * j)) as u8;
             }
         }
     }
+    let body = groups * 8 * s;
+    output[body..].copy_from_slice(&input[body..]);
     Ok(())
 }
 
-/// [`shuffle_into`] a new buffer.
-pub fn shuffle(input: &[u8], element_size: usize) -> Result<Vec<u8>, CodecError> {
+/// [`bitshuffle_into`] a new buffer.
+pub fn bitshuffle(input: &[u8], element_size: usize) -> Result<Vec<u8>, CodecError> {
     let mut shuffled = vec![0u8; input.len()];
-    shuffle_into(input, &mut shuffled, element_size)?;
+    bitshuffle_into(input, &mut shuffled, element_size)?;
     Ok(shuffled)
 }
 
@@ -172,11 +184,11 @@ pub fn shuffle(input: &[u8], element_size: usize) -> Result<Vec<u8>, CodecError>
 /// nearly as well as any.
 pub const ZSTD_LEVEL: i32 = 1;
 
-/// Shuffle and zstd-compress a plane of `element_size`-byte elements: the
-/// protocol's `shuffle-zstd` payload.
+/// Bit-shuffle and zstd-compress a plane of `element_size`-byte elements:
+/// the protocol's `bitshuffle-zstd` payload.
 #[cfg(feature = "encode-zstd")]
 pub fn encode(plane: &[u8], element_size: usize) -> Result<Vec<u8>, CodecError> {
-    let shuffled = shuffle(plane, element_size)?;
+    let shuffled = bitshuffle(plane, element_size)?;
     zstd::bulk::compress(&shuffled, ZSTD_LEVEL).map_err(|e| CodecError::Zstd(e.to_string()))
 }
 
@@ -216,7 +228,7 @@ pub fn decode_into(
             got,
         });
     }
-    unshuffle_into(scratch, out, element_size)
+    bitunshuffle_into(scratch, out, element_size)
 }
 
 // =============================================================================
@@ -290,6 +302,15 @@ impl Quantizer {
     /// The value a code stands for.
     pub fn value(&self, code: i64) -> f64 {
         self.inverse(code as f64 * self.step)
+    }
+
+    /// The level to compare this quantizer's values with, to find those that
+    /// were at or above `level` before rounding: halfway between the values
+    /// of `level`'s code and the code below. Rounding can bring a saturated
+    /// pixel back a little under the level itself, never under this.
+    pub fn threshold(&self, level: f64) -> f64 {
+        let code = (self.forward(level) / self.step).round() as i64;
+        (self.value(code) + self.value(code - 1)) / 2.0
     }
 
     /// Quantize `values`, storing the codes in the fewest bytes that hold

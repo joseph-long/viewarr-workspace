@@ -33,7 +33,7 @@ export const KIND_FRAME = 1;
 export const KIND_ACK = 0x81;
 
 export const CODEC_RAW = 0;
-export const CODEC_SHUFFLE_ZSTD = 1;
+export const CODEC_BITSHUFFLE_ZSTD = 1;
 
 /** dtype codes quantized codes may have: u8, u16, u32 */
 export const CODE_DTYPES = [1, 3, 5];
@@ -73,37 +73,6 @@ export function maxEncodedLen(codec, decoded) {
   if (codec === CODEC_RAW) return decoded;
   const small = 128 * 1024; // zstd's worst case, ZSTD_COMPRESSBOUND
   return decoded + Math.floor(decoded / 256) + (decoded < small ? Math.floor((small - decoded) / 2048) : 0);
-}
-
-/** A quantized frame's value, in units of its noise. See PROTOCOL.md, "Quantization". */
-function toNoiseUnits(value, { bias, readNoise, noiseSlope }) {
-  const s = value - bias;
-  if (noiseSlope > 0 && s > 0) {
-    return (2 / noiseSlope) * (Math.sqrt(noiseSlope * s + readNoise * readNoise) - readNoise);
-  }
-  return s / readNoise;
-}
-
-function fromNoiseUnits(y, { bias, readNoise, noiseSlope }) {
-  if (noiseSlope > 0 && y > 0) {
-    const r = noiseSlope * y / 2 + readNoise;
-    return bias + (r * r - readNoise * readNoise) / noiseSlope;
-  }
-  return bias + y * readNoise;
-}
-
-/**
- * The level to compare a frame quantized as `quantization` says with, to
- * find the pixels that were at or above `value` (its saturated pixels, say):
- * halfway between the value of `value`'s code and that of the code below.
- * Rounding is monotonic, so pixels at or above `value` come back at or above
- * the first, and the rest at or below the second, each half a step clear of
- * the threshold, whatever float32 does to them.
- */
-export function quantizedThreshold(value, quantization) {
-  const { step } = quantization;
-  const code = Math.round(toNoiseUnits(value, quantization) / step);
-  return (fromNoiseUnits(code * step, quantization) + fromNoiseUnits((code - 1) * step, quantization)) / 2;
 }
 
 function checkPrefix(view, kind) {
@@ -147,7 +116,7 @@ export function decodeFrame(message, maxPixels = DEFAULT_MAX_PIXELS) {
   const codec = view.getUint8(33);
   const encodedLen = view.getUint32(36, true);
   if (!(dtypeCode in DTYPES)) throw new ProtocolError(`unknown dtype code ${dtypeCode}`);
-  if (codec !== CODEC_RAW && codec !== CODEC_SHUFFLE_ZSTD) {
+  if (codec !== CODEC_RAW && codec !== CODEC_BITSHUFFLE_ZSTD) {
     throw new ProtocolError(`unknown codec code ${codec}`);
   }
   const pixels = width * height;
@@ -320,7 +289,7 @@ export class DeliveryRate {
  * Options:
  *  - `decode({ encoded: ArrayBuffer, codec: 'raw' | 'zstd',
  *    elementSize, decodedLength, quantized? }) -> Promise<ArrayBuffer>` for
- *    the compressed codecs (shuffled when elementSize > 1) and quantized
+ *    the compressed codec (bit-shuffled by elementSize) and quantized
  *    frames, whose codes it turns into float32 values (see
  *    viewcam-codec's decode-worker.js); exact `raw` frames need none.
  *  - `onFrame({ seq, width, height, dtype, pixels, quantization, acquiredMs })`,

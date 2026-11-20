@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Joseph D. Long <me@joseph-long.com>"]
 license = "MIT"
-description = "Byte-shuffle + zstd frame codec and noise-matched quantization for viewcam, small enough to load in a web worker"
+description = "Bit-shuffle + zstd frame codec and noise-matched quantization for viewcam, small enough to load in a web worker"
 repository = "https://github.com/joseph-long/viewarr"
 
 [lib]
@@ -20,8 +20,11 @@ crate-type = ["cdylib", "rlib"]
 ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 zstd = { version = "0.14", optional = true, default-features = false }
 
+# The worker's WASM interface, behind the `wasm` feature so that crates
+# linking this one into WASM of their own (viewcam, for the quantizer) don't
+# export it too.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "=0.2.108"
+wasm-bindgen = { version = "=0.2.108", optional = true }
 
 [profile.release]
 opt-level = 3
@@ -29,6 +32,7 @@ lto = true
 
 [features]
 encode-zstd = ["dep:zstd"]
+wasm = ["dep:wasm-bindgen"]
 
 [dev-dependencies]
 zstd = { version = "0.14", default-features = false }

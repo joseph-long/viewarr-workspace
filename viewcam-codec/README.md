@@ -1,21 +1,26 @@
 # viewcam-codec
 
 Compression for camera frames that is cheap to decode in a browser: a
-Blosc-style **byte shuffle** followed by **zstd**, and **noise-matched
-quantization** that rounds a frame to a fraction of its noise first. The
+**bit shuffle** followed by **zstd**, and **noise-matched quantization**
+that rounds a floating-point frame to a fraction of its noise first. The
 decoder builds to a WASM module with no dependency on viewarr or egui, meant
 to be loaded on its own in a web worker, so frames are decoded off the main
 thread that draws the viewer.
 
-Shuffling first, all the elements' byte 0, then all their byte 1, puts each
-pixel's slowly varying high byte next to its neighbours' high bytes. zstd
-then compresses the result: its entropy coding spends on the noisy low bytes
-only the bits their noise needs, where a plain LZ-style compressor, finding
-no repeats in noise, saves nothing on them.
+Bit-shuffling first, all the elements' bit 0, then all their bit 1, and so
+on (as HDF5's bitshuffle filter does), turns each bit a camera barely uses,
+a 14-bit detector's top two or a mask's top seven, into a plane of nearly
+constant bits that zstd all but removes. zstd's entropy coding then spends
+on the noisy low planes only the bits their noise needs, where a plain
+LZ-style compressor, finding no repeats in noise, saves nothing on them.
 
 ## Format
 
-An encoded plane is a **zstd frame** (level 1) of the shuffled bytes. The
+An encoded plane is a **zstd frame** (level 1) of the bit-shuffled bytes:
+for `n` elements of `s` bytes, the first `8 × ⌊n / 8⌋` make `8s` planes of
+`⌊n / 8⌋` bytes, plane `8b + k` holding bit `k` (0 the least significant)
+of byte `b` of each element, element `i` at bit `i mod 8` of the plane's
+byte `⌊i / 8⌋`; the last `n mod 8` elements follow as they are. The
 decoded length is not taken from the stream: the receiver supplies it from
 the image's width × height × element size, and decodes into a buffer of
 exactly that length, so a corrupt stream cannot ask for an arbitrary
@@ -23,7 +28,7 @@ allocation.
 
 Planes must be little-endian.
 
-These are the payloads of the viewcam protocol's `shuffle-zstd` codec
+These are the payloads of the viewcam protocol's `bitshuffle-zstd` codec
 (`viewcam-proto/PROTOCOL.md`). Its `raw` codec needs no decoder.
 
 Decoding is pure Rust ([`ruzstd`](https://crates.io/crates/ruzstd)), so the
@@ -48,7 +53,7 @@ code the browser decodes with: one implementation, not two to keep in step.
 ```python
 import viewcam_codec
 
-payload = viewcam_codec.encode(frame)                  # shuffle-zstd
+payload = viewcam_codec.encode(frame)                  # bitshuffle-zstd
 image = viewcam_codec.decode(payload, "<u2", (h, w))   # needs numpy
 
 # Round to a quarter of the noise; codes are the smallest unsigned type that fits.
@@ -62,8 +67,9 @@ from it. It releases the GIL while compressing, so several threads can
 encode at once. Wheels are `abi3`: one per platform covers Python 3.11 and
 later.
 
-On an Apple Silicon Mac, quantizing and compressing a 1024×1024 `u16` frame
-takes about 7 ms.
+On an Apple Silicon Mac, bit-shuffling and compressing a 1024×1024 `u16`
+frame takes about 7 ms, and quantizing a floating-point frame first about
+9 ms more.
 
 ## Web worker
 
@@ -117,22 +123,22 @@ dequantize.
 
 ```bash
 npm run build          # -> pkg/ (wasm-pack, --target web)
-npm run test:wasm      # Node: decode the reference vectors, check dequantize
-cargo test             # Rust: layout, round trips, corruption, reference vectors
+npm run test:wasm      # Node: decode the vectors, check dequantize
+cargo test             # Rust: layout, round trips, corruption, vectors
 
 cd python              # the Python extension, in a virtualenv:
-pip install maturin numpy zstandard pytest
+pip install maturin numpy pytest
 maturin develop --release
 pytest tests
 ```
 
-The Python tests check the extension against an independent reference:
-numpy for the shuffle and the C libzstd (through the `zstandard` package)
-for compression, in both directions, which also proves the payloads are
-standard zstd frames. `tests/vectors/` holds planes that reference encoded
-(`py_*`, decoded by the Rust and WASM tests) and one the Rust code encoded
-(`rs_*`, decoded by the reference). Regenerate with `VIEWCAM_REGEN_VECTORS=1`
-on either suite.
+The format is specified and tested here, in Rust: the bit shuffle against
+a plain bit-by-bit one, round trips for every element size and length, and
+compression. The Rust tests also write `tests/vectors/`, planes and their
+encodings, which the WASM module and the Python extension must decode, and
+the extension encode to the same bytes, showing they are this same code
+rather than versions of it. Regenerate with `VIEWCAM_REGEN_VECTORS=1 cargo
+test` after a deliberate change to the format.
 
 ## License
 

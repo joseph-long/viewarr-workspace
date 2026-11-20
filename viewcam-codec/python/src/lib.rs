@@ -16,7 +16,7 @@ fn to_py(err: CodecError) -> PyErr {
 }
 
 /// Compress `plane`, any C-contiguous little-endian buffer (a numpy array,
-/// `bytes`, ...), into the payload of the protocol's `shuffle-zstd` codec.
+/// `bytes`, ...), into the payload of the protocol's `bitshuffle-zstd` codec.
 /// The element size comes from the buffer's own item size.
 ///
 /// The GIL is released while compressing, the expensive part, so several
@@ -42,18 +42,18 @@ fn encode<'py>(py: Python<'py>, plane: &Bound<'py, PyAny>) -> PyResult<Bound<'py
     // only read while the GIL is held, as any C extension reads one.
     let bytes =
         unsafe { std::slice::from_raw_parts(buffer.buf_ptr() as *const u8, buffer.len_bytes()) };
-    // Shuffle under the GIL: one fast pass that leaves the compression with
-    // data of its own, so it can run without the GIL and without the
-    // caller's buffer. Shuffled, it compresses as single bytes.
-    let data = viewcam_codec::shuffle(bytes, buffer.item_size()).map_err(to_py)?;
+    // Copy under the GIL, one fast pass that leaves the shuffling and the
+    // compression with data of their own, so they can run without the GIL
+    // and without the caller's buffer.
+    let (data, item_size) = (bytes.to_vec(), buffer.item_size());
     drop(buffer);
     let encoded = py
-        .detach(|| viewcam_codec::encode(&data, 1))
+        .detach(|| viewcam_codec::encode(&data, item_size))
         .map_err(to_py)?;
     Ok(PyBytes::new(py, &encoded))
 }
 
-/// Decode a `shuffle-zstd` payload of `element_size`-byte elements to
+/// Decode a `bitshuffle-zstd` payload of `element_size`-byte elements to
 /// `decoded_len` bytes. Raises `ValueError` on corrupt input or a length
 /// that does not match.
 #[pyfunction]

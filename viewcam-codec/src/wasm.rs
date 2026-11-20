@@ -6,7 +6,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::{decode_into, Quantizer};
 
-/// Decodes byte-shuffled zstd planes. Holds one scratch buffer that grows to
+/// Decodes bit-shuffled zstd planes. Holds one scratch buffer that grows to
 /// the largest plane seen and is reused after that, so a worker decoding a
 /// stream of same-sized frames allocates only each frame's output.
 #[wasm_bindgen]

@@ -148,13 +148,18 @@ counter past the last `seq` it sent.
 | Code | Codec          | Payload                                               |
 | ---: | -------------- | ----------------------------------------------------- |
 |    0 | `raw`          | the decoded image; `encoded_len` = decoded length     |
-|    1 | `shuffle-zstd` | a zstd frame of the image's bytes shuffled by element |
+|    1 | `bitshuffle-zstd` | a zstd frame of the image's bits regrouped into planes |
 
-*Shuffled* means all the elements' byte 0, then all their byte 1, and so on
-(Blosc's shuffle). It groups each pixel's slowly varying high byte with its
-neighbours'. In numpy: `img.view(np.uint8).reshape(-1, img.itemsize).T.tobytes()`.
-zstd's entropy coding then spends on each byte only the bits it carries,
-which compresses even the noise that is most of a camera frame.
+*Bit-shuffled* means regrouped into bit planes, all the elements' bit 0,
+then all their bit 1, and so on, as HDF5's bitshuffle filter does. For `n`
+elements of `s` bytes, the first `8 × ⌊n / 8⌋` make `8s` planes of
+`⌊n / 8⌋` bytes: plane `8b + k` holds bit `k` (0 the least significant) of
+byte `b` of each element, element `i` at bit `i mod 8` of the plane's byte
+`⌊i / 8⌋`. The last `n mod 8` elements follow the planes as they are. A
+plane of bits that barely vary, a 14-bit camera's top two or a mask's top
+seven, becomes a run zstd all but removes, and zstd's entropy coding spends
+on the noisy low planes only the bits their noise carries. `viewcam-codec`
+implements it; its Python extension and WASM module are that same code.
 
 The decompressed size is the decoded length, which the receiver computes
 from the header instead of trusting a stored size, and a payload that
@@ -166,7 +171,7 @@ may not exceed zstd's worst case for a decoded length `n`,
     n + n / 256 + (n < 131072 ? (131072 − n) / 2048 : 0)
 
 Which codec suits a feed is the server's call: `raw` costs no CPU, and
-`shuffle-zstd` costs some but sends far less. Compression also shrinks
+`bitshuffle-zstd` costs some but sends far less. Compression also shrinks
 what a stall can trap, since the window counts encoded bytes.
 
 #### Quantization
@@ -174,7 +179,9 @@ what a stall can trap, since the window counts encoded bytes.
 A display can't use precision finer than an image's noise, and noise is
 what compresses worst. So a server may round a frame to steps a fixed
 fraction of its noise, and send the steps' integer **codes**
-(`quantization = 1`). The noise model is one where a pixel at `value` has
+(`quantization = 1`). The reference server does this for floating-point
+images only, whose low-order bits are all noise and compress worst of all;
+integer images, a camera's counts, go exact. The noise model is one where a pixel at `value` has
 noise variance
 
     read_noise² + noise_slope × max(value − bias, 0)
@@ -209,8 +216,10 @@ error a fraction of the noise that adds ~2% to it in quadrature. Where the
 noise grows with the signal, steps are finest at the faint end, where a
 display stretched for faint detail needs them, and coarse only for bright
 pixels, which are noisier anyway. Rounding is monotonic, so a level (a
-saturation level, say) compares with quantized values as the value of its
-own code. `viewcam-codec`'s `Quantizer` implements both directions.
+saturation level, say) compares with quantized values as the threshold
+halfway between the value of its own code and the code below.
+`viewcam-codec`'s `Quantizer` implements both directions, and the
+threshold.
 
 ### `ACK` (kind 0x81, client → server)
 

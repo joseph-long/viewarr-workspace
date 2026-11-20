@@ -1,5 +1,5 @@
 // Smoke test of the built WASM package under Node: decodes the vectors the
-// reference encoder made, and checks dequantizing. Run after `npm run build`:
+// Rust tests encoded, and checks dequantizing. Run after `npm run build`:
 //
 //   npm run test:wasm
 
@@ -25,7 +25,7 @@ for (const name of readdirSync(vectors)) {
   assert.deepEqual(Buffer.from(out), raw, name);
   checked++;
 }
-assert.ok(checked >= 6, 'no vectors found');
+assert.ok(checked >= 5, 'no vectors found');
 console.log(`decoded ${checked} vectors`);
 
 assert.throws(() => decoder.decode(new Uint8Array([1, 2, 3]), 2, 64), Error);

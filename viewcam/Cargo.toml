@@ -14,6 +14,9 @@ crate-type = ["cdylib", "rlib"]
 # The one real copy of the viewer lives at ../viewarr; viewcam embeds its
 # ArrayViewerWidget and does the camera arithmetic in front of it.
 viewarr = { path = "../viewarr" }
+# For the noise-matched quantizer, so a saturation level is compared with a
+# quantized frame's values by the same code that rounded them.
+viewcam-codec = { path = "../viewcam-codec" }
 
 # Keep these pinned to the same versions viewarr uses, so there is exactly one
 # egui (and one wasm-bindgen) in the dependency graph.

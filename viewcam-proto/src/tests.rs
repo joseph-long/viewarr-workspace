@@ -30,7 +30,7 @@ fn vectors() -> Vec<(&'static str, Vec<u8>)> {
         ),
         (
             "frame_f32_zstd",
-            frame(7, 2, 2, DType::F32, Codec::ShuffleZstd, ramp(9)),
+            frame(7, 2, 2, DType::F32, Codec::BitshuffleZstd, ramp(9)),
         ),
         ("frame_empty", Frame::empty(9, DType::F64).encode()),
         (
@@ -40,7 +40,7 @@ fn vectors() -> Vec<(&'static str, Vec<u8>)> {
                 3,
                 2,
                 DType::U8,
-                Codec::ShuffleZstd,
+                Codec::BitshuffleZstd,
                 ramp(4),
                 Some(QUANTIZATION),
             )
@@ -115,14 +115,14 @@ fn header_layout_is_as_specified() {
     let compressed = &vectors()[1].1;
     // No acquisition time given: 0, unknown.
     assert_eq!(&compressed[16..24], &[0; 8]);
-    assert_eq!((compressed[32], compressed[33]), (9, 1)); // f32, shuffle-zstd
+    assert_eq!((compressed[32], compressed[33]), (9, 1)); // f32, bitshuffle-zstd
     assert_eq!(&compressed[36..40], &9u32.to_le_bytes());
     // Exact: no quantization, and no parameters.
     assert_eq!(compressed[34], 0);
     assert_eq!(&compressed[40..80], &[0; 40]);
 
     let quantized = &vectors()[3].1;
-    assert_eq!((quantized[32], quantized[33], quantized[34]), (1, 1, 1)); // u8, shuffle-zstd
+    assert_eq!((quantized[32], quantized[33], quantized[34]), (1, 1, 1)); // u8, bitshuffle-zstd
     assert_eq!(&quantized[40..48], &(-3i64).to_le_bytes());
     assert_eq!(&quantized[48..56], &432.0f64.to_le_bytes());
     assert_eq!(&quantized[56..64], &14.25f64.to_le_bytes());
@@ -133,7 +133,7 @@ fn header_layout_is_as_specified() {
 
 #[test]
 fn quantized_frames_need_unsigned_codes_and_a_noise_model() {
-    let frame = |dtype, q| Frame::quantized(1, 2, 2, dtype, Codec::ShuffleZstd, vec![1; 3], q);
+    let frame = |dtype, q| Frame::quantized(1, 2, 2, dtype, Codec::BitshuffleZstd, vec![1; 3], q);
     assert!(frame(DType::U16, Some(QUANTIZATION)).is_ok());
     assert_eq!(
         frame(DType::F32, Some(QUANTIZATION)),
@@ -229,8 +229,8 @@ fn empty_frames_mean_no_image() {
     assert!(frame.header.is_empty());
     assert!(frame.payload.is_empty());
     // An empty image cannot carry a payload, whatever the codec.
-    assert!(Frame::new(0, 0, 5, DType::U8, Codec::ShuffleZstd, vec![1]).is_err());
-    assert!(Frame::new(0, 0, 0, DType::U8, Codec::ShuffleZstd, vec![]).is_ok());
+    assert!(Frame::new(0, 0, 5, DType::U8, Codec::BitshuffleZstd, vec![1]).is_err());
+    assert!(Frame::new(0, 0, 0, DType::U8, Codec::BitshuffleZstd, vec![]).is_ok());
 }
 
 #[test]
@@ -247,10 +247,10 @@ fn encoded_lengths_are_checked_per_codec() {
     assert!(bad(Codec::Raw, 33));
     // zstd may be anything from one byte up to its worst case,
     // 32 + 0 + (128 KiB - 32) / 2048.
-    assert!(bad(Codec::ShuffleZstd, 0));
-    assert!(!bad(Codec::ShuffleZstd, 1));
-    assert!(!bad(Codec::ShuffleZstd, 95));
-    assert!(bad(Codec::ShuffleZstd, 96));
+    assert!(bad(Codec::BitshuffleZstd, 0));
+    assert!(!bad(Codec::BitshuffleZstd, 1));
+    assert!(!bad(Codec::BitshuffleZstd, 95));
+    assert!(bad(Codec::BitshuffleZstd, 96));
 }
 
 #[test]
@@ -302,7 +302,7 @@ fn oversized_images_are_refused_before_allocating() {
         width: 100_000,
         height: 100_000,
         dtype: DType::U8,
-        codec: Codec::ShuffleZstd,
+        codec: Codec::BitshuffleZstd,
         encoded_len: 1,
         quantization: None,
     }

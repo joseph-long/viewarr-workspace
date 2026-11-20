@@ -9,7 +9,7 @@ A monorepo for the `viewarr` Rust/WASM array viewer and the two packages that bu
 | `viewcam/`            | Camera-frame viewer wrapping viewarr: dark subtraction, saturation overlay. |
 | `viewcam-native/`     | Native camera-stream viewer — the `viewcam` CLI, with a headless throughput mode. |
 | `viewcam-proto/`      | viewcam frame-streaming protocol: spec, Rust core (no I/O), Python encoder, browser client. |
-| `viewcam-codec/`      | Byte-shuffle + zstd frame decoder and dequantizer, as a small WASM module for web workers. |
+| `viewcam-codec/`      | Bit-shuffle + zstd frame codec and noise-matched quantizer: one Rust implementation, as WASM for web workers and a Python extension for servers. |
 | `pyviewarr/`          | `pyviewarr` anywidget — PyPI package `pyviewarr`.                      |
 | `jupyterlab-fitsview/`| FITS viewer JupyterLab extension — PyPI package `fitsview`.            |
 

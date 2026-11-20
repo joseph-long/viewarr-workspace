@@ -168,10 +168,14 @@ export async function createViewer(containerId) {
  * @param {number} width - Image width in pixels.
  * @param {number} height - Image height in pixels.
  * @param {string} dtype - Data type string (e.g. "u16", "f32"), as for viewarr.
+ * @param {{bias: number, readNoise: number, noiseSlope: number, step: number}|null} [quantization]
+ *   For a quantized frame, its noise model and step, as viewcam-proto's
+ *   client hands them over: a saturation level is then compared with its
+ *   rounded values as the quantizer's threshold.
  * @throws {Error} If the viewer is not found or data is invalid.
  */
-export function setData(containerId, buffer, width, height, dtype) {
-  getViewer(containerId).handle.setData(buffer, width, height, dtype);
+export function setData(containerId, buffer, width, height, dtype, quantization = null) {
+  getViewer(containerId).handle.setData(buffer, width, height, dtype, quantization);
 }
 
 /**

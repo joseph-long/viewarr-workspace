@@ -1,7 +1,7 @@
 //! Turning a FRAME message into pixels the widget can show.
 //!
 //! The same steps as the browser's decode worker: check the header,
-//! decompress (`shuffle-zstd`), and turn a quantized frame's codes back into
+//! decompress (`bitshuffle-zstd`), and turn a quantized frame's codes back into
 //! values; then widen to `f64`, which is what `ViewcamWidget` takes.
 
 use std::time::{Duration, Instant};
@@ -38,7 +38,7 @@ pub enum Decoded {
 /// Decodes one feed's frames, reusing its buffers from one frame to the next.
 #[derive(Default)]
 pub struct Decoder {
-    /// The shuffled intermediate zstd decodes into.
+    /// The bit-shuffled intermediate zstd decodes into.
     scratch: Vec<u8>,
     /// The decompressed plane.
     plane: Vec<u8>,
@@ -71,7 +71,7 @@ impl Decoder {
 
         let plane: &[u8] = match header.codec {
             Codec::Raw => payload,
-            Codec::ShuffleZstd => {
+            Codec::BitshuffleZstd => {
                 self.plane.resize(decoded_len, 0);
                 viewcam_codec::decode_into(
                     payload,
@@ -100,6 +100,7 @@ impl Decoder {
                 height: header.height,
                 is_integer,
                 value_decimals,
+                quantization: header.quantization.as_ref().map(quantizer),
             },
             dtype,
             quantization: header.quantization,
@@ -118,16 +119,6 @@ fn quantizer(q: &Quantization) -> Quantizer {
         noise_slope: q.noise_slope,
         step: q.step,
     }
-}
-
-/// A quantized frame's values are rounded, so a saturated pixel can come
-/// back a little under the saturation level: the threshold to compare with
-/// is the one between the level's code and the one below it. As
-/// `quantizedThreshold` in the browser client.
-pub fn quantized_threshold(level: f64, q: &Quantization) -> f64 {
-    let quantizer = quantizer(q);
-    let code = (quantizer.forward(level) / q.step).round();
-    (quantizer.inverse(code * q.step) + quantizer.inverse((code - 1.0) * q.step)) / 2.0
 }
 
 #[cfg(test)]
@@ -171,22 +162,5 @@ mod tests {
             .unwrap()
             .encode();
         assert!(Decoder::new().decode(&message[..message.len() - 1]).is_err());
-    }
-
-    #[test]
-    fn the_threshold_falls_between_the_levels_code_and_the_one_below() {
-        let q = Quantization {
-            code_offset: 0,
-            bias: 100.0,
-            read_noise: 4.0,
-            noise_slope: 1.0,
-            step: 0.25,
-        };
-        let level = 16383.0;
-        let t = quantized_threshold(level, &q);
-        let quantizer = quantizer(&q);
-        let code = (quantizer.forward(level) / q.step).round();
-        assert!(t < quantizer.inverse(code * q.step));
-        assert!(t > quantizer.inverse((code - 1.0) * q.step));
     }
 }

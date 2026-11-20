@@ -9,7 +9,7 @@
     "pkg/"
   ],
   "scripts": {
-    "build:wasm": "wasm-pack build --target web --out-dir pkg -- --locked",
+    "build:wasm": "wasm-pack build --target web --out-dir pkg -- --locked --features wasm",
     "postbuild:wasm": "cp js/decode-worker.js pkg/ && cp THIRD_PARTY_LICENSES.txt pkg/ && node -e \"const p=require('./pkg/package.json'); p.files.push('decode-worker.js','THIRD_PARTY_LICENSES.txt'); require('fs').writeFileSync('./pkg/package.json', JSON.stringify(p, null, 2));\"",
     "build": "npm run build:wasm",
     "test:wasm": "node js/smoke-test.mjs",

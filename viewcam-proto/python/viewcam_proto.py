@@ -8,7 +8,7 @@ Every feed (data, dark, saturation) is its own WebSocket carrying the same
 FRAME messages, one per WebSocket message. A server sends
 ``encode_frame(...)`` as a binary message whenever its ``SendWindow`` allows,
 and passes each binary message from the client through ``decode_ack``.
-Payloads are passed in already encoded; for the ``shuffle-zstd`` codec, the
+Payloads are passed in already encoded; for the ``bitshuffle-zstd`` codec, the
 ``viewcam_codec`` extension (``viewcam-codec/python``) produces them, and for
 a quantized frame its ``quantize`` makes the codes, whose model goes in
 ``Quantization``.
@@ -27,8 +27,8 @@ KIND_FRAME = 1
 KIND_ACK = 0x81
 
 CODEC_RAW = 0
-CODEC_SHUFFLE_ZSTD = 1
-CODECS = (CODEC_RAW, CODEC_SHUFFLE_ZSTD)
+CODEC_BITSHUFFLE_ZSTD = 1
+CODECS = (CODEC_RAW, CODEC_BITSHUFFLE_ZSTD)
 
 # dtype codes quantized codes may have: u8, u16, u32
 CODE_DTYPES = (1, 3, 5)

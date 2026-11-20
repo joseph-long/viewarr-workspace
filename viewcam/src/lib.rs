@@ -101,7 +101,10 @@ impl ViewcamHandle {
     }
 
     /// Set the science frame. `array_type` takes the same specifiers as
-    /// viewarr's `setImageData` ("u16", "f32", ...).
+    /// viewarr's `setImageData` ("u16", "f32", ...). For a quantized frame,
+    /// `quantization` is its `{ bias, readNoise, noiseSlope, step }` (as
+    /// viewcam-proto's client hands it over), so that a saturation level is
+    /// compared with its rounded values correctly; otherwise null.
     #[wasm_bindgen(js_name = setData)]
     pub fn set_data(
         &self,
@@ -109,8 +112,10 @@ impl ViewcamHandle {
         width: u32,
         height: u32,
         array_type: &str,
+        quantization: JsValue,
     ) -> Result<(), JsValue> {
-        let frame = frame_from_buffer(buffer, width, height, array_type)?;
+        let mut frame = frame_from_buffer(buffer, width, height, array_type)?;
+        frame.quantization = quantizer_from(&quantization)?;
         self.widget.borrow_mut().set_data(frame);
         Ok(())
     }
@@ -342,5 +347,30 @@ fn frame_from_buffer(
         height,
         is_integer,
         value_decimals,
+        quantization: None,
     })
+}
+
+/// A quantizer from viewcam-proto's `{ bias, readNoise, noiseSlope, step }`,
+/// or `None` from null or undefined.
+#[cfg(target_arch = "wasm32")]
+fn quantizer_from(value: &JsValue) -> Result<Option<camera::Quantizer>, JsValue> {
+    if value.is_null() || value.is_undefined() {
+        return Ok(None);
+    }
+    let field = |name: &str| -> Result<f64, JsValue> {
+        js_sys::Reflect::get(value, &name.into())?
+            .as_f64()
+            .ok_or_else(|| JsValue::from_str(&format!("quantization.{name} is not a number")))
+    };
+    let quantizer = camera::Quantizer {
+        bias: field("bias")?,
+        read_noise: field("readNoise")?,
+        noise_slope: field("noiseSlope")?,
+        step: field("step")?,
+    };
+    quantizer
+        .check()
+        .map_err(|e| JsValue::from_str(&format!("quantization: {e}")))?;
+    Ok(Some(quantizer))
 }

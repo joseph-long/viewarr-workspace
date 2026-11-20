@@ -22,42 +22,103 @@ fn camera_plane(width: usize, height: usize) -> Vec<u8> {
         .collect()
 }
 
-#[test]
-fn shuffle_layout_matches_blosc() {
-    // Three u16 elements 0x0201, 0x0403, 0x0605: low bytes first, then high.
-    let input = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
-    let mut out = [0u8; 6];
-    shuffle_into(&input, &mut out, 2).unwrap();
-    assert_eq!(out, [0x01, 0x03, 0x05, 0x02, 0x04, 0x06]);
+/// The bit-shuffle written out bit by bit, as the module docs lay it out:
+/// slow and plain, for the fast one to be checked against.
+fn naive_bitshuffle(input: &[u8], s: usize) -> Vec<u8> {
+    let n = input.len() / s;
+    let groups = n / 8;
+    let mut out = vec![0u8; input.len()];
+    for i in 0..groups * 8 {
+        for b in 0..s {
+            for k in 0..8 {
+                let bit = (input[i * s + b] >> k) & 1;
+                out[(8 * b + k) * groups + i / 8] |= bit << (i % 8);
+            }
+        }
+    }
+    out[groups * 8 * s..].copy_from_slice(&input[groups * 8 * s..]);
+    out
+}
 
-    // Two 4-byte elements.
-    let input = [1, 2, 3, 4, 5, 6, 7, 8];
-    let mut out = [0u8; 8];
-    shuffle_into(&input, &mut out, 4).unwrap();
-    assert_eq!(out, [1, 5, 2, 6, 3, 7, 4, 8]);
+/// Deterministic bytes, no dependency.
+fn pseudo_random(len: usize, seed: u32) -> Vec<u8> {
+    let mut state = seed | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect()
 }
 
 #[test]
-fn shuffle_round_trips_for_every_element_size() {
-    let data: Vec<u8> = (0..240u32).map(|i| (i * 31 % 251) as u8).collect();
-    for size in [1, 2, 4, 8] {
-        let mut shuffled = vec![0; data.len()];
-        let mut back = vec![0; data.len()];
-        shuffle_into(&data, &mut shuffled, size).unwrap();
-        unshuffle_into(&shuffled, &mut back, size).unwrap();
-        assert_eq!(back, data, "element size {size}");
+fn the_transpose_moves_each_bit_across_the_diagonal() {
+    for seed in 1..200u32 {
+        let bytes = pseudo_random(8, seed);
+        let x = u64::from_le_bytes(bytes.clone().try_into().unwrap());
+        let y = transpose8(x);
+        for r in 0..8 {
+            for c in 0..8 {
+                assert_eq!(
+                    (y >> (8 * c + r)) & 1,
+                    (x >> (8 * r + c)) & 1,
+                    "x {x:#018x}"
+                );
+            }
+        }
+        assert_eq!(transpose8(y), x, "its own inverse");
+    }
+}
+
+#[test]
+fn bit_planes_are_laid_out_as_documented() {
+    // Eight u16 elements, then three left over. Element i is i + 2^(9+i%3):
+    // bits 0..3 count up, and one of bits 9..11 is set by turns.
+    let input: Vec<u8> = (0..11u16)
+        .flat_map(|i| (i + (1 << (9 + i % 3))).to_le_bytes())
+        .collect();
+    let mut out = vec![0u8; input.len()];
+    bitshuffle_into(&input, &mut out, 2).unwrap();
+    assert_eq!(out, naive_bitshuffle(&input, 2));
+    // One group of eight: sixteen planes of one byte each.
+    // Plane 0 is bit 0 of elements 0..8: 0,1,0,1,... from the lowest bit up.
+    assert_eq!(out[0], 0b1010_1010);
+    // Plane 1 is bit 1: elements 2, 3, 6, 7.
+    assert_eq!(out[1], 0b1100_1100);
+    // Plane 9 is bit 1 of the high byte, bit 9 overall: elements 0, 3, 6.
+    assert_eq!(out[9], 0b0100_1001);
+    // Planes 12..16, bits 12..16, are empty.
+    assert_eq!(&out[12..16], &[0; 4]);
+    // The three left over follow as they were.
+    assert_eq!(&out[16..], &input[16..]);
+}
+
+#[test]
+fn the_bit_shuffle_round_trips_for_every_element_size_and_length() {
+    for s in [1, 2, 4, 8] {
+        for n in [0, 1, 7, 8, 9, 15, 16, 17, 64, 100, 1000] {
+            let data = pseudo_random(n * s, (n * 31 + s) as u32);
+            let mut shuffled = vec![0; data.len()];
+            let mut back = vec![0; data.len()];
+            bitshuffle_into(&data, &mut shuffled, s).unwrap();
+            assert_eq!(shuffled, naive_bitshuffle(&data, s), "{n} of {s} bytes");
+            bitunshuffle_into(&shuffled, &mut back, s).unwrap();
+            assert_eq!(back, data, "{n} of {s} bytes");
+        }
     }
 }
 
 /// What `encode` makes, built from the dev-dependency so that the tests
 /// needn't enable the `encode-zstd` feature.
 fn zstd_payload(plane: &[u8], element_size: usize) -> Vec<u8> {
-    zstd::bulk::compress(&shuffle(plane, element_size).unwrap(), ZSTD_LEVEL).unwrap()
+    zstd::bulk::compress(&bitshuffle(plane, element_size).unwrap(), ZSTD_LEVEL).unwrap()
 }
 
 #[cfg(feature = "encode-zstd")]
 #[test]
-fn encode_is_shuffle_then_zstd() {
+fn encode_is_bitshuffle_then_zstd() {
     let plane = camera_plane(64, 64);
     assert_eq!(encode(&plane, 2).unwrap(), zstd_payload(&plane, 2));
 }
@@ -75,6 +136,14 @@ fn codec_round_trips_and_compresses_camera_data() {
         "shuffled {} bytes vs plain {plain}",
         encoded.len()
     );
+
+    // And a mask, one bit of each byte used: smaller than the bits packed
+    // eight to a byte, and than zstd makes of it alone.
+    let mask: Vec<u8> = plane.chunks_exact(2).map(|p| (p[0] > 250) as u8).collect();
+    let encoded = zstd_payload(&mask, 1).len();
+    let plain = zstd::bulk::compress(&mask, ZSTD_LEVEL).unwrap().len();
+    assert!(encoded < mask.len() / 8, "{encoded} bytes");
+    assert!(encoded < plain, "{encoded} bytes vs plain {plain}");
 }
 
 #[test]
@@ -124,51 +193,64 @@ fn vectors_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors")
 }
 
-/// Planes the independent reference (numpy + the C libzstd, through the
-/// `zstandard` package, in `python/tests/`) encoded decode to the raw planes
-/// stored beside them. `<name>.e<size>.zst` holds the encoded plane,
-/// `<name>.raw` the expected bytes.
+/// Planes encoded here, `<name>.raw` beside `<name>.e<element size>.zst`,
+/// for the Python extension's and the WASM module's tests to check that
+/// they run this same code: that they decode these, and (Python) encode the
+/// raw planes to these exact bytes. Run with `VIEWCAM_REGEN_VECTORS=1` to
+/// rewrite them after a deliberate change to the format.
 #[test]
-fn decodes_python_encoded_vectors() {
-    let mut seen = 0;
-    for entry in std::fs::read_dir(vectors_dir()).unwrap() {
-        let path = entry.unwrap().path();
-        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
-        let Some(stem) = name.strip_suffix(".zst") else {
-            continue;
-        };
-        if !stem.starts_with("py_") {
-            continue;
-        }
-        let (base, size) = stem.rsplit_once(".e").unwrap();
-        let size: usize = size.parse().unwrap();
-        let raw = std::fs::read(vectors_dir().join(format!("{base}.raw"))).unwrap();
-        let encoded = std::fs::read(&path).unwrap();
-        assert_eq!(decode(&encoded, size, raw.len()).unwrap(), raw, "{name}");
-        seen += 1;
-    }
-    assert!(
-        seen >= 3,
-        "expected Python vectors in {}",
-        vectors_dir().display()
-    );
-}
-
-/// Writes a plane encoded here for the Python test to decode. Run with
-/// `VIEWCAM_REGEN_VECTORS=1`.
-#[test]
-fn rust_encoded_vectors_are_current() {
-    let plane = camera_plane(32, 24);
-    let encoded = zstd_payload(&plane, 2);
-    let raw_path = vectors_dir().join("rs_camera_u16.raw");
-    let zst_path = vectors_dir().join("rs_camera_u16.e2.zst");
-    if std::env::var_os("VIEWCAM_REGEN_VECTORS").is_some() {
+fn encoded_vectors_are_current() {
+    let camera = camera_plane(32, 24);
+    let values = || {
+        camera
+            .chunks_exact(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+    };
+    let planes: [(&str, usize, Vec<u8>); 5] = [
+        ("camera_u16", 2, camera.clone()),
+        ("mask_u8", 1, values().map(|v| (v > 1150) as u8).collect()),
+        (
+            "float_f32",
+            4,
+            values()
+                .flat_map(|v| (v as f32 / 7.0).to_le_bytes())
+                .collect(),
+        ),
+        (
+            "signed_i32",
+            4,
+            values()
+                .flat_map(|v| (v as i32 - 1200).to_le_bytes())
+                .collect(),
+        ),
+        (
+            "dark_f64",
+            8,
+            values()
+                .flat_map(|v| (v as f64 / 3.0).to_le_bytes())
+                .collect(),
+        ),
+    ];
+    let regen = std::env::var_os("VIEWCAM_REGEN_VECTORS").is_some();
+    if regen {
         std::fs::create_dir_all(vectors_dir()).unwrap();
-        std::fs::write(&raw_path, &plane).unwrap();
-        std::fs::write(&zst_path, &encoded).unwrap();
-    } else {
-        assert_eq!(std::fs::read(&raw_path).unwrap(), plane);
-        assert_eq!(std::fs::read(&zst_path).unwrap(), encoded);
+    }
+    for (name, size, plane) in planes {
+        let encoded = zstd_payload(&plane, size);
+        assert_eq!(
+            decode(&encoded, size, plane.len()).unwrap(),
+            plane,
+            "{name}"
+        );
+        let raw_path = vectors_dir().join(format!("{name}.raw"));
+        let zst_path = vectors_dir().join(format!("{name}.e{size}.zst"));
+        if regen {
+            std::fs::write(&raw_path, &plane).unwrap();
+            std::fs::write(&zst_path, &encoded).unwrap();
+        } else {
+            assert_eq!(std::fs::read(&raw_path).unwrap(), plane, "{name}");
+            assert_eq!(std::fs::read(&zst_path).unwrap(), encoded, "{name}");
+        }
     }
 }
 
@@ -263,4 +345,20 @@ fn quantizer_inputs_are_checked() {
         CAMERA.dequantize_into(&[0; 6], 2, 0, &mut out),
         Err(CodecError::ShortOutput { .. })
     ));
+}
+
+#[test]
+fn the_threshold_falls_between_the_levels_code_and_the_one_below() {
+    let level = 16383.0;
+    let threshold = CAMERA.threshold(level);
+    let code = CAMERA.code(level) as i64;
+    assert!(threshold < CAMERA.value(code));
+    assert!(threshold > CAMERA.value(code - 1));
+    // Everything at or above the level comes back at or above the threshold.
+    for value in [level, level + 1.0, level + 500.0] {
+        assert!(
+            CAMERA.value(CAMERA.code(value) as i64) >= threshold,
+            "{value}"
+        );
+    }
 }

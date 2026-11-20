@@ -226,17 +226,17 @@ impl DType {
 pub enum Codec {
     /// The image itself.
     Raw,
-    /// A zstd frame of the image's bytes shuffled by element.
-    ShuffleZstd,
+    /// A zstd frame of the image's bits regrouped into bit planes.
+    BitshuffleZstd,
 }
 
 impl Codec {
-    pub const ALL: [Codec; 2] = [Codec::Raw, Codec::ShuffleZstd];
+    pub const ALL: [Codec; 2] = [Codec::Raw, Codec::BitshuffleZstd];
 
     pub fn code(self) -> u8 {
         match self {
             Codec::Raw => 0,
-            Codec::ShuffleZstd => 1,
+            Codec::BitshuffleZstd => 1,
         }
     }
 
@@ -250,7 +250,7 @@ impl Codec {
     pub fn name(self) -> &'static str {
         match self {
             Codec::Raw => "raw",
-            Codec::ShuffleZstd => "shuffle-zstd",
+            Codec::BitshuffleZstd => "bitshuffle-zstd",
         }
     }
 
@@ -259,7 +259,7 @@ impl Codec {
         match self {
             Codec::Raw => decoded,
             // zstd's worst case, ZSTD_COMPRESSBOUND, frame header included.
-            Codec::ShuffleZstd => {
+            Codec::BitshuffleZstd => {
                 let small = 128 << 10;
                 let margin = if decoded < small {
                     (small - decoded) >> 11

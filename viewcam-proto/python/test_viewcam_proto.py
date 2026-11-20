@@ -29,7 +29,7 @@ class TestVectors(unittest.TestCase):
         )
 
     def test_frame_f32_zstd(self):
-        self.check("frame_f32_zstd", vp.encode_frame(7, 2, 2, 9, ramp(9), vp.CODEC_SHUFFLE_ZSTD))
+        self.check("frame_f32_zstd", vp.encode_frame(7, 2, 2, 9, ramp(9), vp.CODEC_BITSHUFFLE_ZSTD))
 
     def test_frame_empty(self):
         self.check("frame_empty", vp.encode_empty_frame(9, 10))
@@ -38,7 +38,7 @@ class TestVectors(unittest.TestCase):
         q = vp.Quantization(code_offset=-3, bias=432.0, read_noise=14.25, noise_slope=8.5, step=0.25)
         self.check(
             "frame_u8_quantized_zstd",
-            vp.encode_frame(12, 3, 2, 1, ramp(4), vp.CODEC_SHUFFLE_ZSTD, quantization=q),
+            vp.encode_frame(12, 3, 2, 1, ramp(4), vp.CODEC_BITSHUFFLE_ZSTD, quantization=q),
         )
 
     def test_ack(self):
@@ -54,15 +54,15 @@ class TestValidation(unittest.TestCase):
 
     def test_zstd_payload_bounds(self):
         # 4 x 4 u16 = 32 bytes decoded; zstd allows 1 to 32 + 0 + 63 bytes.
-        vp.encode_frame(0, 4, 4, 3, b"\0", vp.CODEC_SHUFFLE_ZSTD)
-        vp.encode_frame(0, 4, 4, 3, b"\0" * 95, vp.CODEC_SHUFFLE_ZSTD)
+        vp.encode_frame(0, 4, 4, 3, b"\0", vp.CODEC_BITSHUFFLE_ZSTD)
+        vp.encode_frame(0, 4, 4, 3, b"\0" * 95, vp.CODEC_BITSHUFFLE_ZSTD)
         for bad in (b"", b"\0" * 96):
             with self.assertRaises(vp.ProtocolError):
-                vp.encode_frame(0, 4, 4, 3, bad, vp.CODEC_SHUFFLE_ZSTD)
+                vp.encode_frame(0, 4, 4, 3, bad, vp.CODEC_BITSHUFFLE_ZSTD)
 
     def test_quantized_frames_need_unsigned_codes_and_a_model(self):
         q = vp.Quantization(0, 432.0, 14.0, 8.0, 0.25)
-        vp.encode_frame(0, 2, 2, 3, b"\0", vp.CODEC_SHUFFLE_ZSTD, quantization=q)
+        vp.encode_frame(0, 2, 2, 3, b"\0", vp.CODEC_BITSHUFFLE_ZSTD, quantization=q)
         bad = [
             (9, q),  # f32 codes
             (1, q._replace(read_noise=0.0)),
@@ -71,7 +71,7 @@ class TestValidation(unittest.TestCase):
         ]
         for dtype, quantization in bad:
             with self.assertRaises(vp.ProtocolError):
-                vp.encode_frame(0, 2, 2, dtype, b"\0", vp.CODEC_SHUFFLE_ZSTD, quantization=quantization)
+                vp.encode_frame(0, 2, 2, dtype, b"\0", vp.CODEC_BITSHUFFLE_ZSTD, quantization=quantization)
 
     def test_unknown_codes(self):
         with self.assertRaises(vp.ProtocolError):

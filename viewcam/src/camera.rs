@@ -8,6 +8,8 @@
 //! the viewer should show from them. Each input is kept as it arrived, so
 //! toggling dark subtraction off and on again needs no resend.
 
+pub use viewcam_codec::Quantizer;
+
 /// One image as handed to the viewer: `f64` pixels, row-major, plus the
 /// display metadata viewarr derives from the source dtype.
 #[derive(Clone, Debug, PartialEq)]
@@ -19,6 +21,11 @@ pub struct Frame {
     pub is_integer: bool,
     /// Decimal places for floating hover values.
     pub value_decimals: usize,
+    /// For a quantized frame (viewcam-proto/PROTOCOL.md, "Quantization"),
+    /// the quantizer whose rounded values `pixels` are. A saturation level
+    /// is compared with them as its threshold, since rounding can bring a
+    /// saturated pixel back a little under the level itself.
+    pub quantization: Option<Quantizer>,
 }
 
 impl Frame {
@@ -125,6 +132,7 @@ impl CameraFrames {
         let (Some(level), Some(data)) = (self.saturation_level, &self.data) else {
             return;
         };
+        let level = data.quantization.map_or(level, |q| q.threshold(level));
         self.saturation = Some(Mask {
             mask: data.pixels.iter().map(|&v| v >= level).collect(),
             width: data.width,
@@ -172,6 +180,7 @@ impl CameraFrames {
             // fractional, so it takes on the dark's precision.
             is_integer: data.is_integer && dark.is_integer,
             value_decimals: data.value_decimals.max(dark.value_decimals),
+            quantization: None,
         })
     }
 
@@ -196,6 +205,7 @@ mod tests {
             height,
             is_integer: true,
             value_decimals: 0,
+            quantization: None,
         }
     }
 
@@ -226,6 +236,7 @@ mod tests {
             height: 1,
             is_integer: false,
             value_decimals: 4,
+            quantization: None,
         }));
 
         let shown = frames.display_image(true).unwrap();
@@ -266,6 +277,7 @@ mod tests {
             height: 2,
             is_integer: false,
             value_decimals: 6,
+            quantization: None,
         }));
         assert_eq!(
             frames.saturation().unwrap().mask,
@@ -297,6 +309,30 @@ mod tests {
         let mask = frames.applicable_saturation().unwrap();
         assert_eq!(mask.mask, vec![true, false, false]);
         assert_eq!((mask.width, mask.height), (3, 1));
+    }
+
+    #[test]
+    fn a_quantized_frame_is_compared_with_the_level_as_its_threshold() {
+        let q = Quantizer {
+            bias: 100.0,
+            read_noise: 4.0,
+            noise_slope: 1.0,
+            step: 0.25,
+        };
+        let level = 1000.0;
+        // The value a pixel at the level comes back as, rounded down a little.
+        let just_under = q.threshold(level) + 1e-6;
+        assert!(just_under < level);
+        let mut frames = CameraFrames::new();
+        frames.set_saturation_level(Some(level));
+        frames.set_data(Frame {
+            quantization: Some(q),
+            ..int_frame(&[0.0, just_under], 2, 1)
+        });
+        assert_eq!(frames.saturation().unwrap().mask, vec![false, true]);
+        // Exact, the same value is under the level.
+        frames.set_data(int_frame(&[0.0, just_under], 2, 1));
+        assert_eq!(frames.saturation().unwrap().mask, vec![false, false]);
     }
 
     #[test]

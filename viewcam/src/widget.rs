@@ -311,6 +311,7 @@ mod tests {
             height,
             is_integer: true,
             value_decimals: 0,
+            quantization: None,
         }
     }
 

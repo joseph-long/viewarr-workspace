@@ -640,8 +640,8 @@ jobs:
       - name: Test the protocol's Python reference
         run: python -m unittest discover -s viewcam-proto/python -v
 
-      # pip builds the extension through maturin; the tests check it against
-      # numpy + the C libzstd in both directions.
+      # pip builds the extension through maturin; the tests check it encodes
+      # and decodes the crate's vectors exactly, being the same code.
       - name: Build and test the codec extension
         run: |
           python -m pip install "./viewcam-codec/python[test]"

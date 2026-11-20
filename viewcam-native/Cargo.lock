@@ -3514,6 +3514,7 @@ dependencies = [
  "js-sys",
  "log",
  "viewarr",
+ "viewcam-codec",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -3524,7 +3525,6 @@ name = "viewcam-codec"
 version = "0.1.0"
 dependencies = [
  "ruzstd",
- "wasm-bindgen",
 ]
 
 [[package]]

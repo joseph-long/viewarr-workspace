@@ -1,12 +1,12 @@
-"""Byte-shuffle + zstd for viewcam frames, and noise-matched quantization.
+"""Bit-shuffle + zstd for viewcam frames, and noise-matched quantization.
 
 The same Rust code (the ``viewcam-codec`` crate) that browsers run as WASM to
 decode frames, built as a Python extension so servers encode with it.
 
-``encode`` produces the payload of the viewcam protocol's ``shuffle-zstd``
-codec: a zstd frame of the image, its bytes first shuffled Blosc-style, all
-elements' byte 0, then all their byte 1, and so on. The ``raw`` codec needs
-no encoding.
+``encode`` produces the payload of the viewcam protocol's
+``bitshuffle-zstd`` codec: a zstd frame of the image, first regrouped into
+bit planes, all elements' bit 0, then all their bit 1, and so on (see the
+crate's docs for the exact layout). The ``raw`` codec needs no encoding.
 
 ``quantize`` rounds an image to a fraction of its noise, given a noise model
 (read noise, and how fast noise variance grows above a bias), for the

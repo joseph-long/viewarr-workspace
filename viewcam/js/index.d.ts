@@ -18,13 +18,26 @@ export type FeedConnection = 'connecting' | 'open' | 'closed';
 /** Create a new camera viewer in the element with this ID. */
 export function createViewer(containerId: string): Promise<void>;
 
-/** Set the science frame (dark-subtracted while that toggle is on). */
+/** A quantized frame's noise model and step (viewcam-proto's `quantization`). */
+export interface Quantization {
+  bias: number;
+  readNoise: number;
+  noiseSlope: number;
+  step: number;
+}
+
+/**
+ * Set the science frame (dark-subtracted while that toggle is on). For a
+ * quantized frame, pass its quantization, so a saturation level is compared
+ * with its rounded values correctly.
+ */
 export function setData(
   containerId: string,
   buffer: ArrayBuffer,
   width: number,
   height: number,
-  dtype: string
+  dtype: string,
+  quantization?: Quantization | null
 ): void;
 
 /** Set the dark frame; kept until replaced or cleared. */
